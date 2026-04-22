@@ -2,9 +2,7 @@
 
 import math
 
-import pytest
 
-from retina_analytics.constants import haversine_km
 from retina_analytics.cross_node import (
     _count_covering_nodes,
     _point_in_beam,

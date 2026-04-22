@@ -4,7 +4,6 @@ import math
 
 from retina_analytics.constants import haversine_km, R_EARTH
 from retina_analytics.detection_area import DetectionAreaState
-from retina_analytics.trust import TrustScoreState
 
 
 def compute_delay_bin_overlap(area_a: DetectionAreaState,
@@ -84,7 +83,6 @@ def coverage_suggestion(areas: list[DetectionAreaState],
     overlap_density = n_overlap_pairs / max_pairs if max_pairs else 0
 
     use_expansion = saturated and overlap_density > 0.3
-    strategy_label = "expansion" if use_expansion else "densification"
 
     for label, bearing_deg in directions:
         bearing_rad = math.radians(bearing_deg)
