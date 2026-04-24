@@ -525,14 +525,20 @@ class InterNodeAssociator:
         if not candidates:
             return []
 
-        # Group by approximate grid location
+        # Group by approximate grid location using a coarse bin (0.05° ≈ 5.6 km).
+        # This is intentionally larger than grid_step_km (3 km) so that candidates
+        # from different pair zones (A-B and A-C) that observe the same aircraft
+        # land in the same bin and are merged into a single 3+-node solver input.
+        # A finer key (e.g. round to 3 d.p. = 110 m) prevents cross-zone merging
+        # because grid points from different overlap zones are never co-located.
+        _MERGE = 0.05  # degrees ≈ 5.6 km
         groups: dict[tuple[float, float], list[AssociationCandidate]] = {}
         for c in candidates:
-            key = (round(c.grid_lat, 3), round(c.grid_lon, 3))
+            key = (round(c.grid_lat / _MERGE) * _MERGE, round(c.grid_lon / _MERGE) * _MERGE)
             groups.setdefault(key, []).append(c)
 
         solver_inputs = []
-        for (g_lat, g_lon), group in groups.items():
+        for _key, group in groups.items():
             measurements = []
             for c in group:
                 measurements.append({
@@ -554,6 +560,12 @@ class InterNodeAssociator:
                 nid = m["node_id"]
                 if nid not in by_node or m["snr"] > by_node[nid]["snr"]:
                     by_node[nid] = m
+
+            # Use centroid of actual grid positions as the initial guess (more
+            # accurate than the rounded bin centre, especially when the group
+            # spans candidates from different overlap zones).
+            g_lat = sum(c.grid_lat for c in group) / len(group)
+            g_lon = sum(c.grid_lon for c in group) / len(group)
 
             solver_inputs.append({
                 "initial_guess": {
