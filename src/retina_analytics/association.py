@@ -380,6 +380,10 @@ class InterNodeAssociator:
         self._ASSOC_MIN_INTERVAL_S: float = 30.0
         self._ASSOC_MAX_NEIGHBORS: int = 50
         self._last_assoc: dict[str, float] = {}  # node_id → last association wall-time
+        # Maximum allowed age difference between two frames being associated.
+        # Aircraft at 250 m/s move ~2.5 km in 10 s; frames further apart than
+        # this produce inconsistent TDOA geometry → large position errors.
+        self._FRAME_SYNC_MAX_AGE_MS: int = 10_000
         self._register_lock = __import__('threading').Lock()
 
     def register_node(self, node_id: str, config: dict):
@@ -484,7 +488,15 @@ class InterNodeAssociator:
             other_frame = self._pending_frames.get(other_id)
             if other_frame is None:
                 continue  # neighbor hasn’t sent a frame yet
-
+            # Gate: only associate frames that are close in time so the aircraft
+            # position is approximately the same in both measurements.  With 40 s
+            # frame intervals, a stale pending frame can be up to 40 s old;
+            # at 250 m/s that is 10 km of aircraft movement — the dominant source
+            # of position error.  Allow up to _FRAME_SYNC_MAX_AGE_MS (10 s),
+            # which caps the timing contribution to ~2.5 km.
+            other_ts = other_frame.get("timestamp", 0)
+            if timestamp_ms > 0 and other_ts > 0 and abs(timestamp_ms - other_ts) > self._FRAME_SYNC_MAX_AGE_MS:
+                continue
             pair_key = tuple(sorted([node_id, other_id]))
             zone = self.overlap_zones.get(pair_key)
             if zone is None or not zone.delay_pairs:
