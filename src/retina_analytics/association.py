@@ -116,12 +116,14 @@ class OverlapZone:
         # Stored as plain attributes (not dataclass fields) to keep repr/hash clean.
         self._np_pred_a = None  # np.ndarray float32 (G,) — predicted delay at node A
         self._np_pred_b = None  # np.ndarray float32 (G,) — predicted delay at node B
+        self._np_grid_alt = None  # np.ndarray float32 (G,) — altitude (km) per grid point
 
     def _ensure_np(self):
         """Build numpy arrays from delay_pairs once; reuse thereafter."""
         if self._np_pred_a is None and self.delay_pairs:
             self._np_pred_a = np.array([dp[0] for dp in self.delay_pairs], dtype=np.float32)
             self._np_pred_b = np.array([dp[1] for dp in self.delay_pairs], dtype=np.float32)
+            self._np_grid_alt = np.array([gp[2] for gp in self.grid_points], dtype=np.float32)
 
 
 @dataclass
@@ -311,13 +313,25 @@ def find_associations(zone: OverlapZone,
 
     candidates: dict[tuple[int, int], AssociationCandidate] = {}
     for i_a, i_b in zip(rows.tolist(), cols.tolist()):
-        # Find the best grid point for this (i_a, i_b) pair: min total residual
+        # Find the best grid point for this (i_a, i_b) pair: min total residual.
+        # Also compute the delay-residual weighted mean altitude across ALL valid
+        # grid points.  Rationale: at the correct altitude layer the residual is
+        # small (≈ noise); at wrong altitude layers the same horizontal position
+        # gives residual ≈ altitude_err × sin(elevation) / c ≈ 0.6–3 µs.  A
+        # 1/(residual + ε) weighting strongly favours the correct altitude while
+        # averaging over the noise, eliminating the argmin tie-break bias toward
+        # the lowest layer (3 km).
         valid_g = np.nonzero(gate_a[i_a] & gate_b[:, i_b])[0]
         if valid_g.size == 0:
             continue
         res   = np.abs(pred_a[valid_g] - da[i_a]) + np.abs(pred_b[valid_g] - db[i_b])
         best_g = int(valid_g[np.argmin(res)])
-        g_lat, g_lon, g_alt = zone.grid_points[best_g]
+        g_lat, g_lon, _ = zone.grid_points[best_g]
+
+        # Weighted mean altitude (1/(res + ε) weights)
+        _ALT_EPS = np.float32(0.05)  # µs — smoothing; prevents 1/0
+        alt_w = 1.0 / (res + _ALT_EPS)
+        g_alt = float(np.dot(alt_w, zone._np_grid_alt[valid_g]) / np.sum(alt_w))
 
         cand = AssociationCandidate(
             timestamp_ms  = timestamp_ms,
