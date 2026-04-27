@@ -20,6 +20,7 @@ Key concepts:
 """
 
 import math
+from collections import defaultdict
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -537,20 +538,57 @@ class InterNodeAssociator:
         if not candidates:
             return []
 
-        # Group by approximate grid location using a coarse bin (0.05° ≈ 5.6 km).
-        # This is intentionally larger than grid_step_km (3 km) so that candidates
-        # from different pair zones (A-B and A-C) that observe the same aircraft
-        # land in the same bin and are merged into a single 3+-node solver input.
-        # A finer key (e.g. round to 3 d.p. = 110 m) prevents cross-zone merging
-        # because grid points from different overlap zones are never co-located.
-        _MERGE = 0.05  # degrees ≈ 5.6 km
-        groups: dict[tuple[float, float], list[AssociationCandidate]] = {}
-        for c in candidates:
-            key = (round(c.grid_lat / _MERGE) * _MERGE, round(c.grid_lon / _MERGE) * _MERGE)
-            groups.setdefault(key, []).append(c)
+        # ── Step 1: Proximity-based clustering ───────────────────────────────
+        # Group candidates whose grid positions are within _MERGE_DIST_KM of
+        # each other using Union-Find.
+        #
+        # WHY: with grid_step_km=3.0, two grid points from *different* overlap
+        # zones (each with its own ENU origin) for the *same* aircraft can be up
+        # to grid_step × √2 ≈ 4.24 km apart.  The previous rigid-bin approach
+        # used 0.05° ≈ 5.6 km bins.  The straddling probability for points 4.24
+        # km apart in a 5.6 km bin is 4.24/5.6 ≈ 75%, meaning ~75% of genuine
+        # n≥3 candidates from different overlap zones ended up in different bins
+        # and were never merged.  Proximity-based clustering eliminates this
+        # boundary effect: any two candidates within _MERGE_DIST_KM always land
+        # in the same cluster regardless of phase alignment.
+        _MERGE_DIST_KM = 6.0  # > grid_step × √2 = 4.24 km (max inter-zone skew)
+
+        n = len(candidates)
+        parent = list(range(n))
+
+        def _find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]  # path compression
+                x = parent[x]
+            return x
+
+        def _union(x: int, y: int) -> None:
+            parent[_find(x)] = _find(y)
+
+        # Pairwise distance check (numpy, O(N²)).  For typical N ≤ 200
+        # candidates per association round: 40 K comparisons ≈ 1 ms.
+        lats = np.array([c.grid_lat for c in candidates], dtype=np.float64)
+        lons = np.array([c.grid_lon for c in candidates], dtype=np.float64)
+        mid_lat = float(np.mean(lats))
+        km_per_lat = R_EARTH * math.pi / 180.0
+        km_per_lon = km_per_lat * math.cos(math.radians(mid_lat))
+        dlat_km = (lats[:, None] - lats) * km_per_lat
+        dlon_km = (lons[:, None] - lons) * km_per_lon
+        dist_sq = dlat_km ** 2 + dlon_km ** 2
+        merge_sq = _MERGE_DIST_KM ** 2
+
+        row_idx, col_idx = np.where(
+            (dist_sq < merge_sq) & (np.arange(n)[:, None] < np.arange(n))
+        )
+        for i, j in zip(row_idx.tolist(), col_idx.tolist()):
+            _union(i, j)
+
+        raw_groups: dict[int, list[AssociationCandidate]] = defaultdict(list)
+        for i, c in enumerate(candidates):
+            raw_groups[_find(i)].append(c)
 
         solver_inputs = []
-        for _key, group in groups.items():
+        for group in raw_groups.values():
             measurements = []
             for c in group:
                 measurements.append({
@@ -579,11 +617,22 @@ class InterNodeAssociator:
             g_lat = sum(c.grid_lat for c in group) / len(group)
             g_lon = sum(c.grid_lon for c in group) / len(group)
 
+            # Choose the initial-guess altitude from the candidate with the
+            # smallest delay residual — the grid point that best matched the
+            # measured delays during association.  For n=2, this becomes the
+            # tie-breaking altitude in _solve_best_altitude_n2 when rms_doppler
+            # is degenerate across layers; for n≥3 the altitude sweep ignores
+            # it anyway.
+            best_cand = min(
+                group,
+                key=lambda c: abs(c.delay_a - c.grid_delay_a) + abs(c.delay_b - c.grid_delay_b),
+            )
+
             solver_inputs.append({
                 "initial_guess": {
                     "lat": g_lat,
                     "lon": g_lon,
-                    "alt_km": group[0].grid_alt_km,
+                    "alt_km": best_cand.grid_alt_km,
                 },
                 "measurements": list(by_node.values()),
                 "n_nodes": len(by_node),

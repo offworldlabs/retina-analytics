@@ -95,8 +95,8 @@ class TestInterNodeAssociator:
     def test_format_candidates_merges_cross_zone_pairs(self):
         """Candidates from pairs (A-B) and (A-C) near the same aircraft must be
         merged into one solver input with n_nodes == 3, not two separate 2-node
-        inputs.  The fix uses a 0.05° bin instead of 0.001° so grid points from
-        different overlap zones that are < 5 km apart collapse into one group.
+        inputs.  Proximity-based clustering (6 km threshold) ensures grid points
+        from different overlap zones that are < 6 km apart collapse into one group.
         """
         from retina_analytics.association import AssociationCandidate
 
