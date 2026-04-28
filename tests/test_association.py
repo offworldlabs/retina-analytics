@@ -140,6 +140,78 @@ class TestInterNodeAssociator:
             f"Expected n_nodes=3 (A, B, C merged), got {solver_inputs[0]['n_nodes']}"
         )
 
+    def test_ghost_filter_rejects_clutter_pairing(self):
+        """Clutter × real pairing (adsb[i_a]=None) must be rejected."""
+        from retina_analytics.association import OverlapZone, find_associations
+
+        zone = OverlapZone(
+            node_a_id="A", node_b_id="B",
+            grid_points=[(33.9, -84.5, 9.0)],
+            delay_pairs=[(10.0, 20.0)],
+            delay_gate_us=5.0,
+            doppler_gate_hz=30.0,
+        )
+        frame_a = {"delay": [9.5], "doppler": [0.0], "snr": [10.0],
+                   "adsb": [None]}  # i_a=0 is clutter
+        frame_b = {"delay": [20.5], "doppler": [0.0], "snr": [10.0],
+                   "adsb": [{"hex": "abc123", "alt_baro": 35000, "lat": 33.9, "lon": -84.5}]}
+        candidates = find_associations(zone, frame_a, frame_b, timestamp_ms=1000)
+        assert len(candidates) == 0, "Clutter×real ghost should be rejected"
+
+    def test_ghost_filter_accepts_real_real_pairing(self):
+        """Both detections have valid ADS-B → pairing accepted with ADS-B altitude."""
+        from retina_analytics.association import OverlapZone, find_associations
+
+        zone = OverlapZone(
+            node_a_id="A", node_b_id="B",
+            grid_points=[(33.9, -84.5, 9.0)],
+            delay_pairs=[(10.0, 20.0)],
+            delay_gate_us=5.0,
+            doppler_gate_hz=30.0,
+        )
+        ac = {"hex": "abc123", "alt_baro": 35000, "lat": 33.9, "lon": -84.5}
+        frame_a = {"delay": [9.5], "doppler": [0.0], "snr": [10.0], "adsb": [ac]}
+        frame_b = {"delay": [20.5], "doppler": [0.0], "snr": [10.0], "adsb": [ac]}
+        candidates = find_associations(zone, frame_a, frame_b, timestamp_ms=1000)
+        assert len(candidates) == 1, "Real×real pairing should be accepted"
+        # ADS-B altitude (35000 ft → 10.668 km) should override the 9.0 km grid layer
+        expected_alt_km = 35000 * 0.3048 / 1000
+        assert abs(candidates[0].grid_alt_km - expected_alt_km) < 0.01
+
+    def test_ghost_filter_no_adsb_passes_through(self):
+        """No adsb in either frame → ghost filter is a no-op (non-ADS-B aircraft)."""
+        from retina_analytics.association import OverlapZone, find_associations
+
+        zone = OverlapZone(
+            node_a_id="A", node_b_id="B",
+            grid_points=[(33.9, -84.5, 9.0)],
+            delay_pairs=[(10.0, 20.0)],
+            delay_gate_us=5.0,
+            doppler_gate_hz=30.0,
+        )
+        frame_a = {"delay": [9.5], "doppler": [0.0], "snr": [10.0]}  # no adsb field
+        frame_b = {"delay": [20.5], "doppler": [0.0], "snr": [10.0]}
+        candidates = find_associations(zone, frame_a, frame_b, timestamp_ms=1000)
+        assert len(candidates) == 1, "No-ADS-B aircraft should pass through"
+        assert candidates[0].grid_alt_km == 9.0, "Grid altitude used when no ADS-B"
+
+    def test_ghost_filter_real_clutter_pairing_rejected(self):
+        """Real × clutter pairing (adsb[i_b]=None) must also be rejected."""
+        from retina_analytics.association import OverlapZone, find_associations
+
+        zone = OverlapZone(
+            node_a_id="A", node_b_id="B",
+            grid_points=[(33.9, -84.5, 9.0)],
+            delay_pairs=[(10.0, 20.0)],
+            delay_gate_us=5.0,
+            doppler_gate_hz=30.0,
+        )
+        ac = {"hex": "abc123", "alt_baro": 35000, "lat": 33.9, "lon": -84.5}
+        frame_a = {"delay": [9.5], "doppler": [0.0], "snr": [10.0], "adsb": [ac]}
+        frame_b = {"delay": [20.5], "doppler": [0.0], "snr": [10.0], "adsb": [None]}
+        candidates = find_associations(zone, frame_a, frame_b, timestamp_ms=1000)
+        assert len(candidates) == 0, "Real×clutter ghost should be rejected"
+
     def test_format_candidates_keeps_distant_aircraft_separate(self):
         """Two aircraft > 5.6 km apart must produce separate solver inputs."""
         from retina_analytics.association import AssociationCandidate

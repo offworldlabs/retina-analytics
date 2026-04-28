@@ -309,6 +309,10 @@ def find_associations(zone: OverlapZone,
     sa_arr = np.array(snrs_a if len(snrs_a) == na else [0.0] * na, dtype=np.float32)
     sb_arr = np.array(snrs_b if len(snrs_b) == nb else [0.0] * nb, dtype=np.float32)
 
+    # ADS-B lists are constant for the whole frame — read once outside the loop.
+    _adsb_list_a = frame_a.get("adsb")
+    _adsb_list_b = frame_b.get("adsb")
+
     candidates: dict[tuple[int, int], AssociationCandidate] = {}
     for i_a, i_b in zip(rows.tolist(), cols.tolist()):
         # Find the best grid point for this (i_a, i_b) pair: min total residual.
@@ -326,18 +330,39 @@ def find_associations(zone: OverlapZone,
         best_g = int(valid_g[np.argmin(res)])
         g_lat, g_lon, g_alt = zone.grid_points[best_g]
 
-        # Override grid altitude with ADS-B altitude when available.
-        # ADS-B altitude is exact (to ~10 m) while the pre-computed grid only has
-        # discrete layers (e.g. 5, 7, 9, 11 km), introducing up to ±1 km altitude
-        # error that translates into a ~3× larger horizontal position error.
-        # Use frame_a's ADS-B list (indexed by detection index) when present.
-        # Require alt_baro > 100 ft to exclude false-zero reports from uncorrelated
-        # clutter detections (clutter entries may have adsb=None or alt_baro=0).
-        _adsb_list_a = frame_a.get("adsb")
-        if _adsb_list_a and i_a < len(_adsb_list_a):
-            _ae = _adsb_list_a[i_a]
-            if isinstance(_ae, dict) and (_ae.get("alt_baro") or 0) > 100:
-                g_alt = float(_ae["alt_baro"]) * 0.3048 / 1000.0  # ft → km
+        # ── Ghost-association filter ─────────────────────────────────────────
+        # Ghost associations arise when a clutter detection from one node is
+        # paired (via the delay gate) with a real-aircraft detection from the
+        # other.  In the simulation every genuine aircraft detection carries an
+        # ADS-B entry; clutter detections have adsb[i]=None.  If either frame
+        # has an ADS-B list we can therefore test both indices: if one is None
+        # (clutter) we reject the pairing before it ever reaches the solver.
+        # When NEITHER frame has an ADS-B list (rare: non-ADS-B aircraft, or
+        # clutter-only frames) we let the pairing through — the downstream
+        # rms_delay and beam-coverage checks provide the last line of defence.
+        _ae_a = (_adsb_list_a[i_a]
+                 if _adsb_list_a is not None and i_a < len(_adsb_list_a)
+                 else None)
+        _ae_b = (_adsb_list_b[i_b]
+                 if _adsb_list_b is not None and i_b < len(_adsb_list_b)
+                 else None)
+        if _adsb_list_a is not None or _adsb_list_b is not None:
+            # At least one frame has ADS-B capability; require both indices to
+            # correspond to genuine aircraft (non-None dict entries).
+            if not isinstance(_ae_a, dict):
+                continue  # i_a is clutter — ghost pairing
+            if not isinstance(_ae_b, dict):
+                continue  # i_b is clutter — ghost pairing
+
+        # ── ADS-B altitude override ──────────────────────────────────────────
+        # ADS-B altitude is exact (to ~10 m) while the pre-computed grid only
+        # has discrete layers (e.g. 5, 7, 9, 11 km), introducing up to ±1 km
+        # altitude error.  Prefer frame_a; fall back to frame_b.
+        # Require alt_baro > 100 ft to exclude spurious zero reports.
+        if isinstance(_ae_a, dict) and (_ae_a.get("alt_baro") or 0) > 100:
+            g_alt = float(_ae_a["alt_baro"]) * 0.3048 / 1000.0  # ft → km
+        elif isinstance(_ae_b, dict) and (_ae_b.get("alt_baro") or 0) > 100:
+            g_alt = float(_ae_b["alt_baro"]) * 0.3048 / 1000.0  # ft → km
 
         cand = AssociationCandidate(
             timestamp_ms  = timestamp_ms,
