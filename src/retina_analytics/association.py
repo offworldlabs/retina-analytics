@@ -144,6 +144,10 @@ class AssociationCandidate:
     grid_lat: float
     grid_lon: float
     grid_alt_km: float
+    # True iff grid_lat/grid_lon were overridden with the reported ADS-B
+    # position (frame_a or frame_b).  Used by format_candidates_for_solver to
+    # prefer ADS-B-anchored candidates as the cluster centroid initial guess.
+    had_adsb_override: bool = False
 
 
 # ── Pre-computation ──────────────────────────────────────────────────────────
@@ -398,8 +402,10 @@ def find_associations(zone: OverlapZone,
             _al, _ao = _ae_b.get("lat"), _ae_b.get("lon")
             if _al and _ao:
                 _adsb_lat, _adsb_lon = float(_al), float(_ao)
+        _had_adsb_override = False
         if _adsb_lat is not None and _adsb_lon is not None:
             g_lat, g_lon = _adsb_lat, _adsb_lon
+            _had_adsb_override = True
 
         cand = AssociationCandidate(
             timestamp_ms  = timestamp_ms,
@@ -418,6 +424,7 @@ def find_associations(zone: OverlapZone,
             grid_lat      = g_lat,
             grid_lon      = g_lon,
             grid_alt_km   = g_alt,
+            had_adsb_override = _had_adsb_override,
         )
         key = (i_a, i_b)
         existing = candidates.get(key)
@@ -699,8 +706,20 @@ class InterNodeAssociator:
             # Use centroid of actual grid positions as the initial guess (more
             # accurate than the rounded bin centre, especially when the group
             # spans candidates from different overlap zones).
-            g_lat = sum(c.grid_lat for c in group) / len(group)
-            g_lon = sum(c.grid_lon for c in group) / len(group)
+            #
+            # If ANY candidate in the group has an ADS-B-overridden position,
+            # restrict the centroid to those candidates only.  The bistatic-grid
+            # positions of non-ADS-B candidates have ±3 km resolution and can
+            # dilute the ADS-B-anchored centroid, sometimes pushing the initial
+            # guess outside the n=2 displacement gate or producing a low-quality
+            # solve far from the true position.
+            _adsb_group = [c for c in group if c.had_adsb_override]
+            if _adsb_group:
+                g_lat = sum(c.grid_lat for c in _adsb_group) / len(_adsb_group)
+                g_lon = sum(c.grid_lon for c in _adsb_group) / len(_adsb_group)
+            else:
+                g_lat = sum(c.grid_lat for c in group) / len(group)
+                g_lon = sum(c.grid_lon for c in group) / len(group)
 
             # Use the altitude of the best-matching grid point (min delay
             # residual) from each candidate, then take the mean across the
