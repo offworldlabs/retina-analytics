@@ -464,9 +464,12 @@ class InterNodeAssociator:
         self._ASSOC_MAX_NEIGHBORS: int = 50
         self._last_assoc: dict[str, float] = {}  # node_id → last association wall-time
         # Maximum allowed age difference between two frames being associated.
-        # Aircraft at 250 m/s move ~2.5 km in 10 s; frames further apart than
+        # Aircraft at 250 m/s move ~1.25 km in 5 s; frames further apart than
         # this produce inconsistent TDOA geometry → large position errors.
-        self._FRAME_SYNC_MAX_AGE_MS: int = 10_000
+        # With per-node ADS-B at 1 s intervals and 200-node fleets, ~5 frames
+        # arrive every second across the fleet, so 5 s is plenty for finding
+        # synchronised pairs.
+        self._FRAME_SYNC_MAX_AGE_MS: int = 5_000
         self._register_lock = __import__('threading').Lock()
 
     def register_node(self, node_id: str, config: dict):
@@ -575,8 +578,8 @@ class InterNodeAssociator:
             # position is approximately the same in both measurements.  With 40 s
             # frame intervals, a stale pending frame can be up to 40 s old;
             # at 250 m/s that is 10 km of aircraft movement — the dominant source
-            # of position error.  Allow up to _FRAME_SYNC_MAX_AGE_MS (10 s),
-            # which caps the timing contribution to ~2.5 km.
+            # of position error.  Allow up to _FRAME_SYNC_MAX_AGE_MS (5 s),
+            # which caps the timing contribution to ~1.25 km.
             other_ts = other_frame.get("timestamp", 0)
             if timestamp_ms > 0 and other_ts > 0 and abs(timestamp_ms - other_ts) > self._FRAME_SYNC_MAX_AGE_MS:
                 continue
