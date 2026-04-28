@@ -116,14 +116,12 @@ class OverlapZone:
         # Stored as plain attributes (not dataclass fields) to keep repr/hash clean.
         self._np_pred_a = None  # np.ndarray float32 (G,) — predicted delay at node A
         self._np_pred_b = None  # np.ndarray float32 (G,) — predicted delay at node B
-        self._np_grid_alt = None  # np.ndarray float32 (G,) — altitude (km) per grid point
 
     def _ensure_np(self):
         """Build numpy arrays from delay_pairs once; reuse thereafter."""
         if self._np_pred_a is None and self.delay_pairs:
             self._np_pred_a = np.array([dp[0] for dp in self.delay_pairs], dtype=np.float32)
             self._np_pred_b = np.array([dp[1] for dp in self.delay_pairs], dtype=np.float32)
-            self._np_grid_alt = np.array([gp[2] for gp in self.grid_points], dtype=np.float32)
 
 
 @dataclass
@@ -169,7 +167,7 @@ def _point_in_beam(lat, lon, geo: NodeGeometry) -> bool:
 
 def compute_overlap_zone(geo_a: NodeGeometry, geo_b: NodeGeometry,
                          grid_step_km: float = 3.0,
-                         altitudes_km: tuple[float, ...] = (3.0, 6.0, 9.0, 12.0),
+                         altitudes_km: tuple[float, ...] = (7.0, 9.0, 11.0),
                          delay_gate_us: float = 5.0,
                          doppler_gate_hz: float = 30.0) -> OverlapZone:
     """Pre-compute the overlap zone between two nodes.
@@ -326,12 +324,7 @@ def find_associations(zone: OverlapZone,
             continue
         res   = np.abs(pred_a[valid_g] - da[i_a]) + np.abs(pred_b[valid_g] - db[i_b])
         best_g = int(valid_g[np.argmin(res)])
-        g_lat, g_lon, _ = zone.grid_points[best_g]
-
-        # Weighted mean altitude (1/(res + ε) weights)
-        _ALT_EPS = np.float32(0.05)  # µs — smoothing; prevents 1/0
-        alt_w = 1.0 / (res + _ALT_EPS)
-        g_alt = float(np.dot(alt_w, zone._np_grid_alt[valid_g]) / np.sum(alt_w))
+        g_lat, g_lon, g_alt = zone.grid_points[best_g]
 
         cand = AssociationCandidate(
             timestamp_ms  = timestamp_ms,
@@ -631,31 +624,12 @@ class InterNodeAssociator:
             g_lat = sum(c.grid_lat for c in group) / len(group)
             g_lon = sum(c.grid_lon for c in group) / len(group)
 
-            # Choose the initial-guess altitude as the delay-residual weighted
-            # mean of all candidate altitudes in the group.
-            #
-            # WHY NOT min-residual: when multiple altitude layers all pass the
-            # 5 µs delay gate (altitude ambiguity at far-field positions), the
-            # min-residual selection is noisy and biased toward the first/lowest
-            # layer (3 km), producing 5-6 km altitude errors.
-            #
-            # WEIGHTED MEAN: weight each candidate by 1 / (residual + ε).
-            # When the correct altitude layer has distinctly smaller residuals
-            # it wins by a large margin.  When all layers tie (residual≈0 for
-            # all — the typical n=2 case), weights are equal and the mean falls
-            # back to ≈(3+6+9+12)/4 = 7.5 km, which is the expected altitude
-            # of simulation-generated aircraft and far more accurate than
-            # always using the lowest layer (3 km).
-            _EPS = 0.05  # µs — smoothing constant; prevents 1/0 and limits
-                         # the dominance of any single candidate
-            total_w = 0.0
-            total_wz = 0.0
-            for c in group:
-                res = abs(c.delay_a - c.grid_delay_a) + abs(c.delay_b - c.grid_delay_b)
-                w = 1.0 / (res + _EPS)
-                total_w += w
-                total_wz += w * c.grid_alt_km
-            g_alt_km = total_wz / total_w if total_w > 0 else 7.5
+            # Use the altitude of the best-matching grid point (min delay
+            # residual) from each candidate, then take the mean across the
+            # group.  Layers are restricted to [7, 9, 11] km so low-altitude
+            # bistatic ghost solutions (which can map to positions hundreds of
+            # km away) are never considered.
+            g_alt_km = sum(c.grid_alt_km for c in group) / len(group)
 
             solver_inputs.append({
                 "initial_guess": {
