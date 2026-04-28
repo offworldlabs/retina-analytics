@@ -379,6 +379,28 @@ def find_associations(zone: OverlapZone,
         elif isinstance(_ae_b, dict) and (_ae_b.get("alt_baro") or 0) > 100:
             g_alt = float(_ae_b["alt_baro"]) * 0.3048 / 1000.0  # ft → km
 
+        # ── ADS-B position override (initial-guess refinement) ───────────────
+        # The grid initial guess has ±3 km resolution (grid_step_km).  For an
+        # n=2 solve with one TDOA measurement the solver picks the point on the
+        # hyperboloid closest to the initial guess; a 3 km offset can produce a
+        # 5+ km position error even when the delay fit is perfect.
+        # When the ADS-B entry carries a reported lat/lon (simulation always
+        # provides this; real aircraft transponders also include it) we override
+        # g_lat/g_lon with the ADS-B position so the solver starts within ~100 m
+        # of the true position.  Prefer frame_a; fall back to frame_b.
+        _adsb_lat: float | None = None
+        _adsb_lon: float | None = None
+        if isinstance(_ae_a, dict):
+            _al, _ao = _ae_a.get("lat"), _ae_a.get("lon")
+            if _al and _ao:
+                _adsb_lat, _adsb_lon = float(_al), float(_ao)
+        if _adsb_lat is None and isinstance(_ae_b, dict):
+            _al, _ao = _ae_b.get("lat"), _ae_b.get("lon")
+            if _al and _ao:
+                _adsb_lat, _adsb_lon = float(_al), float(_ao)
+        if _adsb_lat is not None and _adsb_lon is not None:
+            g_lat, g_lon = _adsb_lat, _adsb_lon
+
         cand = AssociationCandidate(
             timestamp_ms  = timestamp_ms,
             node_a_id     = zone.node_a_id,

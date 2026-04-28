@@ -248,6 +248,58 @@ class TestInterNodeAssociator:
         assert len(candidates) == 1, "Same-aircraft pairing should be accepted"
         assert abs(candidates[0].grid_alt_km - 35000 * 0.3048 / 1000) < 0.01
 
+    def test_adsb_position_override_replaces_grid_initial_guess(self):
+        """ADS-B lat/lon in the frame must override the coarse grid position."""
+        from retina_analytics.association import OverlapZone, find_associations
+
+        # Grid point is at (33.9, -84.5).  ADS-B reports the aircraft 0.2° away.
+        zone = OverlapZone(
+            node_a_id="A", node_b_id="B",
+            grid_points=[(33.9, -84.5, 9.0)],
+            delay_pairs=[(10.0, 20.0)],
+            delay_gate_us=5.0,
+            doppler_gate_hz=30.0,
+        )
+        ac = {
+            "hex": "aabbcc",
+            "alt_baro": 30000,
+            "lat": 34.10,
+            "lon": -84.70,
+        }
+        frame_a = {"delay": [9.5], "doppler": [0.0], "snr": [10.0], "adsb": [ac]}
+        frame_b = {"delay": [20.5], "doppler": [0.0], "snr": [10.0], "adsb": [ac]}
+        candidates = find_associations(zone, frame_a, frame_b, timestamp_ms=1000)
+        assert len(candidates) == 1
+        cand = candidates[0]
+        # Initial guess must come from ADS-B, not the grid point.
+        assert abs(cand.grid_lat - 34.10) < 1e-5, (
+            f"Expected grid_lat≈34.10 (ADS-B), got {cand.grid_lat}"
+        )
+        assert abs(cand.grid_lon - (-84.70)) < 1e-5, (
+            f"Expected grid_lon≈-84.70 (ADS-B), got {cand.grid_lon}"
+        )
+
+    def test_adsb_position_override_fallback_to_frame_b(self):
+        """If frame_a has no lat/lon, frame_b lat/lon must be used as fallback."""
+        from retina_analytics.association import OverlapZone, find_associations
+
+        zone = OverlapZone(
+            node_a_id="A", node_b_id="B",
+            grid_points=[(33.9, -84.5, 9.0)],
+            delay_pairs=[(10.0, 20.0)],
+            delay_gate_us=5.0,
+            doppler_gate_hz=30.0,
+        )
+        ac_a = {"hex": "aabbcc", "alt_baro": 30000}          # no lat/lon
+        ac_b = {"hex": "aabbcc", "alt_baro": 30000, "lat": 34.20, "lon": -84.80}
+        frame_a = {"delay": [9.5], "doppler": [0.0], "snr": [10.0], "adsb": [ac_a]}
+        frame_b = {"delay": [20.5], "doppler": [0.0], "snr": [10.0], "adsb": [ac_b]}
+        candidates = find_associations(zone, frame_a, frame_b, timestamp_ms=1000)
+        assert len(candidates) == 1
+        cand = candidates[0]
+        assert abs(cand.grid_lat - 34.20) < 1e-5
+        assert abs(cand.grid_lon - (-84.80)) < 1e-5
+
     def test_format_candidates_keeps_distant_aircraft_separate(self):
         """Two aircraft > 5.6 km apart must produce separate solver inputs."""
         from retina_analytics.association import AssociationCandidate
