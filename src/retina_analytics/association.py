@@ -354,6 +354,21 @@ def find_associations(zone: OverlapZone,
             if not isinstance(_ae_b, dict):
                 continue  # i_b is clutter — ghost pairing
 
+        # ── Same-aircraft filter ─────────────────────────────────────────────
+        # When both frames carry ADS-B entries with a hex ICAO code, both
+        # detections MUST belong to the same physical aircraft.  The shared
+        # SimulationWorld assigns a single adsb_hex per aircraft, so every
+        # SyntheticNodeView reports the same hex for the same target.
+        # Different aircraft that happen to satisfy the delay gate (cross-
+        # pairings) will have different hex codes → reject them here.
+        # Only applied when BOTH entries carry a non-empty "hex" field; if
+        # either is absent (non-ADS-B aircraft, legacy data) we pass through.
+        if isinstance(_ae_a, dict) and isinstance(_ae_b, dict):
+            _hex_a = _ae_a.get("hex")
+            _hex_b = _ae_b.get("hex")
+            if _hex_a and _hex_b and _hex_a != _hex_b:
+                continue  # different aircraft — cross-pairing rejected
+
         # ── ADS-B altitude override ──────────────────────────────────────────
         # ADS-B altitude is exact (to ~10 m) while the pre-computed grid only
         # has discrete layers (e.g. 5, 7, 9, 11 km), introducing up to ±1 km

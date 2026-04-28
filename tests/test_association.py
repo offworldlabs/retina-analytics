@@ -212,6 +212,42 @@ class TestInterNodeAssociator:
         candidates = find_associations(zone, frame_a, frame_b, timestamp_ms=1000)
         assert len(candidates) == 0, "Real×clutter ghost should be rejected"
 
+    def test_same_aircraft_filter_rejects_cross_pairing(self):
+        """Cross-pairing of two different real aircraft must be rejected."""
+        from retina_analytics.association import OverlapZone, find_associations
+
+        zone = OverlapZone(
+            node_a_id="A", node_b_id="B",
+            grid_points=[(33.9, -84.5, 9.0)],
+            delay_pairs=[(10.0, 20.0)],
+            delay_gate_us=5.0,
+            doppler_gate_hz=30.0,
+        )
+        ac_a = {"hex": "aaa111", "alt_baro": 35000}
+        ac_b = {"hex": "bbb222", "alt_baro": 35000}
+        frame_a = {"delay": [9.5], "doppler": [0.0], "snr": [10.0], "adsb": [ac_a]}
+        frame_b = {"delay": [20.5], "doppler": [0.0], "snr": [10.0], "adsb": [ac_b]}
+        candidates = find_associations(zone, frame_a, frame_b, timestamp_ms=1000)
+        assert len(candidates) == 0, "Different-aircraft cross-pairing should be rejected"
+
+    def test_same_aircraft_filter_accepts_same_hex(self):
+        """Pairing where both frames carry the same hex must pass through."""
+        from retina_analytics.association import OverlapZone, find_associations
+
+        zone = OverlapZone(
+            node_a_id="A", node_b_id="B",
+            grid_points=[(33.9, -84.5, 9.0)],
+            delay_pairs=[(10.0, 20.0)],
+            delay_gate_us=5.0,
+            doppler_gate_hz=30.0,
+        )
+        ac = {"hex": "abc123", "alt_baro": 35000}
+        frame_a = {"delay": [9.5], "doppler": [0.0], "snr": [10.0], "adsb": [ac]}
+        frame_b = {"delay": [20.5], "doppler": [0.0], "snr": [10.0], "adsb": [ac]}
+        candidates = find_associations(zone, frame_a, frame_b, timestamp_ms=1000)
+        assert len(candidates) == 1, "Same-aircraft pairing should be accepted"
+        assert abs(candidates[0].grid_alt_km - 35000 * 0.3048 / 1000) < 0.01
+
     def test_format_candidates_keeps_distant_aircraft_separate(self):
         """Two aircraft > 5.6 km apart must produce separate solver inputs."""
         from retina_analytics.association import AssociationCandidate
