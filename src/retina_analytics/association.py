@@ -326,6 +326,19 @@ def find_associations(zone: OverlapZone,
         best_g = int(valid_g[np.argmin(res)])
         g_lat, g_lon, g_alt = zone.grid_points[best_g]
 
+        # Override grid altitude with ADS-B altitude when available.
+        # ADS-B altitude is exact (to ~10 m) while the pre-computed grid only has
+        # discrete layers (e.g. 5, 7, 9, 11 km), introducing up to ±1 km altitude
+        # error that translates into a ~3× larger horizontal position error.
+        # Use frame_a's ADS-B list (indexed by detection index) when present.
+        # Require alt_baro > 100 ft to exclude false-zero reports from uncorrelated
+        # clutter detections (clutter entries may have adsb=None or alt_baro=0).
+        _adsb_list_a = frame_a.get("adsb")
+        if _adsb_list_a and i_a < len(_adsb_list_a):
+            _ae = _adsb_list_a[i_a]
+            if isinstance(_ae, dict) and (_ae.get("alt_baro") or 0) > 100:
+                g_alt = float(_ae["alt_baro"]) * 0.3048 / 1000.0  # ft → km
+
         cand = AssociationCandidate(
             timestamp_ms  = timestamp_ms,
             node_a_id     = zone.node_a_id,
