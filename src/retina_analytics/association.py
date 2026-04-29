@@ -489,7 +489,7 @@ class InterNodeAssociator:
         # geographic cluster (5-10 nodes) span ≤ 2 s.  A 3 s window lets all
         # intra-cluster pairs associate while rejecting distant inter-cluster
         # pairs whose timing error (Δt × v) would otherwise dominate.
-        self._FRAME_SYNC_MAX_AGE_MS: int = 3_000
+        self._FRAME_SYNC_MAX_AGE_MS: int = 4_000
         self._register_lock = __import__('threading').Lock()
 
     def register_node(self, node_id: str, config: dict):
