@@ -148,6 +148,11 @@ class AssociationCandidate:
     # position (frame_a or frame_b).  Used by format_candidates_for_solver to
     # prefer ADS-B-anchored candidates as the cluster centroid initial guess.
     had_adsb_override: bool = False
+    # ICAO hex code confirmed for this candidate (both frames agreed, or one
+    # frame provided it).  None when neither ADS-B entry carries a hex field.
+    # Propagated to the solver input so the solver worker can maintain a
+    # per-aircraft position history for multi-epoch EWMA smoothing.
+    adsb_hex: str | None = None
 
 
 # ── Pre-computation ──────────────────────────────────────────────────────────
@@ -367,11 +372,17 @@ def find_associations(zone: OverlapZone,
         # pairings) will have different hex codes → reject them here.
         # Only applied when BOTH entries carry a non-empty "hex" field; if
         # either is absent (non-ADS-B aircraft, legacy data) we pass through.
+        _candidate_hex: str | None = None
         if isinstance(_ae_a, dict) and isinstance(_ae_b, dict):
             _hex_a = _ae_a.get("hex")
             _hex_b = _ae_b.get("hex")
             if _hex_a and _hex_b and _hex_a != _hex_b:
                 continue  # different aircraft — cross-pairing rejected
+            _candidate_hex = _hex_a or _hex_b
+        elif isinstance(_ae_a, dict):
+            _candidate_hex = _ae_a.get("hex") or None
+        elif isinstance(_ae_b, dict):
+            _candidate_hex = _ae_b.get("hex") or None
 
         # ── ADS-B altitude override ──────────────────────────────────────────
         # ADS-B altitude is exact (to ~10 m) while the pre-computed grid only
@@ -425,6 +436,7 @@ def find_associations(zone: OverlapZone,
             grid_lon      = g_lon,
             grid_alt_km   = g_alt,
             had_adsb_override = _had_adsb_override,
+            adsb_hex      = _candidate_hex,
         )
         key = (i_a, i_b)
         existing = candidates.get(key)
@@ -728,6 +740,16 @@ class InterNodeAssociator:
             # km away) are never considered.
             g_alt_km = sum(c.grid_alt_km for c in group) / len(group)
 
+            # Pass the confirmed ICAO hex through to the solver so the solver
+            # worker can maintain a per-aircraft position history for
+            # multi-epoch EWMA smoothing.  Use the hex from the ADS-B-anchored
+            # candidates (if any); fall back to any candidate's hex.
+            _group_hex: str | None = None
+            if _adsb_group:
+                _group_hex = next((c.adsb_hex for c in _adsb_group if c.adsb_hex), None)
+            if _group_hex is None:
+                _group_hex = next((c.adsb_hex for c in group if c.adsb_hex), None)
+
             solver_inputs.append({
                 "initial_guess": {
                     "lat": g_lat,
@@ -737,6 +759,7 @@ class InterNodeAssociator:
                 "measurements": list(by_node.values()),
                 "n_nodes": len(by_node),
                 "timestamp_ms": group[0].timestamp_ms,
+                "adsb_hex": _group_hex,
             })
 
         return solver_inputs
