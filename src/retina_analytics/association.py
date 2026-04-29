@@ -176,7 +176,7 @@ def _point_in_beam(lat, lon, geo: NodeGeometry) -> bool:
 
 def compute_overlap_zone(geo_a: NodeGeometry, geo_b: NodeGeometry,
                          grid_step_km: float = 3.0,
-                         altitudes_km: tuple[float, ...] = (5.0, 7.0, 9.0, 11.0),
+                         altitudes_km: tuple[float, ...] = (1.5, 3.0, 5.0, 7.0, 9.0, 11.0),
                          delay_gate_us: float = 5.0,
                          doppler_gate_hz: float = 30.0) -> OverlapZone:
     """Pre-compute the overlap zone between two nodes.
