@@ -483,12 +483,13 @@ class InterNodeAssociator:
         self._ASSOC_MAX_NEIGHBORS: int = 50
         self._last_assoc: dict[str, float] = {}  # node_id → last association wall-time
         # Maximum allowed age difference between two frames being associated.
-        # Aircraft at 250 m/s move ~2.5 km in 10 s; frames further apart than
+        # Aircraft at 250 m/s move ~0.5 km in 2 s; frames further apart than
         # this produce inconsistent TDOA geometry → large position errors.
-        # 10 s is a balance: tight enough to bound drift, loose enough that the
-        # 30 s per-node rate limiter doesn't starve the pair-finder for
-        # geometrically diverse node pairs.
-        self._FRAME_SYNC_MAX_AGE_MS: int = 10_000
+        # With 200 nodes staggered over 40 s (0.2 s/node), nodes in the same
+        # geographic cluster (5-10 nodes) span ≤ 2 s.  A 3 s window lets all
+        # intra-cluster pairs associate while rejecting distant inter-cluster
+        # pairs whose timing error (Δt × v) would otherwise dominate.
+        self._FRAME_SYNC_MAX_AGE_MS: int = 3_000
         self._register_lock = __import__('threading').Lock()
 
     def register_node(self, node_id: str, config: dict):
@@ -595,10 +596,10 @@ class InterNodeAssociator:
                 continue  # neighbor hasn’t sent a frame yet
             # Gate: only associate frames that are close in time so the aircraft
             # position is approximately the same in both measurements.  With 40 s
-            # frame intervals, a stale pending frame can be up to 40 s old;
-            # at 250 m/s that is 10 km of aircraft movement — the dominant source
-            # of position error.  Allow up to _FRAME_SYNC_MAX_AGE_MS (10 s),
-            # which caps the timing contribution to ~2.5 km.
+            # frame intervals and a 200-node fleet staggered at 0.2 s/node, nodes
+            # in the same cluster fire within ~2 s of each other.  The 3 s limit
+            # caps aircraft-motion error to ≤ 0.75 km (250 m/s × 3 s) while
+            # still allowing all intra-cluster pairs to associate.
             other_ts = other_frame.get("timestamp", 0)
             if timestamp_ms > 0 and other_ts > 0 and abs(timestamp_ms - other_ts) > self._FRAME_SYNC_MAX_AGE_MS:
                 continue
