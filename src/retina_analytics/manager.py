@@ -71,9 +71,15 @@ class NodeAnalyticsManager:
         if node_id not in self.coverage_maps:
             self.coverage_maps[node_id] = HistoricalCoverageMap(node_id=node_id)
 
-        if node_id not in self.empirical_coverages:
+        # Recreate empirical coverage when the node is new OR its RX moved — node
+        # IDs are reused across fleet regenerations at different positions, so a
+        # persisted polygon from the old location would otherwise be served for
+        # the new one (stale, beam-mismatched, collapsed).
+        ec = self.empirical_coverages.get(node_id)
+        if ec is None or abs(ec.rx_lat - rx_lat) > 1e-6 or abs(ec.rx_lon - rx_lon) > 1e-6:
             self.empirical_coverages[node_id] = EmpiricalCoverageState(
                 rx_lat=rx_lat, rx_lon=rx_lon,
+                max_range_km=config.get("max_range_km", YAGI_MAX_RANGE_KM),
             )
 
     def is_node_blocked(self, node_id: str) -> bool:
@@ -167,6 +173,7 @@ class NodeAnalyticsManager:
             if da is not None:
                 poly_kwargs["beam_azimuth_deg"] = da.beam_azimuth_deg
                 poly_kwargs["beam_width_deg"] = da.beam_width_deg
+                poly_kwargs["max_range_km"] = da.max_range_km
             result["empirical_coverage"] = {
                 "n_points": ec.n_points,
                 "n_filled_bins": ec.n_filled_bins,

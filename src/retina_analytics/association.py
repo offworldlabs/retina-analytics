@@ -517,12 +517,19 @@ class InterNodeAssociator:
             max_range_km=config.get("max_range_km", 50),
         )
 
-        # Compute beam azimuth: perpendicular to the RX→TX baseline.
-        # Yagi antennas point broadside (90° from the baseline) to maximise
-        # cross-coverage of aircraft transiting the bistatic zone.
-        geo.beam_azimuth_deg = (_bearing_deg(
-            geo.rx_lat, geo.rx_lon, geo.tx_lat, geo.tx_lon
-        ) + 90.0) % 360.0
+        # Honor an explicit aim (aimed coverage-ring Yagi); otherwise point
+        # broadside to the RX→TX baseline to maximise cross-coverage. The overlap
+        # grid is computed from this azimuth, so it must match the node's true aim.
+        # config is node-supplied, so guard the parse and fall back to broadside.
+        try:
+            explicit_az = config.get("beam_azimuth_deg")
+            explicit_az = float(explicit_az) if explicit_az is not None else None
+        except (TypeError, ValueError):
+            explicit_az = None
+        geo.beam_azimuth_deg = (
+            explicit_az if explicit_az is not None
+            else (_bearing_deg(geo.rx_lat, geo.rx_lon, geo.tx_lat, geo.tx_lon) + 90.0) % 360.0
+        )
 
         with self._register_lock:
             existing = self.node_geometries.get(node_id)
@@ -532,6 +539,8 @@ class InterNodeAssociator:
                 and abs(existing.tx_lat - geo.tx_lat) < 1e-6
                 and abs(existing.tx_lon - geo.tx_lon) < 1e-6
                 and abs(existing.max_range_km - geo.max_range_km) < 1e-4
+                and abs(existing.beam_azimuth_deg - geo.beam_azimuth_deg) < 1e-4
+                and abs(existing.beam_width_deg - geo.beam_width_deg) < 1e-4
             ):
                 # Same geometry — overlap zones are still valid; skip O(n²) recompute.
                 return
