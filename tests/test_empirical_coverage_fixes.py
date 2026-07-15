@@ -21,6 +21,7 @@ from retina_analytics.empirical_coverage import (
     N_BINS,
     _DEG_PER_BIN,
     _bearing_and_range,
+    _p85,
 )
 
 
@@ -158,3 +159,10 @@ class TestRangeClampAndOutlierReject:
         restored = EmpiricalCoverageState.from_dict(d)
         restored.add_point(*_offset_point(45.0, 3000.0))
         assert restored.n_points == 25  # still rejects the far point
+
+
+class TestP85OutlierRobustness:
+    def test_p85_degenerates_to_max_in_sparse_bin(self):
+        # Characterisation: with few samples, P85 == max, so a lone mid-range
+        # mis-attribution spikes that bearing. Documents current behaviour.
+        assert _p85([30.0, 30.0, 250.0]) == 250.0
