@@ -24,3 +24,18 @@ def test_manager_defaults_to_broadside_when_unaimed():
     m = NodeAnalyticsManager()
     m.register_node("N", dict(_CFG))
     assert abs(m.detection_areas["N"].beam_azimuth_deg - _broadside()) < 1e-4
+
+
+def test_placeholder_zero_azimuth_is_honored_as_explicit_aim():
+    # Contract guard (86caqqdah): resolve_beam_azimuth_deg treats ANY numeric
+    # beam_azimuth_deg as an explicit aim — including 0.0. Cross-repo investigation
+    # confirmed real configs OMIT the key for un-aimed nodes (they never send a
+    # placeholder 0.0), so honoring 0.0 is safe. This pins that boundary: if a
+    # future config starts emitting a schema-default 0.0 for un-aimed nodes, they
+    # would be aimed due north — this asserts the honored-explicit behavior so the
+    # regression surfaces here rather than silently.
+    from retina_analytics.constants import resolve_beam_azimuth_deg
+    az = resolve_beam_azimuth_deg(
+        {"beam_azimuth_deg": 0.0}, _RX_LAT, _RX_LON, _TX_LAT, _TX_LON
+    )
+    assert az == 0.0  # honored as an explicit aim, NOT broadside
