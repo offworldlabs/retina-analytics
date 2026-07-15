@@ -76,11 +76,15 @@ class NodeAnalyticsManager:
         # persisted polygon from the old location would otherwise be served for
         # the new one (stale, beam-mismatched, collapsed).
         ec = self.empirical_coverages.get(node_id)
+        cfg_max_range = config.get("max_range_km", YAGI_MAX_RANGE_KM)
         if ec is None or abs(ec.rx_lat - rx_lat) > 1e-6 or abs(ec.rx_lon - rx_lon) > 1e-6:
             self.empirical_coverages[node_id] = EmpiricalCoverageState(
                 rx_lat=rx_lat, rx_lon=rx_lon,
-                max_range_km=config.get("max_range_km", YAGI_MAX_RANGE_KM),
+                max_range_km=cfg_max_range,
             )
+        else:
+            # Same RX — keep accumulated calibration but track the retuned bound.
+            ec.max_range_km = cfg_max_range
 
     def is_node_blocked(self, node_id: str) -> bool:
         rep = self.reputations.get(node_id)
