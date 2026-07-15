@@ -8,6 +8,7 @@ point away from the core and never overlap.
 import math
 
 from retina_analytics.association import InterNodeAssociator, _bearing_deg
+from retina_analytics.constants import resolve_beam_azimuth_deg, bearing_deg as _c_bearing
 
 _CORE_LAT, _CORE_LON = 32.8968, -97.0380
 _TX_LAT, _TX_LON = 32.78060, -96.80060
@@ -93,3 +94,21 @@ class TestAimDrivesOverlap:
         })
         zone = assoc.overlap_zones[tuple(sorted(["RA", "RB"]))]
         assert not zone.delay_pairs
+
+
+class TestResolveBeamAzimuth:
+    def test_explicit_azimuth_kept(self):
+        az = resolve_beam_azimuth_deg(
+            {"beam_azimuth_deg": 123.0}, _RX_A[0], _RX_A[1], _TX_LAT, _TX_LON
+        )
+        assert az == 123.0
+
+    def test_missing_falls_back_to_broadside(self):
+        az = resolve_beam_azimuth_deg({}, _RX_A[0], _RX_A[1], _TX_LAT, _TX_LON)
+        assert abs(az - _broadside(_RX_A)) < 1e-9
+
+    def test_unparseable_falls_back_to_broadside(self):
+        az = resolve_beam_azimuth_deg(
+            {"beam_azimuth_deg": "north"}, _RX_A[0], _RX_A[1], _TX_LAT, _TX_LON
+        )
+        assert abs(az - _broadside(_RX_A)) < 1e-4

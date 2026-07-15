@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from retina_analytics.constants import resolve_beam_azimuth_deg
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 C_KM_US = 0.299792458   # speed of light km/μs
@@ -517,18 +519,11 @@ class InterNodeAssociator:
             max_range_km=config.get("max_range_km", 50),
         )
 
-        # Honor an explicit aim (aimed coverage-ring Yagi); otherwise point
-        # broadside to the RX→TX baseline to maximise cross-coverage. The overlap
-        # grid is computed from this azimuth, so it must match the node's true aim.
-        # config is node-supplied, so guard the parse and fall back to broadside.
-        try:
-            explicit_az = config.get("beam_azimuth_deg")
-            explicit_az = float(explicit_az) if explicit_az is not None else None
-        except (TypeError, ValueError):
-            explicit_az = None
-        geo.beam_azimuth_deg = (
-            explicit_az if explicit_az is not None
-            else (_bearing_deg(geo.rx_lat, geo.rx_lon, geo.tx_lat, geo.tx_lon) + 90.0) % 360.0
+        # Honour an explicit aim (aimed coverage-ring Yagi); otherwise broadside
+        # to the RX→TX baseline. The overlap grid is computed from this azimuth,
+        # so it must match the node's true aim. Shared with manager.register_node.
+        geo.beam_azimuth_deg = resolve_beam_azimuth_deg(
+            config, geo.rx_lat, geo.rx_lon, geo.tx_lat, geo.tx_lon
         )
 
         with self._register_lock:

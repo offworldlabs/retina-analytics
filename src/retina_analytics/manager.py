@@ -11,7 +11,7 @@ from retina_analytics.reputation import NodeReputation
 from retina_analytics.coverage import HistoricalCoverageMap
 from retina_analytics.empirical_coverage import EmpiricalCoverageState
 from retina_analytics.cross_node import compute_delay_bin_overlap, coverage_suggestion
-from retina_analytics.constants import YAGI_BEAM_WIDTH_DEG, YAGI_MAX_RANGE_KM, haversine_km, bearing_deg
+from retina_analytics.constants import YAGI_BEAM_WIDTH_DEG, YAGI_MAX_RANGE_KM, haversine_km, resolve_beam_azimuth_deg
 
 
 class NodeAnalyticsManager:
@@ -46,8 +46,8 @@ class NodeAnalyticsManager:
         rx_lon = config.get("rx_lon", 0)
         tx_lat = config.get("tx_lat", 0)
         tx_lon = config.get("tx_lon", 0)
-        # Yagi points broadside — perpendicular to RX→TX baseline
-        beam_az = (bearing_deg(rx_lat, rx_lon, tx_lat, tx_lon) + 90.0) % 360.0
+        # Honour an explicit aim if the config supplies one; else broadside.
+        beam_az = resolve_beam_azimuth_deg(config, rx_lat, rx_lon, tx_lat, tx_lon)
         self.detection_areas[node_id] = DetectionAreaState(
             node_id=node_id,
             rx_lat=rx_lat,
