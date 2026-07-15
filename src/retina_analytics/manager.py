@@ -13,6 +13,8 @@ from retina_analytics.empirical_coverage import EmpiricalCoverageState
 from retina_analytics.cross_node import compute_delay_bin_overlap, coverage_suggestion
 from retina_analytics.constants import YAGI_BEAM_WIDTH_DEG, YAGI_MAX_RANGE_KM, haversine_km, resolve_beam_azimuth_deg
 
+_RX_RELOCATE_THRESHOLD_KM = 0.05   # 50 m — above real GPS/reporting jitter
+
 
 class NodeAnalyticsManager:
     """Central analytics aggregator for all connected nodes."""
@@ -77,13 +79,14 @@ class NodeAnalyticsManager:
         # the new one (stale, beam-mismatched, collapsed).
         ec = self.empirical_coverages.get(node_id)
         cfg_max_range = config.get("max_range_km", YAGI_MAX_RANGE_KM)
-        if ec is None or abs(ec.rx_lat - rx_lat) > 1e-6 or abs(ec.rx_lon - rx_lon) > 1e-6:
+        moved = ec is not None and haversine_km(ec.rx_lat, ec.rx_lon, rx_lat, rx_lon) > _RX_RELOCATE_THRESHOLD_KM
+        if ec is None or moved:
             self.empirical_coverages[node_id] = EmpiricalCoverageState(
                 rx_lat=rx_lat, rx_lon=rx_lon,
                 max_range_km=cfg_max_range,
             )
         else:
-            # Same RX — keep accumulated calibration but track the retuned bound.
+            # Same RX (within jitter) — keep accumulated calibration but track bound.
             ec.max_range_km = cfg_max_range
 
     def is_node_blocked(self, node_id: str) -> bool:

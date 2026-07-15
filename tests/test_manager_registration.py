@@ -51,3 +51,27 @@ def test_same_rx_reregistration_updates_max_range():
     before = ec.n_points
     m.record_calibration_point("N", _RX_LAT + 250.0 / 111.320, _RX_LON)
     assert ec.n_points == before + 1
+
+
+def _accumulate(m, node_id="N", n=25):
+    for i in range(n):
+        m.record_calibration_point(node_id, _RX_LAT + 0.2, _RX_LON + i * 1e-4)  # ~22 km N
+
+
+def test_sub_metre_jitter_keeps_calibration():
+    m = NodeAnalyticsManager()
+    m.register_node("N", dict(_CFG))
+    _accumulate(m)
+    pts = m.empirical_coverages["N"].n_points
+    assert pts >= 25
+    # Reconnect with ~5 m RX jitter (4.5e-5 deg lat ≈ 5 m).
+    m.register_node("N", {**_CFG, "rx_lat": _RX_LAT + 4.5e-5})
+    assert m.empirical_coverages["N"].n_points == pts  # retained
+
+
+def test_genuine_relocation_rebuilds_state():
+    m = NodeAnalyticsManager()
+    m.register_node("N", dict(_CFG))
+    _accumulate(m)
+    m.register_node("N", {**_CFG, "rx_lat": _RX_LAT + 0.01})  # ~1.1 km move
+    assert m.empirical_coverages["N"].n_points == 0  # rebuilt
