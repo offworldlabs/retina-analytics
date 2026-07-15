@@ -8,7 +8,7 @@ point away from the core and never overlap.
 import math
 
 from retina_analytics.association import InterNodeAssociator, _bearing_deg
-from retina_analytics.constants import resolve_beam_azimuth_deg, bearing_deg as _c_bearing
+from retina_analytics.constants import resolve_beam_azimuth_deg
 
 _CORE_LAT, _CORE_LON = 32.8968, -97.0380
 _TX_LAT, _TX_LON = 32.78060, -96.80060
@@ -125,3 +125,4 @@ class TestResolveBeamAzimuth:
             {"beam_azimuth_deg": float("inf")}, _RX_A[0], _RX_A[1], _TX_LAT, _TX_LON
         )
         assert math.isfinite(az)
+        assert abs(az - _broadside(_RX_A)) < 1e-4
