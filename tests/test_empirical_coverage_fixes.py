@@ -127,3 +127,34 @@ class TestRangeClampAndOutlierReject:
         for lat, lon in poly[1:-1]:
             _, range_km = _bearing_and_range(RX_LAT, RX_LON, lat, lon)
             assert 25.0 < range_km < 35.0
+
+    def test_add_point_rejects_far_when_state_max_range_is_none(self):
+        cov = EmpiricalCoverageState(RX_LAT, RX_LON, max_range_km=None)
+        for _ in range(25):
+            cov.add_point(*_offset_point(30.0, 30.0))
+        cov.add_point(*_offset_point(45.0, 3000.0))
+        assert cov.n_points == 25  # far point rejected via YAGI fallback bound
+        for b in cov._bins:
+            for r in b:
+                assert r < 200.0
+
+    def test_to_polygon_clamps_when_no_max_range_anywhere(self):
+        cov = EmpiricalCoverageState(RX_LAT, RX_LON, max_range_km=None)
+        for _ in range(25):
+            cov.add_point(*_offset_point(30.0, 30.0))
+        poly = cov.to_polygon(beam_azimuth_deg=30.0, beam_width_deg=BEAM_WIDTH_DEG)
+        assert poly is not None
+        clamp = 50.0 * cov.range_clamp_mult  # YAGI_MAX_RANGE_KM * mult
+        for lat, lon in poly[1:-1]:
+            _, range_km = _bearing_and_range(RX_LAT, RX_LON, lat, lon)
+            assert range_km <= clamp + 1.0
+
+    def test_from_dict_without_max_range_is_bounded(self):
+        cov = EmpiricalCoverageState(RX_LAT, RX_LON, max_range_km=None)
+        for _ in range(25):
+            cov.add_point(*_offset_point(30.0, 30.0))
+        d = cov.to_dict()
+        d.pop("max_range_km", None)  # simulate a pre-commit persisted state
+        restored = EmpiricalCoverageState.from_dict(d)
+        restored.add_point(*_offset_point(45.0, 3000.0))
+        assert restored.n_points == 25  # still rejects the far point

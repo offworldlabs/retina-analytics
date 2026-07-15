@@ -25,6 +25,8 @@ import json
 import math
 import os
 
+from retina_analytics.constants import YAGI_MAX_RANGE_KM
+
 N_BINS = 72          # 5 ° per bin  (360 / 5 = 72)
 _DEG_PER_BIN = 360.0 / N_BINS
 _MAX_PER_BIN = 200   # cap per-bin history to prevent unbounded RAM growth
@@ -62,7 +64,8 @@ class EmpiricalCoverageState:
         self.rx_lat = rx_lat
         self.rx_lon = rx_lon
         # Detections beyond range_clamp_mult × max_range_km are rejected as
-        # mis-attributed; None disables the bound (e.g. states loaded from disk).
+        # mis-attributed. None (e.g. states loaded from disk) falls back to
+        # YAGI_MAX_RANGE_KM at use-time rather than disabling the bound.
         self.max_range_km = max_range_km
         self.range_clamp_mult = range_clamp_mult
         # Per-bin list of observed ranges (km).  List, not array — no numpy dep.
@@ -75,7 +78,8 @@ class EmpiricalCoverageState:
         bearing, range_km = _bearing_and_range(self.rx_lat, self.rx_lon, lat, lon)
         if range_km < 0.5:
             return  # too close — not informative
-        if self.max_range_km is not None and range_km > self.max_range_km * self.range_clamp_mult:
+        bound = self.max_range_km if self.max_range_km is not None else YAGI_MAX_RANGE_KM
+        if range_km > bound * self.range_clamp_mult:
             return  # implausibly far — mis-attributed detection
         b = self._bins[_bin_for_bearing(bearing)]
         b.append(range_km)
@@ -122,14 +126,16 @@ class EmpiricalCoverageState:
         # Step 1: robust range per bin (P85, or 0 if empty / outside beam),
         # clamped so one mis-attributed far detection can't fling a vertex.
         clamp = max_range_km if max_range_km is not None else self.max_range_km
-        clamp = clamp * self.range_clamp_mult if clamp is not None else None
+        if clamp is None:
+            clamp = YAGI_MAX_RANGE_KM
+        clamp = clamp * self.range_clamp_mult
         ranges: list[float] = []
         for i, b in enumerate(self._bins):
             if not _in_beam(i):
                 ranges.append(0.0)
             else:
                 r = _p85(b) if b else 0.0
-                ranges.append(min(r, clamp) if clamp is not None else r)
+                ranges.append(min(r, clamp))
 
         # Step 2: fill empty *in-beam* bins by angular interpolation from neighbours
         for i in range(N_BINS):
