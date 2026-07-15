@@ -75,3 +75,19 @@ def test_genuine_relocation_rebuilds_state():
     _accumulate(m)
     m.register_node("N", {**_CFG, "rx_lat": _RX_LAT + 0.01})  # ~1.1 km move
     assert m.empirical_coverages["N"].n_points == 0  # rebuilt
+
+
+def test_recreate_on_move_removes_stale_empirical_file(tmp_path):
+    storage = str(tmp_path)
+    m = NodeAnalyticsManager(storage_dir=storage)
+    m.register_node("N", dict(_CFG))
+    _accumulate(m)
+    m.save_coverage_maps()
+    path = os.path.join(storage, "empirical_N.json")
+    assert os.path.exists(path)
+    # Node relocates > 50 m → in-memory state recreated empty.
+    m.register_node("N", {**_CFG, "rx_lat": _RX_LAT + 0.01})
+    assert not os.path.exists(path)  # stale old-location file removed
+    # Restart: a fresh manager on the same dir must not resurrect the old polygon.
+    m2 = NodeAnalyticsManager(storage_dir=storage)
+    assert m2.empirical_coverages.get("N", None) is None or m2.empirical_coverages["N"].n_points == 0

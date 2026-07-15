@@ -85,6 +85,14 @@ class NodeAnalyticsManager:
                 rx_lat=rx_lat, rx_lon=rx_lon,
                 max_range_km=cfg_max_range,
             )
+            # Remove stale on-disk file from previous location; save_coverage_maps
+            # skips n_points==0 states, so the old file would persist and be loaded
+            # on restart, resurrecting the stale polygon.
+            if self._storage_dir:
+                try:
+                    os.remove(self._empirical_path(node_id))
+                except FileNotFoundError:
+                    pass
         else:
             # Same RX (within jitter) — keep accumulated calibration but track bound.
             ec.max_range_km = cfg_max_range
