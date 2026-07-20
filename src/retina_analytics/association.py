@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from retina_analytics.constants import resolve_beam_azimuth_deg
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 C_KM_US = 0.299792458   # speed of light km/μs
@@ -517,12 +519,12 @@ class InterNodeAssociator:
             max_range_km=config.get("max_range_km", 50),
         )
 
-        # Compute beam azimuth: perpendicular to the RX→TX baseline.
-        # Yagi antennas point broadside (90° from the baseline) to maximise
-        # cross-coverage of aircraft transiting the bistatic zone.
-        geo.beam_azimuth_deg = (_bearing_deg(
-            geo.rx_lat, geo.rx_lon, geo.tx_lat, geo.tx_lon
-        ) + 90.0) % 360.0
+        # Honour an explicit aim (aimed coverage-ring Yagi); otherwise broadside
+        # to the RX→TX baseline. The overlap grid is computed from this azimuth,
+        # so it must match the node's true aim. Shared with manager.register_node.
+        geo.beam_azimuth_deg = resolve_beam_azimuth_deg(
+            config, geo.rx_lat, geo.rx_lon, geo.tx_lat, geo.tx_lon
+        )
 
         with self._register_lock:
             existing = self.node_geometries.get(node_id)
@@ -532,6 +534,8 @@ class InterNodeAssociator:
                 and abs(existing.tx_lat - geo.tx_lat) < 1e-6
                 and abs(existing.tx_lon - geo.tx_lon) < 1e-6
                 and abs(existing.max_range_km - geo.max_range_km) < 1e-4
+                and abs(existing.beam_azimuth_deg - geo.beam_azimuth_deg) < 1e-4
+                and abs(existing.beam_width_deg - geo.beam_width_deg) < 1e-4
             ):
                 # Same geometry — overlap zones are still valid; skip O(n²) recompute.
                 return

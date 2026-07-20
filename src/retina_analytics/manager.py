@@ -11,7 +11,9 @@ from retina_analytics.reputation import NodeReputation
 from retina_analytics.coverage import HistoricalCoverageMap
 from retina_analytics.empirical_coverage import EmpiricalCoverageState
 from retina_analytics.cross_node import compute_delay_bin_overlap, coverage_suggestion
-from retina_analytics.constants import YAGI_BEAM_WIDTH_DEG, YAGI_MAX_RANGE_KM, haversine_km, bearing_deg
+from retina_analytics.constants import YAGI_BEAM_WIDTH_DEG, YAGI_MAX_RANGE_KM, haversine_km, resolve_beam_azimuth_deg
+
+_RX_RELOCATE_THRESHOLD_KM = 0.05   # 50 m — above real GPS/reporting jitter
 
 
 class NodeAnalyticsManager:
@@ -46,8 +48,8 @@ class NodeAnalyticsManager:
         rx_lon = config.get("rx_lon", 0)
         tx_lat = config.get("tx_lat", 0)
         tx_lon = config.get("tx_lon", 0)
-        # Yagi points broadside — perpendicular to RX→TX baseline
-        beam_az = (bearing_deg(rx_lat, rx_lon, tx_lat, tx_lon) + 90.0) % 360.0
+        # Honour an explicit aim if the config supplies one; else broadside.
+        beam_az = resolve_beam_azimuth_deg(config, rx_lat, rx_lon, tx_lat, tx_lon)
         self.detection_areas[node_id] = DetectionAreaState(
             node_id=node_id,
             rx_lat=rx_lat,
@@ -71,10 +73,29 @@ class NodeAnalyticsManager:
         if node_id not in self.coverage_maps:
             self.coverage_maps[node_id] = HistoricalCoverageMap(node_id=node_id)
 
-        if node_id not in self.empirical_coverages:
+        # Recreate empirical coverage when the node is new OR its RX moved — node
+        # IDs are reused across fleet regenerations at different positions, so a
+        # persisted polygon from the old location would otherwise be served for
+        # the new one (stale, beam-mismatched, collapsed).
+        ec = self.empirical_coverages.get(node_id)
+        cfg_max_range = config.get("max_range_km", YAGI_MAX_RANGE_KM)
+        moved = ec is not None and haversine_km(ec.rx_lat, ec.rx_lon, rx_lat, rx_lon) > _RX_RELOCATE_THRESHOLD_KM
+        if ec is None or moved:
             self.empirical_coverages[node_id] = EmpiricalCoverageState(
                 rx_lat=rx_lat, rx_lon=rx_lon,
+                max_range_km=cfg_max_range,
             )
+            # Remove stale on-disk file from previous location; save_coverage_maps
+            # skips n_points==0 states, so the old file would persist and be loaded
+            # on restart, resurrecting the stale polygon.
+            if self._storage_dir:
+                try:
+                    os.remove(self._empirical_path(node_id))
+                except FileNotFoundError:
+                    pass
+        else:
+            # Same RX (within jitter) — keep accumulated calibration but track bound.
+            ec.max_range_km = cfg_max_range
 
     def is_node_blocked(self, node_id: str) -> bool:
         rep = self.reputations.get(node_id)
@@ -167,6 +188,7 @@ class NodeAnalyticsManager:
             if da is not None:
                 poly_kwargs["beam_azimuth_deg"] = da.beam_azimuth_deg
                 poly_kwargs["beam_width_deg"] = da.beam_width_deg
+                poly_kwargs["max_range_km"] = da.max_range_km
             result["empirical_coverage"] = {
                 "n_points": ec.n_points,
                 "n_filled_bins": ec.n_filled_bins,

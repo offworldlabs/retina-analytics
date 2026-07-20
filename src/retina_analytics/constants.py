@@ -27,3 +27,23 @@ def bearing_deg(lat1, lon1, lat2, lon2):
     y = (math.cos(lat1r) * math.sin(lat2r)
          - math.sin(lat1r) * math.cos(lat2r) * math.cos(dlon))
     return math.degrees(math.atan2(x, y)) % 360.0
+
+
+def resolve_beam_azimuth_deg(config, rx_lat, rx_lon, tx_lat, tx_lon):
+    """Resolve a node's beam azimuth (deg).
+
+    Honours an explicit ``config['beam_azimuth_deg']`` (aimed ring-Yagi) when it
+    parses to a float; otherwise points broadside — perpendicular to the RX→TX
+    baseline — to maximise cross-coverage. ``config`` is node-supplied, so the
+    parse is guarded and falls back to broadside on bad input.
+    """
+    explicit_az = config.get("beam_azimuth_deg")
+    try:
+        explicit_az = float(explicit_az) if explicit_az is not None else None
+    except (TypeError, ValueError):
+        explicit_az = None
+    if explicit_az is not None and not math.isfinite(explicit_az):
+        explicit_az = None
+    if explicit_az is not None:
+        return explicit_az
+    return (bearing_deg(rx_lat, rx_lon, tx_lat, tx_lon) + 90.0) % 360.0

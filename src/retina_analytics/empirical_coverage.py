@@ -25,6 +25,8 @@ import json
 import math
 import os
 
+from retina_analytics.constants import YAGI_MAX_RANGE_KM
+
 N_BINS = 72          # 5 ° per bin  (360 / 5 = 72)
 _DEG_PER_BIN = 360.0 / N_BINS
 _MAX_PER_BIN = 200   # cap per-bin history to prevent unbounded RAM growth
@@ -56,9 +58,16 @@ def _p85(values: list[float]) -> float:
 class EmpiricalCoverageState:
     """Accumulates calibration points and derives a smoothed detection polygon."""
 
-    def __init__(self, rx_lat: float, rx_lon: float):
+    def __init__(self, rx_lat: float, rx_lon: float,
+                 max_range_km: float | None = None,
+                 range_clamp_mult: float = 2.0):
         self.rx_lat = rx_lat
         self.rx_lon = rx_lon
+        # Detections beyond range_clamp_mult × max_range_km are rejected as
+        # mis-attributed. None (e.g. states loaded from disk) falls back to
+        # YAGI_MAX_RANGE_KM at use-time rather than disabling the bound.
+        self.max_range_km = max_range_km
+        self.range_clamp_mult = range_clamp_mult
         # Per-bin list of observed ranges (km).  List, not array — no numpy dep.
         self._bins: list[list[float]] = [[] for _ in range(N_BINS)]
 
@@ -69,6 +78,9 @@ class EmpiricalCoverageState:
         bearing, range_km = _bearing_and_range(self.rx_lat, self.rx_lon, lat, lon)
         if range_km < 0.5:
             return  # too close — not informative
+        bound = self.max_range_km if self.max_range_km is not None else YAGI_MAX_RANGE_KM
+        if range_km > bound * self.range_clamp_mult:
+            return  # implausibly far — mis-attributed detection
         b = self._bins[_bin_for_bearing(bearing)]
         b.append(range_km)
         if len(b) > _MAX_PER_BIN:
@@ -88,7 +100,8 @@ class EmpiricalCoverageState:
 
     def to_polygon(self, min_points: int = MIN_POINTS,
                    beam_azimuth_deg: float | None = None,
-                   beam_width_deg: float | None = None) -> list[list[float]] | None:
+                   beam_width_deg: float | None = None,
+                   max_range_km: float | None = None) -> list[list[float]] | None:
         """Return a closed polygon [[lat, lon], …] or None if insufficient data.
 
         When *beam_azimuth_deg* and *beam_width_deg* are provided the polygon
@@ -110,13 +123,19 @@ class EmpiricalCoverageState:
         else:
             _in_beam = lambda _: True  # noqa: E731 — no constraint
 
-        # Step 1: robust range per bin (P85, or 0 if empty / outside beam)
+        # Step 1: robust range per bin (P85, or 0 if empty / outside beam),
+        # clamped so one mis-attributed far detection can't fling a vertex.
+        clamp = max_range_km if max_range_km is not None else self.max_range_km
+        if clamp is None:
+            clamp = YAGI_MAX_RANGE_KM
+        clamp = clamp * self.range_clamp_mult
         ranges: list[float] = []
         for i, b in enumerate(self._bins):
             if not _in_beam(i):
                 ranges.append(0.0)
             else:
-                ranges.append(_p85(b) if b else 0.0)
+                r = _p85(b) if b else 0.0
+                ranges.append(min(r, clamp))
 
         # Step 2: fill empty *in-beam* bins by angular interpolation from neighbours
         for i in range(N_BINS):
@@ -178,9 +197,15 @@ class EmpiricalCoverageState:
         # Start at RX (sector tip)
         polygon.append([round(self.rx_lat, 5), round(self.rx_lon, 5)])
 
-        for i in range(N_BINS):
-            if not _in_beam(i):
-                continue
+        # Emit vertices in angular order around the beam centre so the sector
+        # boundary is monotonic. Bin-INDEX order self-intersects (bow-tie) when
+        # the beam straddles north, because the in-beam bins wrap 71→0.
+        in_beam_bins = [i for i in range(N_BINS) if _in_beam(i)]
+        if beam_azimuth_deg is not None and beam_width_deg is not None:
+            in_beam_bins.sort(
+                key=lambda i: ((i * _DEG_PER_BIN - beam_azimuth_deg + 180.0) % 360.0) - 180.0
+            )
+        for i in in_beam_bins:
             r_km = smoothed[i]
             if r_km < 0.1:
                 r_km = 0.1
@@ -202,12 +227,14 @@ class EmpiricalCoverageState:
         return {
             "rx_lat": self.rx_lat,
             "rx_lon": self.rx_lon,
+            "max_range_km": self.max_range_km,
             "bins": [b[:] for b in self._bins],
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "EmpiricalCoverageState":
-        obj = cls(rx_lat=d["rx_lat"], rx_lon=d["rx_lon"])
+        obj = cls(rx_lat=d["rx_lat"], rx_lon=d["rx_lon"],
+                  max_range_km=d.get("max_range_km"))
         for i, b in enumerate(d.get("bins", [])):
             if i < N_BINS:
                 obj._bins[i] = list(b)
