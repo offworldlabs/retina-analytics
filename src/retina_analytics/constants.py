@@ -42,6 +42,8 @@ def resolve_beam_azimuth_deg(config, rx_lat, rx_lon, tx_lat, tx_lon):
         explicit_az = float(explicit_az) if explicit_az is not None else None
     except (TypeError, ValueError):
         explicit_az = None
+    if explicit_az is not None and not math.isfinite(explicit_az):
+        explicit_az = None
     if explicit_az is not None:
         return explicit_az
     return (bearing_deg(rx_lat, rx_lon, tx_lat, tx_lon) + 90.0) % 360.0

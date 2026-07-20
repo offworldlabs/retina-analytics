@@ -112,3 +112,16 @@ class TestResolveBeamAzimuth:
             {"beam_azimuth_deg": "north"}, _RX_A[0], _RX_A[1], _TX_LAT, _TX_LON
         )
         assert abs(az - _broadside(_RX_A)) < 1e-4
+
+    def test_nan_falls_back_to_broadside(self):
+        az = resolve_beam_azimuth_deg(
+            {"beam_azimuth_deg": float("nan")}, _RX_A[0], _RX_A[1], _TX_LAT, _TX_LON
+        )
+        assert math.isfinite(az)
+        assert abs(az - _broadside(_RX_A)) < 1e-4
+
+    def test_inf_falls_back_to_broadside(self):
+        az = resolve_beam_azimuth_deg(
+            {"beam_azimuth_deg": float("inf")}, _RX_A[0], _RX_A[1], _TX_LAT, _TX_LON
+        )
+        assert math.isfinite(az)
