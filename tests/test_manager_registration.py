@@ -39,3 +39,15 @@ def test_placeholder_zero_azimuth_is_honored_as_explicit_aim():
         {"beam_azimuth_deg": 0.0}, _RX_LAT, _RX_LON, _TX_LAT, _TX_LON
     )
     assert az == 0.0  # honored as an explicit aim, NOT broadside
+
+
+def test_same_rx_reregistration_updates_max_range():
+    m = NodeAnalyticsManager()
+    m.register_node("N", {**_CFG, "max_range_km": 50})
+    m.register_node("N", {**_CFG, "max_range_km": 300})  # same RX, retuned range
+    ec = m.empirical_coverages["N"]
+    assert ec.max_range_km == 300
+    # A ~250 km detection is now within 300*2 and must be accepted (was rejected at 50).
+    before = ec.n_points
+    m.record_calibration_point("N", _RX_LAT + 250.0 / 111.320, _RX_LON)
+    assert ec.n_points == before + 1
