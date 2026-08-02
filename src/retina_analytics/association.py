@@ -503,6 +503,10 @@ class InterNodeAssociator:
         self._ASSOC_INTERVAL_REF_NODES: int = 1000
         self._ASSOC_MIN_INTERVAL_S: float = max_assoc_interval_s
         self._ASSOC_MAX_NEIGHBORS: int = 50
+        # Clusters discarded because every detection they wanted was already
+        # claimed by a better-ranked target.  Cumulative; exposed so the
+        # false-track rate can be tracked rather than assumed.
+        self.assoc_clusters_dropped: int = 0
         self._last_assoc: dict[str, float] = {}  # node_id → last association wall-time
         # Maximum allowed age difference between two frames being associated.
         # Aircraft at 250 m/s move ~0.5 km in 2 s; frames further apart than
@@ -732,8 +736,67 @@ class InterNodeAssociator:
         for i, c in enumerate(candidates):
             raw_groups[_find(i)].append(c)
 
+        # ── Step 2: one detection belongs to at most one target ──────────────
+        # Clustering alone imposes no exclusivity, and that is the dominant
+        # source of false tracks.  With aircraft X and Y both inside the A∩B
+        # overlap there are four self-consistent pairings — (Ax,Bx), (Ay,By),
+        # and the cross terms (Ax,By), (Ay,Bx) — and every one of them lands on
+        # a valid grid point, so all four became separate solves and separate
+        # map tracks.  The cross terms are not noise: they re-form every round
+        # and their phantom moves smoothly because both real aircraft do, so
+        # they persist (measured: median 56 s) and cannot be aged out.
+        #
+        # This cannot be caught downstream at n=2.  The solver fits
+        # [x, y, vx, vy, vz] with altitude pinned — 5 unknowns against 4
+        # residuals from two measurements — so it is under-determined and both
+        # rms_delay and rms_doppler go to ~0 for a false pairing exactly as
+        # they do for a true one.  The residual gates are structurally blind
+        # there, which solver.py documents ("letting all n=2 results through").
+        #
+        # A physical detection is one aircraft's echo, so it can support one
+        # target.  Assign greedily best-first — the same pattern the MLAT
+        # verification path already uses — and let a losing cluster keep any
+        # measurements the winner did not claim.  Sharing *within* a cluster
+        # stays legal: a genuine 3-node target contributes its node-A detection
+        # to the AB and AC pairs alike, and those pairs cluster together.
+        def _endpoints(group: list[AssociationCandidate]) -> set[tuple[str, int]]:
+            eps: set[tuple[str, int]] = set()
+            for c in group:
+                eps.add((c.node_a_id, c.det_a_idx))
+                eps.add((c.node_b_id, c.det_b_idx))
+            return eps
+
+        def _cluster_rank(group: list[AssociationCandidate]) -> tuple:
+            nodes = {c.node_a_id for c in group} | {c.node_b_id for c in group}
+            resid = sum(
+                abs(c.delay_a - c.grid_delay_a) + abs(c.delay_b - c.grid_delay_b)
+                for c in group
+            ) / (2.0 * len(group))
+            # ADS-B-anchored first (position is corroborated, not inferred),
+            # then better-constrained geometry, then tighter delay agreement.
+            return (any(c.had_adsb_override for c in group), len(nodes), -resid)
+
+        claimed: set[tuple[str, int]] = set()
+        kept_groups: list[list[AssociationCandidate]] = []
+        for group in sorted(raw_groups.values(), key=_cluster_rank, reverse=True):
+            survivors = [
+                c for c in group
+                if (c.node_a_id, c.det_a_idx) not in claimed
+                and (c.node_b_id, c.det_b_idx) not in claimed
+            ]
+            if not survivors:
+                self.assoc_clusters_dropped += 1
+                continue
+            nodes = {c.node_a_id for c in survivors} | {c.node_b_id for c in survivors}
+            if len(nodes) < 2:
+                # Nothing left to multilaterate with.
+                self.assoc_clusters_dropped += 1
+                continue
+            claimed |= _endpoints(survivors)
+            kept_groups.append(survivors)
+
         solver_inputs = []
-        for group in raw_groups.values():
+        for group in kept_groups:
             measurements = []
             for c in group:
                 measurements.append({

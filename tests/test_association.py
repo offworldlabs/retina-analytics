@@ -383,3 +383,95 @@ class TestAssocIntervalScaling:
         assoc.node_geometries = dict.fromkeys(range(1000), None)
         assoc._recompute_assoc_interval()
         assert assoc._ASSOC_MIN_INTERVAL_S == 10.0
+
+
+# ── One detection belongs to at most one target ──────────────────────────────
+
+
+def _cand(na, ia, nb, ib, lat, lon, resid=0.0, adsb=False):
+    from retina_analytics.association import AssociationCandidate
+
+    return AssociationCandidate(
+        timestamp_ms=1000,
+        node_a_id=na, node_b_id=nb, det_a_idx=ia, det_b_idx=ib,
+        delay_a=30.0 + resid, delay_b=31.0,
+        doppler_a=5.0, doppler_b=6.0, snr_a=12.0, snr_b=11.0,
+        grid_delay_a=30.0, grid_delay_b=31.0,
+        grid_lat=lat, grid_lon=lon, grid_alt_km=9.0,
+        had_adsb_override=adsb,
+    )
+
+
+class TestOneToOneAssignment:
+    """A physical detection is one aircraft's echo, so it supports one target.
+
+    Without that constraint, two aircraft inside one overlap zone yield four
+    self-consistent pairings — two real and two cross terms — and all four
+    became separate solves and separate map tracks.  Measured on staging
+    before this: 52% of multinode tracks matched no real aircraft, 97% of them
+    n=2, persisting a median 56 s because the cross pairing re-forms every
+    round and its phantom moves smoothly.
+
+    Nothing downstream can catch them: at n=2 the solver fits 5 unknowns
+    against 4 residuals, so rms_delay and rms_doppler go to ~0 for a false
+    pairing exactly as for a true one.
+    """
+
+    def test_cross_pairings_are_dropped(self):
+        assoc = InterNodeAssociator(grid_step_km=3.0)
+        out = assoc.format_candidates_for_solver([
+            _cand("A", 0, "B", 0, 34.90, -82.40, resid=0.01),   # real X
+            _cand("A", 1, "B", 1, 35.10, -82.10, resid=0.01),   # real Y
+            _cand("A", 0, "B", 1, 34.90, -82.10, resid=0.50),   # phantom
+            _cand("A", 1, "B", 0, 35.10, -82.40, resid=0.50),   # phantom
+        ])
+        assert len(out) == 2
+        kept = {(round(s["initial_guess"]["lat"], 2),
+                 round(s["initial_guess"]["lon"], 2)) for s in out}
+        assert kept == {(34.90, -82.40), (35.10, -82.10)}
+        assert assoc.assoc_clusters_dropped == 2
+
+    def test_genuine_three_node_target_survives_intact(self):
+        """Sharing a detection *within* one cluster is legal — a 3-node target
+        contributes node A's detection to both the AB and AC pairs."""
+        assoc = InterNodeAssociator(grid_step_km=3.0)
+        out = assoc.format_candidates_for_solver([
+            _cand("A", 0, "B", 0, 34.90, -82.40),
+            _cand("A", 0, "C", 0, 34.90, -82.40),
+            _cand("B", 0, "C", 0, 34.90, -82.40),
+        ])
+        assert len(out) == 1
+        assert out[0]["n_nodes"] == 3
+        assert assoc.assoc_clusters_dropped == 0
+
+    def test_adsb_anchored_cluster_wins_the_contested_detection(self):
+        """A corroborated position beats an inferred one for the same echo."""
+        assoc = InterNodeAssociator(grid_step_km=3.0)
+        out = assoc.format_candidates_for_solver([
+            _cand("A", 0, "B", 1, 35.10, -82.10, resid=0.01),           # inferred
+            _cand("A", 0, "B", 0, 34.90, -82.40, resid=0.90, adsb=True),  # ADS-B
+        ])
+        assert len(out) == 1
+        assert round(out[0]["initial_guess"]["lat"], 2) == 34.90
+
+    def test_better_geometry_wins_over_worse(self):
+        """Three nodes beats two when they compete for the same detection."""
+        assoc = InterNodeAssociator(grid_step_km=3.0)
+        out = assoc.format_candidates_for_solver([
+            _cand("A", 0, "B", 0, 34.90, -82.40),
+            _cand("A", 0, "C", 0, 34.90, -82.40),
+            _cand("A", 0, "D", 0, 35.30, -82.90),   # competing 2-node cluster
+        ])
+        assert len(out) == 1
+        assert out[0]["n_nodes"] == 3
+
+    def test_non_competing_targets_are_all_kept(self):
+        """Exclusivity must not thin genuinely distinct traffic."""
+        assoc = InterNodeAssociator(grid_step_km=3.0)
+        out = assoc.format_candidates_for_solver([
+            _cand("A", 0, "B", 0, 34.90, -82.40),
+            _cand("A", 1, "B", 1, 35.10, -82.10),
+            _cand("A", 2, "B", 2, 35.40, -81.80),
+        ])
+        assert len(out) == 3
+        assert assoc.assoc_clusters_dropped == 0
