@@ -67,6 +67,12 @@ class EmpiricalCoverageState:
         # mis-attributed. None (e.g. states loaded from disk) falls back to
         # YAGI_MAX_RANGE_KM at use-time rather than disabling the bound.
         self.max_range_km = max_range_km
+        # The bistatic limit this polygon was accumulated under, if any.  Not
+        # used for clamping — recorded so NodeAnalyticsManager.register_node can
+        # tell whether a persisted polygon was built under the same range rule
+        # and discard it when the rule changes (the footprint goes from a circle
+        # on the RX to an ellipse with foci at RX and TX).
+        self.max_bistatic_range_km: float | None = None
         self.range_clamp_mult = range_clamp_mult
         # Per-bin list of observed ranges (km).  List, not array — no numpy dep.
         self._bins: list[list[float]] = [[] for _ in range(N_BINS)]

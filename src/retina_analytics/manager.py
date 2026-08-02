@@ -80,11 +80,27 @@ class NodeAnalyticsManager:
         ec = self.empirical_coverages.get(node_id)
         cfg_max_range = config.get("max_range_km", YAGI_MAX_RANGE_KM)
         moved = ec is not None and haversine_km(ec.rx_lat, ec.rx_lon, rx_lat, rx_lon) > _RX_RELOCATE_THRESHOLD_KM
-        if ec is None or moved:
+        # A change in the *range rule* invalidates the accumulated polygon just
+        # as surely as the RX physically moving: switching a node from a
+        # monostatic limit to a bistatic one reshapes its footprint from a
+        # circle on the RX to an ellipse with foci at RX and TX.  Detecting it
+        # here means persisted coverage self-heals on the next registration —
+        # important because production mounts coverage_data as a named volume
+        # that survives rebuilds, so a stale polygon would otherwise be served
+        # indefinitely with no operator action to prompt it.
+        cfg_bistatic = config.get("max_bistatic_range_km")
+        rule_changed = ec is not None and (
+            getattr(ec, "max_bistatic_range_km", None) != cfg_bistatic
+            or ec.max_range_km != cfg_max_range
+        )
+        if ec is None or moved or rule_changed:
             self.empirical_coverages[node_id] = EmpiricalCoverageState(
                 rx_lat=rx_lat, rx_lon=rx_lon,
                 max_range_km=cfg_max_range,
             )
+            # Record the rule this polygon was built under so the next
+            # registration can tell whether it is still valid.
+            self.empirical_coverages[node_id].max_bistatic_range_km = cfg_bistatic
             # Remove stale on-disk file from previous location; save_coverage_maps
             # skips n_points==0 states, so the old file would persist and be loaded
             # on restart, resurrecting the stale polygon.
@@ -94,8 +110,10 @@ class NodeAnalyticsManager:
                 except FileNotFoundError:
                     pass
         else:
-            # Same RX (within jitter) — keep accumulated calibration but track bound.
+            # Same RX (within jitter) and same range rule — keep accumulated
+            # calibration but track bound.
             ec.max_range_km = cfg_max_range
+            ec.max_bistatic_range_km = cfg_bistatic
 
     def is_node_blocked(self, node_id: str) -> bool:
         rep = self.reputations.get(node_id)
