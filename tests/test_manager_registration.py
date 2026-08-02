@@ -91,3 +91,68 @@ def test_recreate_on_move_removes_stale_empirical_file(tmp_path):
     # Restart: a fresh manager on the same dir must not resurrect the old polygon.
     m2 = NodeAnalyticsManager(storage_dir=storage)
     assert m2.empirical_coverages.get("N", None) is None or m2.empirical_coverages["N"].n_points == 0
+
+
+# ── Coverage invalidation when the range rule changes ────────────────────────
+
+
+def test_switching_to_bistatic_rebuilds_coverage():
+    """A polygon accumulated under a monostatic limit describes a circle on the
+    RX; under a bistatic limit the footprint is an ellipse with foci at RX and
+    TX.  Keeping the old points would serve a shape the node no longer has."""
+    m = NodeAnalyticsManager()
+    m.register_node("N", dict(_CFG))
+    _accumulate(m)
+    assert m.empirical_coverages["N"].n_points >= 25
+    m.register_node("N", {**_CFG, "max_bistatic_range_km": 60})
+    assert m.empirical_coverages["N"].n_points == 0
+
+
+def test_stable_bistatic_config_keeps_coverage():
+    """Re-registering with the same rule must not throw away calibration —
+    nodes reconnect routinely."""
+    cfg = {**_CFG, "max_bistatic_range_km": 60}
+    m = NodeAnalyticsManager()
+    m.register_node("N", cfg)
+    _accumulate(m)
+    pts = m.empirical_coverages["N"].n_points
+    assert pts >= 25
+    m.register_node("N", dict(cfg))
+    assert m.empirical_coverages["N"].n_points == pts
+
+
+def test_monostatic_node_is_untouched_by_the_new_key():
+    """Real hardware carries only max_range_km. Its coverage must survive
+    reconnects exactly as before."""
+    m = NodeAnalyticsManager()
+    m.register_node("N", dict(_CFG))
+    _accumulate(m)
+    pts = m.empirical_coverages["N"].n_points
+    m.register_node("N", dict(_CFG))
+    assert m.empirical_coverages["N"].n_points == pts
+
+
+def test_max_range_retune_still_keeps_calibration():
+    """Guard the pre-existing decision: a retuned clamp is not a shape change,
+    so accumulated points are deliberately retained."""
+    m = NodeAnalyticsManager()
+    m.register_node("N", {**_CFG, "max_range_km": 50})
+    _accumulate(m)
+    pts = m.empirical_coverages["N"].n_points
+    m.register_node("N", {**_CFG, "max_range_km": 300})
+    assert m.empirical_coverages["N"].n_points == pts
+    assert m.empirical_coverages["N"].max_range_km == 300
+
+
+def test_rule_change_removes_the_stale_on_disk_polygon(tmp_path):
+    storage = str(tmp_path)
+    m = NodeAnalyticsManager(storage_dir=storage)
+    m.register_node("N", dict(_CFG))
+    _accumulate(m)
+    m.save_coverage_maps()
+    path = os.path.join(storage, "empirical_N.json")
+    assert os.path.exists(path)
+    # Production mounts coverage_data as a named volume that survives rebuilds,
+    # so leaving the file would resurrect the stale polygon on restart.
+    m.register_node("N", {**_CFG, "max_bistatic_range_km": 60})
+    assert not os.path.exists(path)

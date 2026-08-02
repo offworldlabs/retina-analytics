@@ -88,10 +88,14 @@ class NodeAnalyticsManager:
         # important because production mounts coverage_data as a named volume
         # that survives rebuilds, so a stale polygon would otherwise be served
         # indefinitely with no operator action to prompt it.
+        # Scoped to the bistatic key alone.  A max_range_km retune deliberately
+        # *keeps* accumulated calibration (see the else branch) because it only
+        # moves the clamp; switching range rules changes the footprint's shape,
+        # which is a different thing.
         cfg_bistatic = config.get("max_bistatic_range_km")
-        rule_changed = ec is not None and (
-            getattr(ec, "max_bistatic_range_km", None) != cfg_bistatic
-            or ec.max_range_km != cfg_max_range
+        rule_changed = (
+            ec is not None
+            and getattr(ec, "max_bistatic_range_km", None) != cfg_bistatic
         )
         if ec is None or moved or rule_changed:
             self.empirical_coverages[node_id] = EmpiricalCoverageState(
