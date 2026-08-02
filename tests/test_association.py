@@ -333,7 +333,7 @@ class TestInterNodeAssociator:
         )
 
 
-# ── Association rate limit scales with fleet size ────────────────────────────
+# ── Association rate limit ───────────────────────────────────────────────────
 
 
 _SCALING_CFG = {
@@ -343,13 +343,23 @@ _SCALING_CFG = {
 }
 
 
-class TestAssocIntervalScaling:
-    """The per-node association rate limit guards against O(K)xN CPU burn,
-    which is quadratic in fleet size.  A fixed value sized for a 1000-node
-    fleet throttles a single-metro deployment ~70x harder than its own cost
-    warrants — and the cost of that throttle is real: fewer multinode solves,
-    so aircraft fall back to single-node arc estimates whose error is the
-    width of the bistatic ellipse (~7 km) rather than a fix (~0.2-1 km).
+class TestAssocInterval:
+    """One configured interval, not scaled by fleet size.
+
+    It was briefly scaled down for small fleets, reasoning that their CPU
+    budget allowed associating far more often -- at 15 nodes ~2 ms/s against
+    the 57% of a core the limit exists to avoid.  The arithmetic held; the
+    premise did not.  Measured offline over 6 seeds
+    (backend/scripts/association_bench.py), ghost tracks as a share of all
+    tracks ran 40% (sd 13) at a 2 s interval against 6% (sd 9) at 30 s, t=4.9,
+    while the real-track count (8-13) and matched position error (~0.28 km
+    median) stayed flat across the whole sweep.  Associating more often bought
+    no extra targets and no extra accuracy -- it re-sampled the same geometry
+    and minted more false tracks.
+
+    Ghost rate is driven by how many aircraft share an overlap zone, which node
+    count does not predict, so the scaling optimised a resource that was never
+    the constraint.
     """
 
     def _register(self, assoc, n):
@@ -358,28 +368,20 @@ class TestAssocIntervalScaling:
             cfg["rx_lat"] += i * 0.01
             assoc.register_node(f"scale-{i}", cfg)
 
-    def test_small_fleet_relaxes_to_floor(self):
+    def test_default_is_the_budgeted_interval(self):
+        assert InterNodeAssociator(grid_step_km=30.0)._ASSOC_MIN_INTERVAL_S == 30.0
+
+    def test_interval_is_configurable(self):
+        assoc = InterNodeAssociator(grid_step_km=30.0, assoc_interval_s=10.0)
+        assert assoc._ASSOC_MIN_INTERVAL_S == 10.0
+
+    def test_small_fleet_does_not_relax_the_interval(self):
+        """The regression this guards: a 15-node fleet used to drop to 2 s."""
         assoc = InterNodeAssociator(grid_step_km=30.0)
         self._register(assoc, 15)
-        # 30 * 15/1000 = 0.45 s, clamped up to the 2 s floor.
-        assert assoc._ASSOC_MIN_INTERVAL_S == assoc._ASSOC_MIN_INTERVAL_FLOOR_S
-
-    def test_never_exceeds_configured_ceiling(self):
-        assoc = InterNodeAssociator(grid_step_km=30.0, max_assoc_interval_s=30.0)
-        self._register(assoc, 5)
-        assert assoc._ASSOC_MIN_INTERVAL_S <= 30.0
-
-    def test_reference_fleet_size_reproduces_ceiling(self):
-        # The budget in the docstring was computed for 1000 nodes; the scaling
-        # must reproduce exactly that value there, so the nationwide profile is
-        # unchanged by this becoming dynamic.
-        assoc = InterNodeAssociator(grid_step_km=30.0, max_assoc_interval_s=30.0)
-        assoc.node_geometries = dict.fromkeys(range(1000), None)
-        assoc._recompute_assoc_interval()
         assert assoc._ASSOC_MIN_INTERVAL_S == 30.0
 
-    def test_ceiling_is_configurable(self):
-        assoc = InterNodeAssociator(grid_step_km=30.0, max_assoc_interval_s=10.0)
-        assoc.node_geometries = dict.fromkeys(range(1000), None)
-        assoc._recompute_assoc_interval()
-        assert assoc._ASSOC_MIN_INTERVAL_S == 10.0
+    def test_large_fleet_is_unchanged_too(self):
+        assoc = InterNodeAssociator(grid_step_km=30.0)
+        self._register(assoc, 3)
+        assert assoc._ASSOC_MIN_INTERVAL_S == 30.0

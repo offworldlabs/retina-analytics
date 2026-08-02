@@ -459,7 +459,7 @@ class InterNodeAssociator:
     """Manages overlap zones for all node pairs and runs association at runtime."""
 
     def __init__(self, delay_gate_us: float = 5.0, doppler_gate_hz: float = 30.0,
-                 grid_step_km: float = 30.0, max_assoc_interval_s: float = 30.0):
+                 grid_step_km: float = 30.0, assoc_interval_s: float = 30.0):
         self.delay_gate_us = delay_gate_us
         self.doppler_gate_hz = doppler_gate_hz
         self.grid_step_km = grid_step_km
@@ -482,26 +482,33 @@ class InterNodeAssociator:
         #   = 57 % of the single GIL core — starves frame workers.
         #   At interval=300 s, cap=50 → 2.9 rounds/s → 2.9 × 50 × 50 µs = 7 ms/s.
         #
-        # That budget is for a 1000-node fleet, and the cost is quadratic in
-        # fleet size, so a fixed 30 s is wildly conservative for a single-metro
-        # deployment: at 15 nodes K ≈ 14, and a 5 s interval costs
-        # 3 rounds/s × 14 × 50 µs ≈ 2 ms/s — 0.2 % of a core, against the 57 %
-        # this limit exists to avoid.  Paying it anyway is not free: each node
-        # only associates a given aircraft every 30 s, which is why a
-        # 15-node metro showed 10 of 13 aircraft as single-node arc estimates
-        # (~7 km error, the bistatic ellipse is genuinely that wide) instead of
-        # multinode solves (measured 0.15–1.0 km).
+        # A previous change scaled this down with fleet size, on the reasoning
+        # that a 15-node metro costs ~2 ms/s against the 57 % the limit exists
+        # to avoid, so the CPU budget allowed associating far more often.  The
+        # arithmetic was right and the premise was wrong.
         #
-        # So scale with fleet size rather than hardcoding a smaller number:
-        # the interval is recomputed on registration as
-        #   clamp(max_interval * n_nodes / 1000, _ASSOC_MIN_INTERVAL_FLOOR_S,
-        #         max_interval)
-        # which reproduces 30 s at the 1000-node fleet the budget was written
-        # for and relaxes it proportionally below that.
-        self._ASSOC_MAX_INTERVAL_S: float = max_assoc_interval_s
-        self._ASSOC_MIN_INTERVAL_FLOOR_S: float = 2.0
-        self._ASSOC_INTERVAL_REF_NODES: int = 1000
-        self._ASSOC_MIN_INTERVAL_S: float = max_assoc_interval_s
+        # Measured offline over 6 seeds (backend/scripts/association_bench.py),
+        # ghost tracks as a share of all tracks:
+        #
+        #     interval    ghosts        real tracks   solves
+        #        2 s      40% (sd 13)      9-13        1139
+        #        5 s      34% (sd  9)      9-14         554
+        #       10 s      19% (sd 13)      8-13         286
+        #       30 s       6% (sd  9)      8-12         109
+        #
+        # 2s vs 30s is a 33-point difference, t=4.9.  Crucially the real-track
+        # count and the matched position error (~0.28 km median) are flat
+        # across the whole sweep: associating more often buys no extra targets
+        # and no extra accuracy, it just re-samples the same geometry and mints
+        # more false tracks.  The quantity that drives ghosts is how many
+        # aircraft share an overlap zone, which has nothing to do with node
+        # count -- so scaling on node count optimised CPU headroom, a resource
+        # that was not the constraint.
+        #
+        # Back to a single interval.  ASSOC_MIN_INTERVAL_S stays wired through
+        # from config (it was dead config before, defined but never passed), so
+        # this is tunable without editing library source.
+        self._ASSOC_MIN_INTERVAL_S: float = assoc_interval_s
         self._ASSOC_MAX_NEIGHBORS: int = 50
         # Frame-skew telemetry (see submit_frame).  The offline benchmark
         # assumes a clean stagger across frame_interval; these make the real
@@ -588,22 +595,6 @@ class InterNodeAssociator:
                     self._neighbors.setdefault(existing_id, set()).add(node_id)
 
             self.node_geometries[node_id] = geo
-            self._recompute_assoc_interval()
-
-    def _recompute_assoc_interval(self) -> None:
-        """Scale the per-node association rate limit to the registered fleet.
-
-        The limit guards against O(K)xN CPU burn, which is quadratic in fleet
-        size, so a value sized for 1000 nodes throttles a 15-node metro by ~70x
-        more than its own cost warrants — costing multinode solves (and so
-        position accuracy) for no benefit.  Caller holds _register_lock.
-        """
-        n_nodes = max(1, len(self.node_geometries))
-        scaled = self._ASSOC_MAX_INTERVAL_S * n_nodes / self._ASSOC_INTERVAL_REF_NODES
-        self._ASSOC_MIN_INTERVAL_S = min(
-            self._ASSOC_MAX_INTERVAL_S,
-            max(self._ASSOC_MIN_INTERVAL_FLOOR_S, scaled),
-        )
 
     def submit_frame(self, node_id: str, frame: dict, timestamp_ms: int) -> list[AssociationCandidate]:
         """Submit a detection frame and find associations with other recent frames.
