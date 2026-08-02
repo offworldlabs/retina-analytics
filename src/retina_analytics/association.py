@@ -82,6 +82,77 @@ def _bistatic_delay_at(target_enu, tx_enu, rx_enu=(0, 0, 0)):
     return (d_tx + d_rx - d_bl) / C_KM_US
 
 
+# ── Doppler as a velocity projection ─────────────────────────────────────────
+#
+# For one TX/RX pair and a target at p moving at v, the bistatic Doppler is
+#
+#     f_d = (1/λ) · v · (u_tx + u_rx)
+#
+# where u_tx, u_rx are unit vectors from the *target* toward TX and RX.  Writing
+# b = u_tx + u_rx (the bistatic bisector, |b| = 2·cos(β/2) for bistatic angle β):
+#
+#     f_d · λ  =  v · b
+#
+# So each node measures one scalar projection of the 3-D velocity onto a known
+# axis — an axis that depends on the TX position, the RX position, and the
+# target position.  Two nodes therefore measure projections onto *different*
+# axes, which is why comparing their Doppler values (in Hz or normalised to
+# m/s) is meaningless: it subtracts components of the same vector resolved
+# along different directions.  What can be tested is whether a *physically
+# plausible* velocity exists that satisfies both projections at once.
+
+# No aircraft in this system exceeds ~270 m/s; airliners top out near 290 m/s
+# ground speed, more with a jetstream.  340 m/s leaves headroom for a strong
+# tailwind while still rejecting the geometrically impossible.
+_V_MAX_MS = 340.0
+
+# Below this the two projection axes are too nearly parallel to solve for a
+# horizontal velocity — the 2x2 system is ill-conditioned and any speed can be
+# fitted, so the test abstains rather than producing a meaningless number.
+_MIN_AXIS_DET = 0.05
+
+# |b| -> 0 on the baseline (β -> 180°), where Doppler carries no velocity
+# information at all.  Measurements from such geometry are uninformative, not
+# wrong, so they abstain too.
+_MIN_BISECTOR = 0.15
+
+
+def _bisector(target_enu, tx_enu, rx_enu):
+    """Return b = u_tx + u_rx at the target, in the same ENU frame."""
+    d_tx = _norm([target_enu[i] - tx_enu[i] for i in range(3)]) or 1e-9
+    d_rx = _norm([target_enu[i] - rx_enu[i] for i in range(3)]) or 1e-9
+    return tuple(
+        (tx_enu[i] - target_enu[i]) / d_tx + (rx_enu[i] - target_enu[i]) / d_rx
+        for i in range(3)
+    )
+
+
+def implied_horizontal_speed(m_a, b_a, m_b, b_b):
+    """Speed of the level-flight velocity implied by two Doppler projections.
+
+    Returns None when the geometry cannot support the inference (near-parallel
+    axes, or a target on a baseline where |b| collapses) — the caller must treat
+    that as "no information", not as a pass or a fail.
+
+    Two projections give two equations in three velocity components, so the
+    system is under-determined and *some* velocity always exists: consistency
+    alone proves nothing.  Pinning v_up = 0 — aircraft climb at a few m/s
+    against a few hundred horizontal — makes it exactly determined in
+    (v_east, v_north), and the resulting speed is then a real physical claim
+    that can be checked against what an aircraft can do.
+    """
+    if _norm(b_a) < _MIN_BISECTOR or _norm(b_b) < _MIN_BISECTOR:
+        return None
+    # [b_a.e  b_a.n] [v_e]   [m_a]
+    # [b_b.e  b_b.n] [v_n] = [m_b]
+    det = b_a[0] * b_b[1] - b_a[1] * b_b[0]
+    if abs(det) < _MIN_AXIS_DET:
+        return None
+    v_e = (m_a * b_b[1] - m_b * b_a[1]) / det
+    v_n = (b_a[0] * m_b - b_b[0] * m_a) / det
+    return math.hypot(v_e, v_n)
+
+
 # ── Node Pair Configuration ─────────────────────────────────────────────────
 
 @dataclass
@@ -109,9 +180,17 @@ class OverlapZone:
     grid_points: list[tuple[float, float, float]] = field(default_factory=list)
     # For each grid point: (delay_a_us, delay_b_us) expected bistatic delays
     delay_pairs: list[tuple[float, float]] = field(default_factory=list)
+    # For each grid point: (b_a, b_b) bistatic bisector vectors in the zone's
+    # ENU frame.  Doppler measures v · b, so these are the axes along which the
+    # two nodes observe the velocity — see implied_horizontal_speed.
+    bisector_pairs: list[tuple[tuple, tuple]] = field(default_factory=list)
+    # Carrier frequencies, needed to convert Hz to the frequency-independent
+    # projection v · b = f_d · λ.
+    fc_a_hz: float = 195e6
+    fc_b_hz: float = 195e6
     # Association gate parameters
     delay_gate_us: float = 5.0     # max delay mismatch between prediction and measurement
-    doppler_gate_hz: float = 30.0  # max Doppler mismatch
+    doppler_gate_hz: float = 30.0  # retained for the wire format / overlap summary
 
     def __post_init__(self):
         # Lazily-built numpy cache for find_associations (populated on first call).
@@ -215,6 +294,7 @@ def compute_overlap_zone(geo_a: NodeGeometry, geo_b: NodeGeometry,
 
     grid_points = []
     delay_pairs = []
+    bisector_pairs = []
 
     for alt_km in altitudes_km:
         for i in range(n_steps):
@@ -241,12 +321,25 @@ def compute_overlap_zone(geo_a: NodeGeometry, geo_b: NodeGeometry,
 
                 grid_points.append((lat, lon, alt_km))
                 delay_pairs.append((delay_a, delay_b))
+                # Bistatic bisector b = u_tx + u_rx (unit vectors from the
+                # target toward each station).  Doppler measures v · b — see
+                # _velocity_from_projections — so these are the projection axes
+                # the two nodes observe the velocity along.  Precomputed here
+                # because the grid is fixed at registration and the runtime
+                # test then costs a couple of dot products.
+                bisector_pairs.append((
+                    _bisector(target_enu, tx_a_enu, rx_a_enu),
+                    _bisector(target_enu, tx_b_enu, rx_b_enu),
+                ))
 
     return OverlapZone(
         node_a_id=geo_a.node_id,
         node_b_id=geo_b.node_id,
         grid_points=grid_points,
         delay_pairs=delay_pairs,
+        bisector_pairs=bisector_pairs,
+        fc_a_hz=geo_a.fc_hz,
+        fc_b_hz=geo_b.fc_hz,
         delay_gate_us=delay_gate_us,
         doppler_gate_hz=doppler_gate_hz,
     )
@@ -295,7 +388,6 @@ def find_associations(zone: OverlapZone,
     na, nb = len(da), len(db)
 
     gate   = np.float32(zone.delay_gate_us)
-    dgmax  = np.float32(zone.doppler_gate_hz * 3.0)
 
     # ── Delay gate matrices ───────────────────────────────────────────────────
     # gate_a[i, g] = True  ↔  |delay_a[i] − pred_a[g]| < delay_gate
@@ -308,11 +400,12 @@ def find_associations(zone: OverlapZone,
     # through BLAS SGEMM (7-8× faster than uint8 which has no BLAS path).
     match = gate_a.astype(np.float32) @ gate_b.astype(np.float32)  # (Na, Nb)
 
-    # ── Doppler gate (relaxed; only when both non-zero — preserves original) ─
-    both_nz = (np.abs(fa[:, None]) > 0.0) & (np.abs(fb) > 0.0)  # (Na, Nb)
-    dop_ok  = ~both_nz | (np.abs(fa[:, None] - fb) <= dgmax)     # (Na, Nb)
-
-    rows, cols = np.where((match > 0) & dop_ok)  # surviving (i_a, i_b) pairs
+    # Doppler is deliberately NOT gated here.  It measures v · b, a projection
+    # onto an axis that depends on the grid point, so no pairwise comparison of
+    # the two values is meaningful until a candidate position is chosen.  The
+    # plausibility test happens per-candidate below, once the best grid point
+    # (and therefore the two projection axes) is known.
+    rows, cols = np.where(match > 0)  # surviving (i_a, i_b) pairs
     if rows.size == 0:
         return []
 
@@ -340,6 +433,26 @@ def find_associations(zone: OverlapZone,
         res   = np.abs(pred_a[valid_g] - da[i_a]) + np.abs(pred_b[valid_g] - db[i_b])
         best_g = int(valid_g[np.argmin(res)])
         g_lat, g_lon, g_alt = zone.grid_points[best_g]
+
+        # ── Doppler plausibility at the candidate position ───────────────────
+        # Now that a grid point is chosen, both projection axes are known, so
+        # the two Doppler measurements can be turned into a velocity and asked
+        # whether an aircraft could fly it.  This is the test that works at
+        # n=2, where the solver's rms_doppler cannot help: with two
+        # measurements the residual goes to zero for a false pairing exactly as
+        # it does for a true one, so the residual carries no information and
+        # the plausibility of the *implied velocity* is all that is left.
+        if zone.bisector_pairs and (fa[i_a] or fb[i_b]):
+            b_a_vec, b_b_vec = zone.bisector_pairs[best_g]
+            speed = implied_horizontal_speed(
+                float(fa[i_a]) * C_KM_S * 1000.0 / zone.fc_a_hz, b_a_vec,
+                float(fb[i_b]) * C_KM_S * 1000.0 / zone.fc_b_hz, b_b_vec,
+            )
+            # None means the geometry cannot support the inference — abstain
+            # rather than guess.  A finite speed above the bound is a positive
+            # proof of impossibility, so reject.
+            if speed is not None and speed > _V_MAX_MS:
+                continue
 
         # ── Ghost-association filter ─────────────────────────────────────────
         # Ghost associations arise when a clutter detection from one node is
