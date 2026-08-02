@@ -503,6 +503,15 @@ class InterNodeAssociator:
         self._ASSOC_INTERVAL_REF_NODES: int = 1000
         self._ASSOC_MIN_INTERVAL_S: float = max_assoc_interval_s
         self._ASSOC_MAX_NEIGHBORS: int = 50
+        # Frame-skew telemetry (see submit_frame).  The offline benchmark
+        # assumes a clean stagger across frame_interval; these make the real
+        # distribution observable instead of assumed.
+        self.frame_skew_ms_total: int = 0
+        self.frame_skew_samples: int = 0
+        self.frame_skew_ms_max: int = 0
+        self.frame_sync_rejects: int = 0
+        # 500 ms buckets, last bucket is "5 s or more".
+        self.frame_skew_hist: list[int] = [0] * 11
         self._last_assoc: dict[str, float] = {}  # node_id → last association wall-time
         # Maximum allowed age difference between two frames being associated.
         # Aircraft at 250 m/s move ~0.5 km in 2 s; frames further apart than
@@ -641,8 +650,22 @@ class InterNodeAssociator:
             # caps aircraft-motion error to ≤ 0.75 km (250 m/s × 3 s) while
             # still allowing all intra-cluster pairs to associate.
             other_ts = other_frame.get("timestamp", 0)
-            if timestamp_ms > 0 and other_ts > 0 and abs(timestamp_ms - other_ts) > self._FRAME_SYNC_MAX_AGE_MS:
-                continue
+            if timestamp_ms > 0 and other_ts > 0:
+                # Telemetry: how far apart in time are the frames we actually
+                # pair?  Aircraft move ~250 m/s, so this skew is a position
+                # error injected straight into the association geometry — a
+                # 4 s skew is ~1 km, comparable to the delay gate itself, and
+                # is a candidate explanation for false pairings.  Recorded
+                # because it was cheaper to measure than to keep inferring.
+                _skew = abs(timestamp_ms - other_ts)
+                self.frame_skew_ms_total += _skew
+                self.frame_skew_samples += 1
+                self.frame_skew_ms_max = max(self.frame_skew_ms_max, _skew)
+                _b = min(int(_skew // 500), len(self.frame_skew_hist) - 1)
+                self.frame_skew_hist[_b] += 1
+                if _skew > self._FRAME_SYNC_MAX_AGE_MS:
+                    self.frame_sync_rejects += 1
+                    continue
             pair_key = tuple(sorted([node_id, other_id]))
             zone = self.overlap_zones.get(pair_key)
             if zone is None or not zone.delay_pairs:
