@@ -127,8 +127,8 @@ def _bisector(target_enu, tx_enu, rx_enu):
     )
 
 
-def implied_horizontal_speed(m_a, b_a, m_b, b_b):
-    """Speed of the level-flight velocity implied by two Doppler projections.
+def implied_horizontal_velocity(m_a, b_a, m_b, b_b):
+    """Level-flight velocity (v_east, v_north) implied by two Doppler projections.
 
     Returns None when the geometry cannot support the inference (near-parallel
     axes, or a target on a baseline where |b| collapses) — the caller must treat
@@ -138,8 +138,9 @@ def implied_horizontal_speed(m_a, b_a, m_b, b_b):
     system is under-determined and *some* velocity always exists: consistency
     alone proves nothing.  Pinning v_up = 0 — aircraft climb at a few m/s
     against a few hundred horizontal — makes it exactly determined in
-    (v_east, v_north), and the resulting speed is then a real physical claim
-    that can be checked against what an aircraft can do.
+    (v_east, v_north), and the result is then a real physical claim that can be
+    checked against what an aircraft can do, and used to start the solver
+    somewhere sensible.
     """
     if _norm(b_a) < _MIN_BISECTOR or _norm(b_b) < _MIN_BISECTOR:
         return None
@@ -150,7 +151,13 @@ def implied_horizontal_speed(m_a, b_a, m_b, b_b):
         return None
     v_e = (m_a * b_b[1] - m_b * b_a[1]) / det
     v_n = (b_a[0] * m_b - b_b[0] * m_a) / det
-    return math.hypot(v_e, v_n)
+    return (v_e, v_n)
+
+
+def implied_horizontal_speed(m_a, b_a, m_b, b_b):
+    """Speed of the level-flight velocity implied by two Doppler projections."""
+    v = implied_horizontal_velocity(m_a, b_a, m_b, b_b)
+    return None if v is None else math.hypot(v[0], v[1])
 
 
 # ── Node Pair Configuration ─────────────────────────────────────────────────
@@ -234,6 +241,13 @@ class AssociationCandidate:
     # Propagated to the solver input so the solver worker can maintain a
     # per-aircraft position history for multi-epoch EWMA smoothing.
     adsb_hex: str | None = None
+    # Level-flight (v_east, v_north) in m/s implied by the two Doppler
+    # projections at the matched grid point, or None where the geometry could
+    # not support the inference.  Seeds the solver, which otherwise starts
+    # velocity at zero — at n=2 the system is under-determined, so from a zero
+    # start the optimiser slides along the null direction and lands wherever
+    # the trust region takes it.  That is the origin of the impossible speeds.
+    vel_est_ms: tuple | None = None
 
 
 # ── Pre-computation ──────────────────────────────────────────────────────────
@@ -442,17 +456,19 @@ def find_associations(zone: OverlapZone,
         # measurements the residual goes to zero for a false pairing exactly as
         # it does for a true one, so the residual carries no information and
         # the plausibility of the *implied velocity* is all that is left.
+        vel_est = None
         if zone.bisector_pairs and (fa[i_a] or fb[i_b]):
             b_a_vec, b_b_vec = zone.bisector_pairs[best_g]
-            speed = implied_horizontal_speed(
+            vel_est = implied_horizontal_velocity(
                 float(fa[i_a]) * C_KM_S * 1000.0 / zone.fc_a_hz, b_a_vec,
                 float(fb[i_b]) * C_KM_S * 1000.0 / zone.fc_b_hz, b_b_vec,
             )
             # None means the geometry cannot support the inference — abstain
             # rather than guess.  A finite speed above the bound is a positive
             # proof of impossibility, so reject.
-            if speed is not None and speed > _V_MAX_MS:
-                continue
+            if vel_est is not None:
+                if math.hypot(vel_est[0], vel_est[1]) > _V_MAX_MS:
+                    continue
 
         # ── Ghost-association filter ─────────────────────────────────────────
         # Ghost associations arise when a clutter detection from one node is
@@ -552,6 +568,7 @@ def find_associations(zone: OverlapZone,
             grid_alt_km   = g_alt,
             had_adsb_override = _had_adsb_override,
             adsb_hex      = _candidate_hex,
+            vel_est_ms    = vel_est,
         )
         key = (i_a, i_b)
         existing = candidates.get(key)
@@ -918,12 +935,24 @@ class InterNodeAssociator:
             if _group_hex is None:
                 _group_hex = next((c.adsb_hex for c in group if c.adsb_hex), None)
 
+            # Mean of the per-candidate level-flight velocity estimates that
+            # the geometry could support.  Seeds the solver; see vel_est_ms on
+            # AssociationCandidate for why starting from zero goes wrong.
+            _vels = [c.vel_est_ms for c in group if c.vel_est_ms is not None]
+            _vel_seed = None
+            if _vels:
+                _vel_seed = {
+                    "vel_east_ms": sum(v[0] for v in _vels) / len(_vels),
+                    "vel_north_ms": sum(v[1] for v in _vels) / len(_vels),
+                }
+
             solver_inputs.append({
                 "initial_guess": {
                     "lat": g_lat,
                     "lon": g_lon,
                     "alt_km": g_alt_km,
                 },
+                "initial_velocity": _vel_seed,
                 "measurements": list(by_node.values()),
                 "n_nodes": len(by_node),
                 "timestamp_ms": group[0].timestamp_ms,
