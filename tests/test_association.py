@@ -331,3 +331,55 @@ class TestInterNodeAssociator:
         assert len(solver_inputs) == 2, (
             f"Expected 2 separate solver inputs for distant aircraft, got {len(solver_inputs)}"
         )
+
+
+# ── Association rate limit scales with fleet size ────────────────────────────
+
+
+_SCALING_CFG = {
+    "rx_lat": 33.939, "rx_lon": -84.651, "rx_alt_ft": 950,
+    "tx_lat": 33.756, "tx_lon": -84.331, "tx_alt_ft": 1600,
+    "fc_hz": 195e6, "beam_width_deg": 41, "max_range_km": 50,
+}
+
+
+class TestAssocIntervalScaling:
+    """The per-node association rate limit guards against O(K)xN CPU burn,
+    which is quadratic in fleet size.  A fixed value sized for a 1000-node
+    fleet throttles a single-metro deployment ~70x harder than its own cost
+    warrants — and the cost of that throttle is real: fewer multinode solves,
+    so aircraft fall back to single-node arc estimates whose error is the
+    width of the bistatic ellipse (~7 km) rather than a fix (~0.2-1 km).
+    """
+
+    def _register(self, assoc, n):
+        for i in range(n):
+            cfg = dict(_SCALING_CFG)
+            cfg["rx_lat"] += i * 0.01
+            assoc.register_node(f"scale-{i}", cfg)
+
+    def test_small_fleet_relaxes_to_floor(self):
+        assoc = InterNodeAssociator(grid_step_km=30.0)
+        self._register(assoc, 15)
+        # 30 * 15/1000 = 0.45 s, clamped up to the 2 s floor.
+        assert assoc._ASSOC_MIN_INTERVAL_S == assoc._ASSOC_MIN_INTERVAL_FLOOR_S
+
+    def test_never_exceeds_configured_ceiling(self):
+        assoc = InterNodeAssociator(grid_step_km=30.0, max_assoc_interval_s=30.0)
+        self._register(assoc, 5)
+        assert assoc._ASSOC_MIN_INTERVAL_S <= 30.0
+
+    def test_reference_fleet_size_reproduces_ceiling(self):
+        # The budget in the docstring was computed for 1000 nodes; the scaling
+        # must reproduce exactly that value there, so the nationwide profile is
+        # unchanged by this becoming dynamic.
+        assoc = InterNodeAssociator(grid_step_km=30.0, max_assoc_interval_s=30.0)
+        assoc.node_geometries = dict.fromkeys(range(1000), None)
+        assoc._recompute_assoc_interval()
+        assert assoc._ASSOC_MIN_INTERVAL_S == 30.0
+
+    def test_ceiling_is_configurable(self):
+        assoc = InterNodeAssociator(grid_step_km=30.0, max_assoc_interval_s=10.0)
+        assoc.node_geometries = dict.fromkeys(range(1000), None)
+        assoc._recompute_assoc_interval()
+        assert assoc._ASSOC_MIN_INTERVAL_S == 10.0
