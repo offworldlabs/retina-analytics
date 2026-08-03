@@ -205,8 +205,13 @@ class TestConstantVelocityGate:
         p = pairs[0]
         assert p.chi2_per_dof is not None and p.chi2_per_dof < 1.0
         assert a.track_pairs_accepted == 1
-        # The fit replaces the 3 km grid point with a real position estimate.
-        assert math.hypot((p.lat - 34.88) * 111.32, (p.lon + 82.35) * 91.3) < 1.0
+        # The fit replaces the 3 km grid point with a real position estimate,
+        # reported at the *last* epoch — where the target is now — so the
+        # expectation is the start dead-reckoned across the observation window.
+        span = (_N - 1) * _DT
+        exp_lat = 34.88 + -90.0 * span / 111_320.0
+        exp_lon = -82.35 + 180.0 * span / (111_320.0 * math.cos(math.radians(34.88)))
+        assert math.hypot((p.lat - exp_lat) * 111.32, (p.lon - exp_lon) * 91.3) < 1.0
         assert p.vel_east_ms == pytest.approx(180.0, abs=15.0)
         assert p.vel_north_ms == pytest.approx(-90.0, abs=15.0)
 
