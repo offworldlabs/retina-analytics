@@ -304,6 +304,12 @@ class TrackPairCandidate:
     chi2_per_dof: float | None = None
     dof: int = 0
     n_epochs: int = 0
+    # The measurements the constant-velocity fit needs, in
+    # fit_constant_velocity's input shape.  Carried so the fit can run
+    # somewhere other than here: it is an ~86 ms LM solve and submit_tracks
+    # runs in the frame worker, where that cost is frame latency.  None once
+    # the fit has run, inline or downstream.
+    epochs: list | None = None
 
 
 # ── Pre-computation ──────────────────────────────────────────────────────────
@@ -1231,13 +1237,26 @@ class InterNodeAssociator:
                 lat, lon = fit["lat"], fit["lon"]
                 alt_km = fit["alt_m"] / 1000.0
                 vel_e, vel_n = fit["vel_east"], fit["vel_north"]
+                deferred_epochs = None
             else:
-                # Not enough history yet.  Held rather than dropped: the
-                # pairing is re-tested every round, and a real one
-                # accumulates the span it needs within a few frames.
-                # Downstream decides whether an unconfirmed pairing may be
-                # published.
+                # No inline fit.  Two reasons, and they want different things.
+                #
+                # Too little history: held rather than dropped, since the
+                # pairing is re-tested every round and a real one accumulates
+                # the span it needs within a few frames.
+                #
+                # No cv_fit injected: the caller wants the fit run elsewhere,
+                # so the epochs travel with the candidate and the solver worker
+                # does it on its own threads.  That is the production shape —
+                # an 86 ms solve does not belong on the frame path.
                 self.track_pairs_unfitted += 1
+                deferred_epochs = (
+                    epochs
+                    if (self.cv_fit is None
+                        and len(epochs) >= self.cv_min_epochs
+                        and min(span_a, span_b) >= self.cv_min_span_s)
+                    else None
+                )
 
             cand = TrackPairCandidate(
                 timestamp_ms=timestamp_ms,
@@ -1254,6 +1273,7 @@ class InterNodeAssociator:
                 lat=lat, lon=lon, alt_km=alt_km,
                 vel_east_ms=vel_e, vel_north_ms=vel_n,
                 chi2_per_dof=chi2_per_dof, dof=dof, n_epochs=len(epochs),
+                epochs=deferred_epochs,
             )
             (fitted if chi2_per_dof is not None else held).append(cand)
 
@@ -1380,6 +1400,15 @@ class InterNodeAssociator:
                 "adsb_hex": None,
                 "chi2_per_dof": worst_chi2,
                 "n_epochs": min(p.n_epochs for p in group),
+                # Present only when the fit has not run yet: the solver worker
+                # runs it there, on its own threads and behind its own queue,
+                # instead of on the frame path.  Taken from the pairing with the
+                # most history, which is the best-conditioned in the cluster.
+                "cv_epochs": max((p.epochs for p in group if p.epochs),
+                                 key=len, default=None),
+                "track_pair_ids": sorted(
+                    {(p.track_a_id, p.track_b_id) for p in group}
+                )[:1],
                 "track_ids": sorted({p.track_a_id for p in group}
                                     | {p.track_b_id for p in group}),
             })
