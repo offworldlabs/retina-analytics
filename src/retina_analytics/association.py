@@ -983,6 +983,16 @@ class InterNodeAssociator:
         if not neighbors:
             return []
 
+        # Same rate limit submit_frame uses, and it matters more here: the
+        # coarse grid gate is cheap but every pairing that survives it costs an
+        # LM fit, and a hardware node sends at 22 fps.  Storing the tracks above
+        # is unconditional, so a neighbour triggering its own round still sees
+        # this node's latest history.
+        now = __import__('time').monotonic()
+        if now - self._last_assoc.get(node_id, 0.0) < self._ASSOC_MIN_INTERVAL_S:
+            return []
+        self._last_assoc[node_id] = now
+
         out: list[TrackPairCandidate] = []
         for other_id in list(neighbors):
             other_tracks = self._pending_tracks.get(other_id)
