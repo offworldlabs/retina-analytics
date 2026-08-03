@@ -337,3 +337,102 @@ class TestFormatTrackPairsForSolver:
 
     def test_empty_input(self):
         assert InterNodeAssociator().format_track_pairs_for_solver([]) == []
+
+
+# Third node at the same receiver — a triple-illuminator site — for exercising
+# cross-node-pair sharing, which hypothesis selection must never forbid.
+_NODE_C = {
+    "rx_lat": 34.85, "rx_lon": -82.40, "rx_alt_ft": 1000,
+    "tx_lat": 35.1702, "tx_lon": -82.2905, "tx_alt_ft": 3000,
+    "fc_hz": 201e6, "beam_width_deg": 90, "max_range_km": 60,
+    "beam_azimuth_deg": 45.0,
+}
+
+
+class TestHypothesisSelection:
+    """Pairings are competing hypotheses, not independent candidates.
+
+    One track is one aircraft, so two pairings sharing a track are mutually
+    exclusive, and the χ² from the CV fit is the first non-degenerate score
+    this competition has had — assignment on the delay residual failed (the
+    cost is ~0 for every pairing at n=2) and ranking by cluster size failed
+    (reverted; ghosts went 52% → 85%).
+    """
+
+    def test_selection_rejects_what_the_threshold_cannot(self):
+        """The decisive case: a crossed pairing *under* the χ² bar.
+
+        Over a 4 s span a crossed pairing fits at χ²/dof ≈ 1.4 — below any
+        threshold that keeps real targets, which is why the absolute gate needs
+        a 12 s span.  Selection does not need the crossed hypothesis to fail
+        the bar, only the true one to beat it: ~1e-4 beats 1.4 at any span.
+        """
+        hist_p_a = _history(_NODE_A, 34.88, -82.35, 7.0, 180.0, -90.0,
+                            n=3, dt=2.0, anchor="end")
+        hist_p_b = _history(_NODE_B, 34.88, -82.35, 7.0, 180.0, -90.0,
+                            n=3, dt=2.0, anchor="end")
+        hist_q_b = _history(_NODE_B, 34.88, -82.35, 7.0, -150.0, 170.0,
+                            n=3, dt=2.0, anchor="end")
+
+        def run(exclusive):
+            a = _assoc(cv_fit=_cv_fit(), cv_min_span_s=2.0, cv_min_epochs=2,
+                       cv_exclusive=exclusive)
+            a.submit_tracks("site-a", [{"track_id": "aP", "history": hist_p_a}], 1000)
+            return a, a.submit_tracks("site-b", [
+                {"track_id": "bP", "history": hist_p_b},
+                {"track_id": "bQ", "history": hist_q_b},
+            ], 2000)
+
+        # Threshold alone passes both hypotheses — the ghost publishes.
+        _, both = run(exclusive=False)
+        assert len(both) == 2
+
+        # Selection keeps only the better explanation of track aP.
+        a, pairs = run(exclusive=True)
+        assert len(pairs) == 1
+        assert {pairs[0].track_a_id, pairs[0].track_b_id} == {"aP", "bP"}
+        assert a.track_pairs_superseded == 1
+
+    def test_claim_then_vet(self):
+        """A failing best hypothesis still claims its tracks.
+
+        If the best explanation of two tracks is implausible, a worse or
+        unscored one must not inherit them — otherwise rejection would promote
+        exactly the pairing the fit ranked lower.
+        """
+        crossed_a, crossed_b = _crossing_pair()          # long span → χ² fails
+        short_b = _history(_NODE_B, 34.88, -82.35, 7.0, -150.0, 170.0,
+                           n=2, dt=2.0, anchor="end")    # unscoreable
+
+        a = _assoc(cv_fit=_cv_fit())
+        a.submit_tracks("site-a", [{"track_id": "a1", "history": crossed_a}], 1000)
+        pairs = a.submit_tracks("site-b", [
+            {"track_id": "b1", "history": crossed_b},
+            {"track_id": "b2", "history": short_b},
+        ], 2000)
+
+        assert pairs == []
+        assert a.track_pairs_rejected == 1    # (a1, b1): fitted, failed, claimed
+        assert a.track_pairs_superseded >= 1  # (a1, b2): held, blocked by claim
+
+    def test_sharing_across_node_pairs_is_allowed(self):
+        """A 3-node target pairs its A-track with a B-track AND a C-track.
+
+        Exclusivity is per node pair — the Ta×Tb and Ta×Tc matrices are
+        separate — because cross-pair sharing is not a conflict, it is the
+        n≥3 structure the solver wants.
+        """
+        def h(cfg):
+            return _history(cfg, 34.88, -82.35, 7.0, 180.0, -90.0)
+
+        a = InterNodeAssociator(grid_step_km=3.0, cv_fit=_cv_fit())
+        a.register_node("site-a", _NODE_A)
+        a.register_node("site-b", _NODE_B)
+        a.register_node("site-c", _NODE_C)
+        a.submit_tracks("site-a", [{"track_id": "a1", "history": h(_NODE_A)}], 1000)
+        a.submit_tracks("site-b", [{"track_id": "b1", "history": h(_NODE_B)}], 1500)
+        pairs = a.submit_tracks("site-c", [{"track_id": "c1", "history": h(_NODE_C)}], 2000)
+
+        assert len(pairs) == 2
+        assert all("c1" in (p.track_a_id, p.track_b_id) for p in pairs)
+        assert a.track_pairs_superseded == 0

@@ -682,7 +682,7 @@ class InterNodeAssociator:
     def __init__(self, delay_gate_us: float = 5.0, doppler_gate_hz: float = 30.0,
                  grid_step_km: float = 30.0, assoc_interval_s: float = 30.0,
                  cv_fit=None, cv_chi2_max: float = 2.0, cv_min_epochs: int = 4,
-                 cv_min_span_s: float = 12.0):
+                 cv_min_span_s: float = 12.0, cv_exclusive: bool = True):
         self.delay_gate_us = delay_gate_us
         self.doppler_gate_hz = doppler_gate_hz
         self.grid_step_km = grid_step_km
@@ -723,12 +723,18 @@ class InterNodeAssociator:
         # all by 20 s.  Gating on epoch count alone would pass a 22 fps node
         # 5 epochs spanning 0.2 s, which carries no information whatsoever.
         self.cv_min_span_s = cv_min_span_s
+        # Hypothesis selection: within one node pair, one track belongs to at
+        # most one pairing, awarded to the lowest chi2.  See _pair_tracks
+        # stage 2 for why this exists and why greedy-on-chi2 is safe where two
+        # earlier exclusivity schemes were not.
+        self.cv_exclusive = cv_exclusive
         # Counters for what the fine test actually did, so its value is
         # observable rather than assumed.
-        self.track_pairs_gated: int = 0     # survived the coarse delay grid
-        self.track_pairs_rejected: int = 0  # ... then failed the chi2 test
+        self.track_pairs_gated: int = 0       # survived the coarse delay grid
+        self.track_pairs_rejected: int = 0    # ... then failed the chi2 test
         self.track_pairs_accepted: int = 0
-        self.track_pairs_unfitted: int = 0  # too few epochs, or the fit failed
+        self.track_pairs_unfitted: int = 0    # too few epochs, or the fit failed
+        self.track_pairs_superseded: int = 0  # lost their tracks to a better fit
         # Adjacency index: node_id → set of neighbor node_ids that share a real
         # overlap zone (delay_pairs is non-empty).  Built during registration so
         # submit_frame can iterate O(K) neighbors instead of O(N) all nodes.
@@ -1012,7 +1018,14 @@ class InterNodeAssociator:
     def _pair_tracks(self, zone: OverlapZone, tracks_a: list[dict],
                      tracks_b: list[dict], timestamp_ms: int
                      ) -> list[TrackPairCandidate]:
-        results: list[TrackPairCandidate] = []
+        # ── Stage 1: enumerate and score every hypothesis ────────────────────
+        # Each surviving (track_a, track_b) is a hypothesis about the world:
+        # "these two echo histories are one aircraft."  They are scored here and
+        # judged against each other in stage 2 — not one at a time, because the
+        # hypotheses are not independent: one track is one aircraft, so two
+        # pairings sharing a track are mutually exclusive.
+        fitted: list[TrackPairCandidate] = []
+        held: list[TrackPairCandidate] = []   # too little span to score yet
         for ta in tracks_a:
             hist_a = ta.get("history") or []
             if not hist_a:
@@ -1043,9 +1056,15 @@ class InterNodeAssociator:
                         float(last_a["doppler_hz"]) * C_KM_S * 1000.0 / zone.fc_a_hz, b_a,
                         float(last_b["doppler_hz"]) * C_KM_S * 1000.0 / zone.fc_b_hz, b_b,
                     )
-                    if v is not None:
-                        if math.hypot(v[0], v[1]) > _V_MAX_MS:
-                            continue
+                    # Seed only — never a rejection here, unlike the detection
+                    # path.  The implied-speed test measured 0% power against
+                    # real cross pairings (their speeds are 27-298 m/s), and at
+                    # a 3 km grid point on a possibly-wrong altitude layer the
+                    # distorted bisectors make it false-alarm against true ones
+                    # (observed: it silently dropped a genuine pairing in the
+                    # three-node test).  The fit is the arbiter now; an absurd
+                    # implied velocity just means no seed.
+                    if v is not None and math.hypot(v[0], v[1]) <= _V_MAX_MS:
                         vel_seed = {"vel_east_ms": v[0], "vel_north_ms": v[1]}
 
                 lat, lon, alt_km = g_lat, g_lon, g_alt
@@ -1055,10 +1074,19 @@ class InterNodeAssociator:
                 dof = 0
                 epochs = _merge_epochs(hist_a, zone.node_a_id, hist_b, zone.node_b_id)
 
-                span_s = (epochs[-1]["t_s"] - epochs[0]["t_s"]) if epochs else 0.0
+                # The span that must clear cv_min_span_s is the *shorter
+                # track's own*, not the merged window's.  Discrimination comes
+                # from curvature accumulated by both trajectories; a 2-sample
+                # track welded onto a 20 s one fits at chi2/dof ~0.04 because
+                # its 4 residuals can be absorbed by sliding the velocity along
+                # the long track's unobservable direction — the least-tested
+                # hypothesis would then outscore the most-tested one in
+                # selection, which is exactly backwards.
+                span_a = float(hist_a[-1]["t_s"]) - float(hist_a[0]["t_s"])
+                span_b = float(hist_b[-1]["t_s"]) - float(hist_b[0]["t_s"])
                 if (self.cv_fit is not None
                         and len(epochs) >= self.cv_min_epochs
-                        and span_s >= self.cv_min_span_s):
+                        and min(span_a, span_b) >= self.cv_min_span_s):
                     fit = self.cv_fit(
                         {"initial_guess": {"lat": g_lat, "lon": g_lon, "alt_km": g_alt},
                          "initial_velocity": vel_seed,
@@ -1071,22 +1099,18 @@ class InterNodeAssociator:
                         continue
                     chi2_per_dof = fit["chi2_per_dof"]
                     dof = fit["dof"]
-                    if chi2_per_dof > self.cv_chi2_max:
-                        self.track_pairs_rejected += 1
-                        continue
                     lat, lon = fit["lat"], fit["lon"]
                     alt_km = fit["alt_m"] / 1000.0
                     vel_e, vel_n = fit["vel_east"], fit["vel_north"]
-                    self.track_pairs_accepted += 1
                 else:
-                    # Not enough history yet.  Let it through on the coarse gate
-                    # alone rather than dropping the target: the pairing is
-                    # re-tested every round, and a real one accumulates the
-                    # history it needs within a few frames.  Downstream decides
-                    # whether an unconfirmed pairing may be published.
+                    # Not enough history yet.  Held rather than dropped: the
+                    # pairing is re-tested every round, and a real one
+                    # accumulates the span it needs within a few frames.
+                    # Downstream decides whether an unconfirmed pairing may be
+                    # published.
                     self.track_pairs_unfitted += 1
 
-                results.append(TrackPairCandidate(
+                cand = TrackPairCandidate(
                     timestamp_ms=timestamp_ms,
                     node_a_id=zone.node_a_id,
                     node_b_id=zone.node_b_id,
@@ -1101,7 +1125,57 @@ class InterNodeAssociator:
                     lat=lat, lon=lon, alt_km=alt_km,
                     vel_east_ms=vel_e, vel_north_ms=vel_n,
                     chi2_per_dof=chi2_per_dof, dof=dof, n_epochs=len(epochs),
-                ))
+                )
+                (fitted if chi2_per_dof is not None else held).append(cand)
+
+        # ── Stage 2: hypothesis selection ────────────────────────────────────
+        # The absolute threshold alone is blind early: over a 4 s window a
+        # crossed pairing fits at chi2/dof ~1.4, under any bar that keeps real
+        # targets.  But selection does not need the crossed hypothesis to fail
+        # the bar — only the true one to beat it, and ~0.5 beats 1.4 at any
+        # span.  So exclusivity discriminates exactly where the threshold
+        # cannot.
+        #
+        # Greedy in ascending chi2.  Two earlier exclusivity attempts failed —
+        # ranking by cluster size (reverted; contaminated big clusters starved
+        # true pairs) and assignment on the delay residual (recall of true
+        # pairings fell to 64%, the cost being ~0 for every pairing at n=2).
+        # Both failures were the score, not the idea: chi2 from the CV fit is
+        # the first non-degenerate cost this competition has had.
+        #
+        # Claim-then-vet: a winner claims its tracks even when it fails the
+        # threshold.  If the *best* explanation of two tracks is implausible, a
+        # worse one must not inherit them.
+        #
+        # Exclusivity is per node pair only.  A 3-node target legitimately
+        # pairs its A-track with a B-track and a C-track; those matrices are
+        # separate.
+        results: list[TrackPairCandidate] = []
+        claimed_a: set[str] = set()
+        claimed_b: set[str] = set()
+        if self.cv_exclusive:
+            fitted.sort(key=lambda c: c.chi2_per_dof)
+        for c in fitted:
+            if self.cv_exclusive and (
+                    c.track_a_id in claimed_a or c.track_b_id in claimed_b):
+                self.track_pairs_superseded += 1
+                continue
+            claimed_a.add(c.track_a_id)
+            claimed_b.add(c.track_b_id)
+            if c.chi2_per_dof <= self.cv_chi2_max:
+                self.track_pairs_accepted += 1
+                results.append(c)
+            else:
+                self.track_pairs_rejected += 1
+        for c in held:
+            # A held pairing has no score, so it cannot claim anything — and a
+            # track already explained by a scored winner does not get to seed a
+            # second target on no evidence.
+            if self.cv_exclusive and (
+                    c.track_a_id in claimed_a or c.track_b_id in claimed_b):
+                self.track_pairs_superseded += 1
+                continue
+            results.append(c)
         return results
 
     def format_track_pairs_for_solver(
