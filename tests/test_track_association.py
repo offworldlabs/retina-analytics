@@ -436,3 +436,84 @@ class TestHypothesisSelection:
         assert len(pairs) == 2
         assert all("c1" in (p.track_a_id, p.track_b_id) for p in pairs)
         assert a.track_pairs_superseded == 0
+
+
+class TestPairingCostIsBounded:
+    """Association runs in the frame worker, so its cost is frame latency.
+
+    The first version scanned the whole overlap grid once per (track_a,
+    track_b) pairing.  On staging that put the frame queue at 92% depth with
+    the processor 21 s behind a 6 frame/s feed, and the map went empty — the
+    offline bench never showed it, running unthrottled on one core with no
+    queue to fall behind.
+    """
+
+    def _tracks(self, n, node_cfg, prefix):
+        # n aircraft strung along one bearing so they all share the zone.
+        return [
+            {"track_id": f"{prefix}{i}",
+             "history": _history(node_cfg, 34.88 + i * 0.01, -82.35, 7.0, 180.0, -90.0)}
+            for i in range(n)
+        ]
+
+    def test_gate_is_one_contraction_not_one_scan_per_pairing(self):
+        """_batch_grid_match is called once per node pair, not Ta x Tb times."""
+        from unittest import mock
+
+        import retina_analytics.association as assoc_mod
+
+        a = _assoc()
+        a.submit_tracks("site-a", self._tracks(6, _NODE_A, "a"), 1000)
+        with mock.patch.object(assoc_mod, "_batch_grid_match",
+                               wraps=assoc_mod._batch_grid_match) as spy:
+            a.submit_tracks("site-b", self._tracks(6, _NODE_B, "b"), 2000)
+        assert spy.call_count == 1, "one contraction per node pair"
+
+    def test_batch_match_agrees_with_a_per_pair_scan(self):
+        """Vectorising must not change which pairings pass, or which point wins."""
+        import numpy as np
+
+        from retina_analytics.association import _batch_grid_match
+
+        a = _assoc()
+        zone = next(z for z in a.overlap_zones.values() if z.delay_pairs)
+        zone._ensure_np()
+        da = [float(zone._np_pred_a[10]), float(zone._np_pred_a[400]) + 0.4]
+        db = [float(zone._np_pred_b[10]), 9999.0]
+        batched = _batch_grid_match(zone, da, db)
+
+        gate = zone.delay_gate_us
+        for i, d_a in enumerate(da):
+            for j, d_b in enumerate(db):
+                valid = np.nonzero((np.abs(zone._np_pred_a - d_a) < gate)
+                                   & (np.abs(zone._np_pred_b - d_b) < gate))[0]
+                if valid.size == 0:
+                    assert (i, j) not in batched
+                    continue
+                res = (np.abs(zone._np_pred_a[valid] - d_a)
+                       + np.abs(zone._np_pred_b[valid] - d_b))
+                assert batched[(i, j)] == int(valid[np.argmin(res)])
+
+    def test_fits_per_round_are_capped(self):
+        """A crowded zone cannot make one round unboundedly slow."""
+        calls = []
+
+        def counting_fit(fit_input, cfgs):
+            calls.append(1)
+            return _cv_fit()(fit_input, cfgs)
+
+        a = _assoc(cv_fit=counting_fit)
+        a._MAX_FITS_PER_ROUND = 3
+        a.submit_tracks("site-a", self._tracks(6, _NODE_A, "a"), 1000)
+        a.submit_tracks("site-b", self._tracks(6, _NODE_B, "b"), 2000)
+        assert len(calls) <= 3
+
+    def test_deferred_pairings_are_not_lost(self):
+        """Raising the cap recovers pairings a tight one skipped."""
+        def run(cap):
+            a = _assoc(cv_fit=_cv_fit())
+            a._MAX_FITS_PER_ROUND = cap
+            a.submit_tracks("site-a", self._tracks(5, _NODE_A, "a"), 1000)
+            return len(a.submit_tracks("site-b", self._tracks(5, _NODE_B, "b"), 2000))
+
+        assert run(1) <= run(25)

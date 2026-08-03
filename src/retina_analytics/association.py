@@ -671,27 +671,47 @@ def find_associations(zone: OverlapZone,
     return list(candidates.values())
 
 
-def _coarse_grid_match(zone: OverlapZone, delay_a: float, delay_b: float):
-    """Best overlap grid point consistent with both delays, or None.
+def _batch_grid_match(zone: OverlapZone, delays_a: list, delays_b: list) -> dict:
+    """Best overlap grid point for every (a, b) delay pairing that has one.
 
-    The same test find_associations applies, for one delay from each side
-    instead of whole frames.  It is a coverage question, not a residual one:
-    two bistatic ellipses always intersect somewhere, so what is being asked is
-    whether they intersect *inside both beams*.  Cheap, and it prunes most
-    pairings before anything is fitted.
+    Returns {(i_a, i_b): best_grid_index}; absent keys had no common point.
+
+    Vectorised for the same reason find_associations is: the gate is a
+    (Ta x G) x (G x Tb) boolean contraction, which numpy dispatches to one BLAS
+    matmul, and doing it per pairing instead costs Ta x Tb full scans of a grid
+    that runs to ~16 000 points.  A first version of this function did exactly
+    that, and it put the live frame queue at 92% depth with the frame processor
+    21 s behind a 6 frame/s feed — the offline bench never showed it because it
+    runs unthrottled on one core with no queue to fall behind.
+
+    The test itself is a coverage question, not a residual one: two bistatic
+    ellipses always intersect somewhere, so what is being asked is whether they
+    intersect *inside both beams*.
     """
     zone._ensure_np()
     pred_a, pred_b = zone._np_pred_a, zone._np_pred_b
-    if pred_a is None:
-        return None
-    gate = zone.delay_gate_us
-    valid = np.nonzero(
-        (np.abs(pred_a - delay_a) < gate) & (np.abs(pred_b - delay_b) < gate)
-    )[0]
-    if valid.size == 0:
-        return None
-    res = np.abs(pred_a[valid] - delay_a) + np.abs(pred_b[valid] - delay_b)
-    return int(valid[np.argmin(res)])
+    if pred_a is None or not delays_a or not delays_b:
+        return {}
+
+    da = np.asarray(delays_a, dtype=np.float32)
+    db = np.asarray(delays_b, dtype=np.float32)
+    gate = np.float32(zone.delay_gate_us)
+
+    gate_a = np.abs(da[:, None] - pred_a) < gate      # (Ta, G)
+    gate_b = np.abs(pred_b[:, None] - db) < gate      # (G, Tb)
+    # float32 so numpy takes the SGEMM path; uint8 has no BLAS kernel.
+    match = gate_a.astype(np.float32) @ gate_b.astype(np.float32)
+
+    out: dict = {}
+    for i_a, i_b in zip(*np.where(match > 0)):
+        i_a, i_b = int(i_a), int(i_b)
+        valid = np.nonzero(gate_a[i_a] & gate_b[:, i_b])[0]
+        if valid.size == 0:
+            continue
+        res = (np.abs(pred_a[valid] - da[i_a])
+               + np.abs(pred_b[valid] - db[i_b]))
+        out[(i_a, i_b)] = int(valid[np.argmin(res)])
+    return out
 
 
 def _merge_epochs(hist_a: list, node_a_id: str, hist_b: list, node_b_id: str) -> list:
@@ -786,6 +806,7 @@ class InterNodeAssociator:
         self.track_pairs_accepted: int = 0
         self.track_pairs_unfitted: int = 0    # too few epochs, or the fit failed
         self.track_pairs_superseded: int = 0  # lost their tracks to a better fit
+        self.track_pairs_deferred: int = 0    # rounds that ran out of fit budget
         # Adjacency index: node_id → set of neighbor node_ids that share a real
         # overlap zone (delay_pairs is non-empty).  Built during registration so
         # submit_frame can iterate O(K) neighbors instead of O(N) all nodes.
@@ -830,6 +851,32 @@ class InterNodeAssociator:
         # this is tunable without editing library source.
         self._ASSOC_MIN_INTERVAL_S: float = assoc_interval_s
         self._ASSOC_MAX_NEIGHBORS: int = 50
+        # Constant-velocity fits attempted per node pair per round.  Each is a
+        # real LM solve over both tracks' whole history, and it runs in the
+        # frame worker, so an unbounded count is unbounded frame latency —
+        # measured on staging as a frame queue at 92% depth with the processor
+        # 21 s behind a 6 frame/s feed.  Pairings are tried in order of coarse
+        # delay residual and the rest deferred, not dropped: every pairing is
+        # re-tested each round, so a genuine one that loses a crowded round
+        # comes back on the next.
+        # Constant-velocity fits attempted per association *round*, across all
+        # of a node's neighbours.  Each fit is a real LM solve over both tracks'
+        # whole history and costs ~86 ms measured, and it runs inside the frame
+        # worker — so this number times 86 ms is how long one round blocks the
+        # frame queue.  Unbounded, staging went to 92% queue depth with the
+        # processor 21 s behind a 6 frame/s feed and the map went empty.
+        #
+        # Per *node pair* would not bound it: a node has up to
+        # _ASSOC_MAX_NEIGHBORS of them, so a 12-fit pair budget is really a
+        # 600-fit round.  Pairings are tried in order of coarse delay residual
+        # and the rest deferred, not dropped — every pairing is re-tested each
+        # round, so a genuine one that loses a crowded round comes back on the
+        # next.
+        #
+        # This is a bound, not a fix.  An 86 ms solve does not belong on the
+        # frame path at all; it belongs on the solver's worker queue, which
+        # exists for exactly this.  Until it moves, keep this small.
+        self._MAX_FITS_PER_ROUND: int = 8
         # Frame-skew telemetry (see submit_frame).  The offline benchmark
         # assumes a clean stagger across frame_interval; these make the real
         # distribution observable instead of assumed.
@@ -1056,6 +1103,7 @@ class InterNodeAssociator:
         self._last_assoc[node_id] = now
 
         out: list[TrackPairCandidate] = []
+        budget = {"fits": self._MAX_FITS_PER_ROUND}
         for other_id in list(neighbors):
             other_tracks = self._pending_tracks.get(other_id)
             if not other_tracks:
@@ -1068,11 +1116,18 @@ class InterNodeAssociator:
                 tracks_a, tracks_b = tracks, other_tracks
             else:
                 tracks_a, tracks_b = other_tracks, tracks
-            out.extend(self._pair_tracks(zone, tracks_a, tracks_b, timestamp_ms))
+            out.extend(self._pair_tracks(zone, tracks_a, tracks_b, timestamp_ms,
+                                         budget))
+            if budget["fits"] <= 0:
+                # Round exhausted.  Remaining neighbours are picked up next
+                # round; nothing is lost, only deferred.
+                self.track_pairs_deferred += 1
+                break
         return out
 
     def _pair_tracks(self, zone: OverlapZone, tracks_a: list[dict],
-                     tracks_b: list[dict], timestamp_ms: int
+                     tracks_b: list[dict], timestamp_ms: int,
+                     budget: dict | None = None
                      ) -> list[TrackPairCandidate]:
         # ── Stage 1: enumerate and score every hypothesis ────────────────────
         # Each surviving (track_a, track_b) is a hypothesis about the world:
@@ -1082,107 +1137,125 @@ class InterNodeAssociator:
         # pairings sharing a track are mutually exclusive.
         fitted: list[TrackPairCandidate] = []
         held: list[TrackPairCandidate] = []   # too little span to score yet
-        for ta in tracks_a:
-            hist_a = ta.get("history") or []
-            if not hist_a:
-                continue
-            last_a = hist_a[-1]
-            for tb in tracks_b:
-                hist_b = tb.get("history") or []
-                if not hist_b:
-                    continue
-                last_b = hist_b[-1]
 
-                best_g = _coarse_grid_match(
-                    zone, float(last_a["delay_us"]), float(last_b["delay_us"]),
+        # One BLAS contraction for every pairing, rather than a full-grid scan
+        # each — see _batch_grid_match.  This runs in the frame worker, so its
+        # cost is frame latency.
+        usable_a = [t for t in tracks_a if t.get("history")]
+        usable_b = [t for t in tracks_b if t.get("history")]
+        matches = _batch_grid_match(
+            zone,
+            [float(t["history"][-1]["delay_us"]) for t in usable_a],
+            [float(t["history"][-1]["delay_us"]) for t in usable_b],
+        )
+        if not matches:
+            return []
+
+        # The constant-velocity fit is a bounded-but-real LM solve, and it also
+        # runs in the frame worker.  Ordering by coarse delay residual and
+        # capping the count keeps one association round's latency bounded
+        # regardless of how many aircraft share the zone; the survivors are
+        # re-tested every round, so a genuine pairing that loses a crowded round
+        # is deferred rather than dropped.
+        ordered = sorted(
+            matches.items(),
+            key=lambda kv: abs(zone._np_pred_a[kv[1]]
+                               - float(usable_a[kv[0][0]]["history"][-1]["delay_us"]))
+            + abs(zone._np_pred_b[kv[1]]
+                  - float(usable_b[kv[0][1]]["history"][-1]["delay_us"])),
+        )[: (budget or {}).get("fits", self._MAX_FITS_PER_ROUND)]
+
+        for (i_a, i_b), best_g in ordered:
+            ta, tb = usable_a[i_a], usable_b[i_b]
+            hist_a, hist_b = ta["history"], tb["history"]
+            last_a, last_b = hist_a[-1], hist_b[-1]
+            self.track_pairs_gated += 1
+            g_lat, g_lon, g_alt = zone.grid_points[best_g]
+
+            # Seed the fit from the level-flight velocity the two Dopplers
+            # imply at that grid point.  It is a good seed — measured median
+            # 4 deg of heading error on true pairings — and from a zero
+            # start the optimiser does not converge from tens of km away.
+            vel_seed = None
+            if zone.bisector_pairs:
+                b_a, b_b = zone.bisector_pairs[best_g]
+                v = implied_horizontal_velocity(
+                    float(last_a["doppler_hz"]) * C_KM_S * 1000.0 / zone.fc_a_hz, b_a,
+                    float(last_b["doppler_hz"]) * C_KM_S * 1000.0 / zone.fc_b_hz, b_b,
                 )
-                if best_g is None:
-                    continue
-                self.track_pairs_gated += 1
-                g_lat, g_lon, g_alt = zone.grid_points[best_g]
+                # Seed only — never a rejection here, unlike the detection
+                # path.  The implied-speed test measured 0% power against
+                # real cross pairings (their speeds are 27-298 m/s), and at
+                # a 3 km grid point on a possibly-wrong altitude layer the
+                # distorted bisectors make it false-alarm against true ones
+                # (observed: it silently dropped a genuine pairing in the
+                # three-node test).  The fit is the arbiter now; an absurd
+                # implied velocity just means no seed.
+                if v is not None and math.hypot(v[0], v[1]) <= _V_MAX_MS:
+                    vel_seed = {"vel_east_ms": v[0], "vel_north_ms": v[1]}
 
-                # Seed the fit from the level-flight velocity the two Dopplers
-                # imply at that grid point.  It is a good seed — measured median
-                # 4 deg of heading error on true pairings — and from a zero
-                # start the optimiser does not converge from tens of km away.
-                vel_seed = None
-                if zone.bisector_pairs:
-                    b_a, b_b = zone.bisector_pairs[best_g]
-                    v = implied_horizontal_velocity(
-                        float(last_a["doppler_hz"]) * C_KM_S * 1000.0 / zone.fc_a_hz, b_a,
-                        float(last_b["doppler_hz"]) * C_KM_S * 1000.0 / zone.fc_b_hz, b_b,
-                    )
-                    # Seed only — never a rejection here, unlike the detection
-                    # path.  The implied-speed test measured 0% power against
-                    # real cross pairings (their speeds are 27-298 m/s), and at
-                    # a 3 km grid point on a possibly-wrong altitude layer the
-                    # distorted bisectors make it false-alarm against true ones
-                    # (observed: it silently dropped a genuine pairing in the
-                    # three-node test).  The fit is the arbiter now; an absurd
-                    # implied velocity just means no seed.
-                    if v is not None and math.hypot(v[0], v[1]) <= _V_MAX_MS:
-                        vel_seed = {"vel_east_ms": v[0], "vel_north_ms": v[1]}
+            lat, lon, alt_km = g_lat, g_lon, g_alt
+            vel_e = vel_seed["vel_east_ms"] if vel_seed else 0.0
+            vel_n = vel_seed["vel_north_ms"] if vel_seed else 0.0
+            chi2_per_dof = None
+            dof = 0
+            epochs = _merge_epochs(hist_a, zone.node_a_id, hist_b, zone.node_b_id)
 
-                lat, lon, alt_km = g_lat, g_lon, g_alt
-                vel_e = vel_seed["vel_east_ms"] if vel_seed else 0.0
-                vel_n = vel_seed["vel_north_ms"] if vel_seed else 0.0
-                chi2_per_dof = None
-                dof = 0
-                epochs = _merge_epochs(hist_a, zone.node_a_id, hist_b, zone.node_b_id)
-
-                # The span that must clear cv_min_span_s is the *shorter
-                # track's own*, not the merged window's.  Discrimination comes
-                # from curvature accumulated by both trajectories; a 2-sample
-                # track welded onto a 20 s one fits at chi2/dof ~0.04 because
-                # its 4 residuals can be absorbed by sliding the velocity along
-                # the long track's unobservable direction — the least-tested
-                # hypothesis would then outscore the most-tested one in
-                # selection, which is exactly backwards.
-                span_a = float(hist_a[-1]["t_s"]) - float(hist_a[0]["t_s"])
-                span_b = float(hist_b[-1]["t_s"]) - float(hist_b[0]["t_s"])
-                if (self.cv_fit is not None
-                        and len(epochs) >= self.cv_min_epochs
-                        and min(span_a, span_b) >= self.cv_min_span_s):
-                    fit = self.cv_fit(
-                        {"initial_guess": {"lat": g_lat, "lon": g_lon, "alt_km": g_alt},
-                         "initial_velocity": vel_seed,
-                         "epochs": epochs,
-                         "timestamp_ms": timestamp_ms},
-                        self.node_configs,
-                    )
-                    if fit is None or not fit.get("success"):
-                        self.track_pairs_unfitted += 1
-                        continue
-                    chi2_per_dof = fit["chi2_per_dof"]
-                    dof = fit["dof"]
-                    lat, lon = fit["lat"], fit["lon"]
-                    alt_km = fit["alt_m"] / 1000.0
-                    vel_e, vel_n = fit["vel_east"], fit["vel_north"]
-                else:
-                    # Not enough history yet.  Held rather than dropped: the
-                    # pairing is re-tested every round, and a real one
-                    # accumulates the span it needs within a few frames.
-                    # Downstream decides whether an unconfirmed pairing may be
-                    # published.
+            # The span that must clear cv_min_span_s is the *shorter
+            # track's own*, not the merged window's.  Discrimination comes
+            # from curvature accumulated by both trajectories; a 2-sample
+            # track welded onto a 20 s one fits at chi2/dof ~0.04 because
+            # its 4 residuals can be absorbed by sliding the velocity along
+            # the long track's unobservable direction — the least-tested
+            # hypothesis would then outscore the most-tested one in
+            # selection, which is exactly backwards.
+            span_a = float(hist_a[-1]["t_s"]) - float(hist_a[0]["t_s"])
+            span_b = float(hist_b[-1]["t_s"]) - float(hist_b[0]["t_s"])
+            if (self.cv_fit is not None
+                    and len(epochs) >= self.cv_min_epochs
+                    and min(span_a, span_b) >= self.cv_min_span_s):
+                fit = self.cv_fit(
+                    {"initial_guess": {"lat": g_lat, "lon": g_lon, "alt_km": g_alt},
+                     "initial_velocity": vel_seed,
+                     "epochs": epochs,
+                     "timestamp_ms": timestamp_ms},
+                    self.node_configs,
+                )
+                if budget is not None:
+                    budget["fits"] -= 1
+                if fit is None or not fit.get("success"):
                     self.track_pairs_unfitted += 1
+                    continue
+                chi2_per_dof = fit["chi2_per_dof"]
+                dof = fit["dof"]
+                lat, lon = fit["lat"], fit["lon"]
+                alt_km = fit["alt_m"] / 1000.0
+                vel_e, vel_n = fit["vel_east"], fit["vel_north"]
+            else:
+                # Not enough history yet.  Held rather than dropped: the
+                # pairing is re-tested every round, and a real one
+                # accumulates the span it needs within a few frames.
+                # Downstream decides whether an unconfirmed pairing may be
+                # published.
+                self.track_pairs_unfitted += 1
 
-                cand = TrackPairCandidate(
-                    timestamp_ms=timestamp_ms,
-                    node_a_id=zone.node_a_id,
-                    node_b_id=zone.node_b_id,
-                    track_a_id=str(ta.get("track_id")),
-                    track_b_id=str(tb.get("track_id")),
-                    delay_a=float(last_a["delay_us"]),
-                    delay_b=float(last_b["delay_us"]),
-                    doppler_a=float(last_a["doppler_hz"]),
-                    doppler_b=float(last_b["doppler_hz"]),
-                    snr_a=float(last_a.get("snr", 0.0)),
-                    snr_b=float(last_b.get("snr", 0.0)),
-                    lat=lat, lon=lon, alt_km=alt_km,
-                    vel_east_ms=vel_e, vel_north_ms=vel_n,
-                    chi2_per_dof=chi2_per_dof, dof=dof, n_epochs=len(epochs),
-                )
-                (fitted if chi2_per_dof is not None else held).append(cand)
+            cand = TrackPairCandidate(
+                timestamp_ms=timestamp_ms,
+                node_a_id=zone.node_a_id,
+                node_b_id=zone.node_b_id,
+                track_a_id=str(ta.get("track_id")),
+                track_b_id=str(tb.get("track_id")),
+                delay_a=float(last_a["delay_us"]),
+                delay_b=float(last_b["delay_us"]),
+                doppler_a=float(last_a["doppler_hz"]),
+                doppler_b=float(last_b["doppler_hz"]),
+                snr_a=float(last_a.get("snr", 0.0)),
+                snr_b=float(last_b.get("snr", 0.0)),
+                lat=lat, lon=lon, alt_km=alt_km,
+                vel_east_ms=vel_e, vel_north_ms=vel_n,
+                chi2_per_dof=chi2_per_dof, dof=dof, n_epochs=len(epochs),
+            )
+            (fitted if chi2_per_dof is not None else held).append(cand)
 
         # ── Stage 2: hypothesis selection ────────────────────────────────────
         # The absolute threshold alone is blind early: over a 4 s window a
