@@ -9,7 +9,10 @@ from retina_analytics.detection_area import DetectionAreaState
 from retina_analytics.metrics import NodeMetrics
 from retina_analytics.reputation import NodeReputation
 from retina_analytics.coverage import HistoricalCoverageMap
-from retina_analytics.empirical_coverage import EmpiricalCoverageState
+from retina_analytics.empirical_coverage import (
+    CALIBRATION_SCHEMA,
+    EmpiricalCoverageState,
+)
 from retina_analytics.cross_node import compute_delay_bin_overlap, coverage_suggestion
 from retina_analytics.constants import YAGI_BEAM_WIDTH_DEG, YAGI_MAX_RANGE_KM, haversine_km, resolve_beam_azimuth_deg
 
@@ -97,7 +100,16 @@ class NodeAnalyticsManager:
             ec is not None
             and getattr(ec, "max_bistatic_range_km", None) != cfg_bistatic
         )
-        if ec is None or moved or rule_changed:
+        # A polygon accumulated under an older calibration input is discarded on
+        # the same footing.  The bistatic key cannot catch this one: switching
+        # the feed from solver output to ADS-B positions changes what the bins
+        # *mean* without changing any configured value, so a v1 polygon — shaped
+        # partly by ghosts — would otherwise survive every restart on the named
+        # coverage volume, with nothing to prompt an operator.
+        schema_changed = (
+            ec is not None and getattr(ec, "schema", 1) != CALIBRATION_SCHEMA
+        )
+        if ec is None or moved or rule_changed or schema_changed:
             self.empirical_coverages[node_id] = EmpiricalCoverageState(
                 rx_lat=rx_lat, rx_lon=rx_lon,
                 max_range_km=cfg_max_range,
@@ -124,7 +136,12 @@ class NodeAnalyticsManager:
         return rep.blocked if rep else False
 
     def record_calibration_point(self, node_id: str, lat: float, lon: float) -> None:
-        """Record a confirmed detection at a known target position (ADS-B or multinode)."""
+        """Record a detection at an independently-known target position.
+
+        ADS-B only.  Callers used to pass solver output here, which made the
+        polygon a picture of what the solver believed rather than of what the
+        node can see; see CALIBRATION_SCHEMA.
+        """
         ec = self.empirical_coverages.get(node_id)
         if ec is not None:
             ec.add_point(lat, lon)

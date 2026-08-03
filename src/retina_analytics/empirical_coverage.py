@@ -32,6 +32,21 @@ _DEG_PER_BIN = 360.0 / N_BINS
 _MAX_PER_BIN = 200   # cap per-bin history to prevent unbounded RAM growth
 MIN_POINTS = 20      # minimum calibration points before emitting a polygon
 
+# What the accumulated bins *mean*.  Bump this whenever the calibration input
+# changes in a way that makes previously-stored points incomparable with new
+# ones — the numbers stay well-formed, so nothing else would notice.
+#
+#   1: positions came from the multinode solver, including unverified n=2
+#      solves.  Blind, 55-85% of those are ghosts a median 20+ km from any
+#      aircraft, so a v1 polygon describes where the solver *thought* targets
+#      were, not where the node can see.
+#   2: reported ADS-B positions only.
+#
+# Production and staging mount coverage_data as a named volume that survives
+# rebuilds, so without this a v1 polygon would be served indefinitely with no
+# operator action to prompt it.
+CALIBRATION_SCHEMA = 2
+
 
 def _bin_for_bearing(bearing_deg: float) -> int:
     return int(bearing_deg / _DEG_PER_BIN) % N_BINS
@@ -73,6 +88,10 @@ class EmpiricalCoverageState:
         # and discard it when the rule changes (the footprint goes from a circle
         # on the RX to an ellipse with foci at RX and TX).
         self.max_bistatic_range_km: float | None = None
+        # Which calibration input these bins were accumulated from; see
+        # CALIBRATION_SCHEMA.  A freshly-constructed state is current by
+        # definition — from_dict is where an old one declares itself.
+        self.schema = CALIBRATION_SCHEMA
         self.range_clamp_mult = range_clamp_mult
         # Per-bin list of observed ranges (km).  List, not array — no numpy dep.
         self._bins: list[list[float]] = [[] for _ in range(N_BINS)]
@@ -234,6 +253,7 @@ class EmpiricalCoverageState:
             "rx_lat": self.rx_lat,
             "rx_lon": self.rx_lon,
             "max_range_km": self.max_range_km,
+            "schema": self.schema,
             "bins": [b[:] for b in self._bins],
         }
 
@@ -241,6 +261,9 @@ class EmpiricalCoverageState:
     def from_dict(cls, d: dict) -> "EmpiricalCoverageState":
         obj = cls(rx_lat=d["rx_lat"], rx_lon=d["rx_lon"],
                   max_range_km=d.get("max_range_km"))
+        # Absent means v1 — written before the field existed, i.e. accumulated
+        # from solver positions.
+        obj.schema = d.get("schema", 1)
         for i, b in enumerate(d.get("bins", [])):
             if i < N_BINS:
                 obj._bins[i] = list(b)

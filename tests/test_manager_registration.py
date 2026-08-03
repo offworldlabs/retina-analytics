@@ -156,3 +156,60 @@ def test_rule_change_removes_the_stale_on_disk_polygon(tmp_path):
     # so leaving the file would resurrect the stale polygon on restart.
     m.register_node("N", {**_CFG, "max_bistatic_range_km": 60})
     assert not os.path.exists(path)
+
+
+def test_older_calibration_schema_rebuilds_coverage():
+    """A polygon built from solver positions is discarded, not served.
+
+    Nothing configured changes when the calibration feed switches from solver
+    output to ADS-B fixes, so the bistatic-rule key cannot catch it — and both
+    staging and production mount coverage_data as a named volume that survives
+    rebuilds.  Without this the ghost-shaped polygon would outlive every deploy.
+    """
+    from retina_analytics.empirical_coverage import CALIBRATION_SCHEMA
+
+    m = NodeAnalyticsManager()
+    m.register_node("N", dict(_CFG))
+    ec = m.empirical_coverages["N"]
+    for i in range(30):
+        ec.add_point(_RX_LAT + 0.05 + i * 1e-4, _RX_LON + 0.05)
+    assert ec.n_points == 30
+
+    ec.schema = CALIBRATION_SCHEMA - 1     # as if loaded from an older file
+    m.register_node("N", dict(_CFG))       # same RX, same range rule
+
+    assert m.empirical_coverages["N"].n_points == 0
+    assert m.empirical_coverages["N"].schema == CALIBRATION_SCHEMA
+
+
+def test_current_schema_keeps_calibration():
+    """The version check must not throw away every polygon on every restart."""
+    m = NodeAnalyticsManager()
+    m.register_node("N", dict(_CFG))
+    ec = m.empirical_coverages["N"]
+    for i in range(30):
+        ec.add_point(_RX_LAT + 0.05 + i * 1e-4, _RX_LON + 0.05)
+
+    m.register_node("N", dict(_CFG))
+    assert m.empirical_coverages["N"].n_points == 30
+
+
+def test_schema_survives_a_save_load_round_trip(tmp_path):
+    """A file written before the field existed reads back as v1."""
+    from retina_analytics.empirical_coverage import (
+        CALIBRATION_SCHEMA,
+        EmpiricalCoverageState,
+    )
+
+    ec = EmpiricalCoverageState(rx_lat=_RX_LAT, rx_lon=_RX_LON, max_range_km=50)
+    path = str(tmp_path / "e.json")
+    ec.save_to_file(path)
+    assert EmpiricalCoverageState.load_from_file(path).schema == CALIBRATION_SCHEMA
+
+    import json
+    with open(path) as f:
+        d = json.load(f)
+    d.pop("schema")
+    with open(path, "w") as f:
+        json.dump(d, f)
+    assert EmpiricalCoverageState.load_from_file(path).schema == 1
