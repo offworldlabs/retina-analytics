@@ -63,6 +63,7 @@ class NodeAnalyticsManager:
             beam_azimuth_deg=beam_az,
             beam_width_deg=config.get("beam_width_deg", YAGI_BEAM_WIDTH_DEG),
             max_range_km=config.get("max_range_km", YAGI_MAX_RANGE_KM),
+            max_bistatic_range_km=config.get("max_bistatic_range_km"),
         )
 
         self.metrics[node_id] = NodeMetrics(

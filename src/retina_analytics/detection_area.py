@@ -22,6 +22,12 @@ class DetectionAreaState:
     beam_azimuth_deg: float = 0.0
     beam_width_deg: float = YAGI_BEAM_WIDTH_DEG
     max_range_km: float = YAGI_MAX_RANGE_KM
+    # Differential-range limit, if the node declares one.  max_range_km is a
+    # monostatic approximation of it — a circle on the RX — and the two differ
+    # by 2x in radius directly away from the transmitter.  Carried through
+    # summary() so the map can draw the ellipse the association gate actually
+    # uses instead of a circle that disagrees with it.
+    max_bistatic_range_km: float | None = None
     # Running bounds from actual detections
     min_delay: float = float("inf")
     max_delay: float = float("-inf")
@@ -105,6 +111,7 @@ class DetectionAreaState:
             "beam_azimuth_deg": round(self.beam_azimuth_deg, 1),
             "beam_width_deg": self.beam_width_deg,
             "max_range_km": self.max_range_km,
+            "max_bistatic_range_km": self.max_bistatic_range_km,
             "observed_delay_range_us": [round(x, 2) for x in self.delay_range],
             "observed_doppler_range_hz": [round(x, 2) for x in self.doppler_range],
             "estimated_max_range_km": round(self.estimated_max_range_km, 2),
