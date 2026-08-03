@@ -25,7 +25,10 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from retina_analytics.constants import resolve_beam_azimuth_deg
+from retina_analytics.constants import (
+    bistatic_max_radius_km,
+    resolve_beam_azimuth_deg,
+)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -176,6 +179,22 @@ class NodeGeometry:
     beam_azimuth_deg: float = 0.0
     beam_width_deg: float = 41.0
     max_range_km: float = 50.0
+    # Differential-range limit (R_tx + R_rx − baseline), which is what a
+    # bistatic receiver is actually bounded by.  None keeps the legacy
+    # monostatic circle of radius max_range_km, so a node that does not declare
+    # one gates exactly as before.
+    max_bistatic_range_km: float | None = None
+
+    @property
+    def baseline_km(self) -> float:
+        return _haversine_km(self.rx_lat, self.rx_lon, self.tx_lat, self.tx_lon)
+
+    @property
+    def footprint_radius_km(self) -> float:
+        """Largest RX-relative range this node's footprint reaches."""
+        if self.max_bistatic_range_km is None:
+            return self.max_range_km
+        return bistatic_max_radius_km(self.baseline_km, self.max_bistatic_range_km)
 
 
 @dataclass
@@ -297,9 +316,19 @@ def _compute_node_enu(geo: NodeGeometry, ref_lat: float, ref_lon: float, ref_alt
 
 
 def _point_in_beam(lat, lon, geo: NodeGeometry) -> bool:
-    """Check if a point falls within the node's beam cone (2D check)."""
+    """Check if a point falls within the node's beam sector (2D check).
+
+    Bearing only.  The *range* limit is applied in compute_overlap_zone against
+    the exact bistatic delay it already computes for the grid point, which
+    accounts for altitude and needs no closed form.  Splitting them this way
+    keeps the cheap angular test first, where it prunes most of the bounding
+    box, and leaves the range test where the geometry is already in hand.
+
+    geo.footprint_radius_km bounds how far the sector can extend, so callers
+    that need a radius before any delay exists still have one.
+    """
     dist = _haversine_km(geo.rx_lat, geo.rx_lon, lat, lon)
-    if dist > geo.max_range_km:
+    if dist > geo.footprint_radius_km:
         return False
     bearing = _bearing_deg(geo.rx_lat, geo.rx_lon, lat, lon)
     angle_diff = abs((bearing - geo.beam_azimuth_deg + 180) % 360 - 180)
@@ -317,11 +346,14 @@ def compute_overlap_zone(geo_a: NodeGeometry, geo_b: NodeGeometry,
     and calculates the expected bistatic delay at each node for every
     grid point. These are used as association gates at runtime.
     """
-    # Fast geographic pre-filter: if the two RX sites are farther apart
-    # than the sum of their max ranges, NO point can lie in both beams.
-    # Skip the O(n²) grid computation for this pair entirely.
+    # Fast geographic pre-filter: if the two RX sites are farther apart than the
+    # sum of their footprint radii, NO point can lie in both beams, so the
+    # O(n²) grid is skipped entirely.  The radius has to be the *largest* the
+    # footprint reaches — Δ/2 + L toward the transmitter, not Δ — or a pair
+    # whose overlap lies out along a long baseline gets pruned before it is
+    # ever looked at.
     rx_sep = _haversine_km(geo_a.rx_lat, geo_a.rx_lon, geo_b.rx_lat, geo_b.rx_lon)
-    if rx_sep > geo_a.max_range_km + geo_b.max_range_km:
+    if rx_sep > geo_a.footprint_radius_km + geo_b.footprint_radius_km:
         return OverlapZone(
             node_a_id=geo_a.node_id,
             node_b_id=geo_b.node_id,
@@ -339,8 +371,9 @@ def compute_overlap_zone(geo_a: NodeGeometry, geo_b: NodeGeometry,
     rx_a_enu, tx_a_enu = _compute_node_enu(geo_a, ref_lat, ref_lon, ref_alt_km)
     rx_b_enu, tx_b_enu = _compute_node_enu(geo_b, ref_lat, ref_lon, ref_alt_km)
 
-    # Determine bounding box for the grid
-    max_range = max(geo_a.max_range_km, geo_b.max_range_km)
+    # Determine bounding box for the grid.  Sized on the footprint radius, so a
+    # node aimed along a long baseline still gets its far lobe enumerated.
+    max_range = max(geo_a.footprint_radius_km, geo_b.footprint_radius_km)
     n_steps = int(2 * max_range / grid_step_km) + 1
 
     grid_points = []
@@ -365,6 +398,24 @@ def compute_overlap_zone(geo_a: NodeGeometry, geo_b: NodeGeometry,
                 target_enu = (east, north, alt_km)
                 delay_a = _bistatic_delay_at(target_enu, tx_a_enu, rx_a_enu)
                 delay_b = _bistatic_delay_at(target_enu, tx_b_enu, rx_b_enu)
+
+                # Range limit, applied on the differential range the node is
+                # actually bounded by rather than on distance from the RX.  The
+                # delay is already in hand and is exact in 3-D, so this needs no
+                # closed form and costs nothing.
+                #
+                # The two are not close: at Δ = 60 km the footprint reaches only
+                # 30 km directly away from the transmitter, against the 60 km
+                # circle this used to allow — 4× the area, in the half where
+                # cross-aircraft pairings are cheapest to form.  Toward a distant
+                # tower it runs the other way, a 43 km baseline genuinely
+                # reaching 73 km.
+                if (geo_a.max_bistatic_range_km is not None
+                        and delay_a * C_KM_US > geo_a.max_bistatic_range_km):
+                    continue
+                if (geo_b.max_bistatic_range_km is not None
+                        and delay_b * C_KM_US > geo_b.max_bistatic_range_km):
+                    continue
 
                 # Only keep physically meaningful delays
                 if delay_a < 0 or delay_b < 0:
@@ -822,6 +873,7 @@ class InterNodeAssociator:
             fc_hz=config.get("fc_hz", config.get("FC", 195e6)),
             beam_width_deg=config.get("beam_width_deg", 41),
             max_range_km=config.get("max_range_km", 50),
+            max_bistatic_range_km=config.get("max_bistatic_range_km"),
         )
 
         # Honour an explicit aim (aimed coverage-ring Yagi); otherwise broadside
@@ -845,6 +897,10 @@ class InterNodeAssociator:
                 and abs(existing.max_range_km - geo.max_range_km) < 1e-4
                 and abs(existing.beam_azimuth_deg - geo.beam_azimuth_deg) < 1e-4
                 and abs(existing.beam_width_deg - geo.beam_width_deg) < 1e-4
+                # Changing the range *rule* reshapes the footprint from a circle
+                # on the RX to an ellipse with foci at RX and TX, so the cached
+                # grid is no longer describing the same region.
+                and existing.max_bistatic_range_km == geo.max_bistatic_range_km
             ):
                 # Same geometry — overlap zones are still valid; skip O(n²) recompute.
                 return
