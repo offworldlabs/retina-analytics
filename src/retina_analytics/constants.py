@@ -5,9 +5,104 @@ import math
 C_KM_US = 0.299792458   # speed of light km/μs
 R_EARTH = 6371.0         # Earth radius km
 
+# One kilometres-per-degree, derived rather than typed.  Four different values
+# were in circulation across this library and the backend — 111.0, 111.32,
+# 111.320 and R_EARTH·π/180 — for the same quantity, so a position dead-reckoned
+# in one module and compared in another disagreed by up to 0.3%.  Deriving it
+# from R_EARTH also means distance and dead-reckoning cannot drift apart.
+KM_PER_DEG_LAT = R_EARTH * math.pi / 180.0     # 111.1949…
+M_PER_DEG_LAT = KM_PER_DEG_LAT * 1000.0
+
 # Yagi antenna spec
 YAGI_BEAM_WIDTH_DEG = 41.0   # typical 40-42° half-power beamwidth
 YAGI_MAX_RANGE_KM = 50.0
+
+
+def km_per_deg_lon(lat_deg: float) -> float:
+    """Kilometres per degree of longitude at *lat_deg*.
+
+    The guard is a divide-by-zero floor, not a physical clamp: some callers
+    previously used ``max(0.1, cos)``, which only differs above 84.3° latitude
+    and would silently misplace a target there rather than admit it cannot.
+    """
+    return KM_PER_DEG_LAT * max(math.cos(math.radians(lat_deg)), 1e-6)
+
+
+def enu_km(ref_lat, ref_lon, lat, lon) -> tuple[float, float]:
+    """(east_km, north_km) of a point relative to a reference, flat-earth."""
+    return ((lon - ref_lon) * km_per_deg_lon(ref_lat),
+            (lat - ref_lat) * KM_PER_DEG_LAT)
+
+
+def offset_latlon(lat, lon, east_km, north_km) -> tuple[float, float]:
+    """Move a position by an east/north offset in km.  Inverse of enu_km."""
+    return (lat + north_km / KM_PER_DEG_LAT,
+            lon + east_km / km_per_deg_lon(lat))
+
+
+def offset_latlon_m(lat, lon, east_m, north_m) -> tuple[float, float]:
+    """offset_latlon in metres — the shape dead-reckoning callers want."""
+    return offset_latlon(lat, lon, east_m / 1000.0, north_m / 1000.0)
+
+
+def bistatic_differential_km(tx_lat, tx_lon, rx_lat, rx_lon,
+                             target_lat, target_lon) -> float:
+    """Differential range R_tx + R_rx − L for a target, in km.
+
+    This is what the delay measures and what sets received power, so it — not
+    the RX-relative range — is the quantity every bistatic gate should compare
+    against.  Ground-projected: altitude is a second-order correction that the
+    callers of this helper do not have.
+    """
+    r_tx = haversine_km(tx_lat, tx_lon, target_lat, target_lon)
+    r_rx = haversine_km(rx_lat, rx_lon, target_lat, target_lon)
+    baseline = haversine_km(tx_lat, tx_lon, rx_lat, rx_lon)
+    return r_tx + r_rx - baseline
+
+
+def bistatic_delay_us(tx_lat, tx_lon, rx_lat, rx_lon,
+                      target_lat, target_lon) -> float:
+    """Bistatic delay for a target, in microseconds."""
+    return bistatic_differential_km(tx_lat, tx_lon, rx_lat, rx_lon,
+                                    target_lat, target_lon) / C_KM_US
+
+
+def point_in_beam(lat, lon, *, rx_lat, rx_lon,
+                  beam_azimuth_deg, beam_width_deg, max_range_km,
+                  tx_lat=None, tx_lon=None,
+                  max_bistatic_range_km=None) -> bool:
+    """Is a target inside a node's detection area?
+
+    Three rules, which were separately re-derived in four places before this
+    existed and had drifted apart in each:
+
+    1. **Range.** If the node declares a bistatic limit and its TX is known,
+       the target must be within it on *differential* range — the ellipse, not
+       a circle about the RX.  Otherwise fall back to the monostatic circle.
+    2. **Bearing.** Within half the beam width of the aim, measured as a signed
+       wrap so 359° and 1° are 2° apart.
+    3. **Aim.** ``beam_azimuth_deg=None`` means omnidirectional and skips (2)
+       entirely; callers wanting the broadside default should resolve it with
+       resolve_beam_azimuth_deg first, which is the rule the rest of the system
+       already uses.
+
+    Note this is a *ground-projected* test.  association.compute_overlap_zone
+    deliberately does not use it: it gates on the exact per-grid-point delay it
+    has already computed, which accounts for altitude, and it applies a looser
+    radius first so the empirical coverage prior can tighten it afterwards.
+    """
+    if max_bistatic_range_km and tx_lat is not None and tx_lon is not None:
+        reach = bistatic_differential_km(tx_lat, tx_lon, rx_lat, rx_lon, lat, lon)
+        if reach > float(max_bistatic_range_km):
+            return False
+    elif haversine_km(rx_lat, rx_lon, lat, lon) > float(max_range_km):
+        return False
+
+    if beam_azimuth_deg is None:
+        return True
+    brg = bearing_deg(rx_lat, rx_lon, lat, lon)
+    off = abs((brg - float(beam_azimuth_deg) + 180.0) % 360.0 - 180.0)
+    return off <= float(beam_width_deg) / 2.0
 
 
 def haversine_km(lat1, lon1, lat2, lon2):

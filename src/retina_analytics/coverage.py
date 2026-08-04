@@ -1,11 +1,12 @@
 """Historical ADS-B-validated coverage map accumulation with persistent storage."""
 
 import json
-import math
 import os
 import time
 from dataclasses import dataclass, field
 from typing import Optional
+
+from retina_analytics.constants import KM_PER_DEG_LAT, bearing_deg
 
 
 @dataclass
@@ -57,7 +58,7 @@ class HistoricalCoverageMap:
 
     @property
     def coverage_area_km2(self) -> float:
-        cell_area = (self._grid_resolution_deg * 111.0) ** 2
+        cell_area = (self._grid_resolution_deg * KM_PER_DEG_LAT) ** 2
         return len(self._grid) * cell_area
 
     @property
@@ -87,12 +88,8 @@ class HistoricalCoverageMap:
         mid = len(lats_sorted) // 2
         center_lat = lats_sorted[mid]
         center_lon = lons_sorted[mid]
-        bearings = []
-        for e in self.entries:
-            dlat = e.lat - center_lat
-            dlon = (e.lon - center_lon) * math.cos(math.radians(center_lat))
-            b = math.degrees(math.atan2(dlon, dlat)) % 360
-            bearings.append(b)
+        bearings = [bearing_deg(center_lat, center_lon, e.lat, e.lon)
+                    for e in self.entries]
         if not bearings:
             return None
         bearings.sort()

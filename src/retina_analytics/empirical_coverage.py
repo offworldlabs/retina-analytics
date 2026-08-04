@@ -71,7 +71,17 @@ def _bin_for_bearing(bearing_deg: float) -> int:
 
 def _bearing_and_range(rx_lat: float, rx_lon: float,
                        lat: float, lon: float) -> tuple[float, float]:
-    """Return (bearing °, range_km) from RX to target."""
+    """Return (bearing °, range_km) from RX to target.
+
+    DELIBERATELY NOT YET on constants.bearing_deg / haversine_km, unlike every
+    other geometry site in this library.  This one decides which 5° bin an
+    ADS-B point lands in, while the association gate reads those bins using the
+    spherical bearing — so switching it is a behavioural change to the coverage
+    prior, not a consolidation, and it must be measured on its own rather than
+    hidden inside a no-op commit.  It also has to move together with
+    to_polygon's inverse projection, or the emitted polygon stops matching the
+    bins it came from.  See the coverage-bearing step of the refactor plan.
+    """
     dlat = lat - rx_lat
     cos_lat = math.cos(math.radians(rx_lat))
     dlon = (lon - rx_lon) * cos_lat

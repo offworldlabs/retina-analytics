@@ -26,19 +26,28 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from retina_analytics.constants import (
+    C_KM_US,
+    KM_PER_DEG_LAT,
+    R_EARTH,
+    bearing_deg as _bearing_deg,
     bistatic_max_radius_km,
+    haversine_km as _haversine_km,
+    km_per_deg_lon,
     resolve_beam_azimuth_deg,
 )
 from retina_analytics.empirical_coverage import OBSERVED_LIMIT_MARGIN
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-C_KM_US = 0.299792458   # speed of light km/μs
 C_KM_S = 299792.458     # speed of light km/s
-R_EARTH = 6371.0         # Earth radius km
 
 
 # ── Geometry helpers ─────────────────────────────────────────────────────────
+#
+# Distance and bearing come from constants.py; this module used to carry
+# byte-identical copies.  What remains here is genuinely local: an ENU frame
+# (the grid search works in metres from a reference, not in degrees) and the
+# delay/bisector maths that operates inside it.
 
 def _lla_to_enu(lat, lon, alt_km, ref_lat, ref_lon, ref_alt_km):
     dlat = math.radians(lat - ref_lat)
@@ -58,24 +67,6 @@ def _enu_to_lla(east_km, north_km, up_km, ref_lat, ref_lon, ref_alt_km):
 
 def _norm(v):
     return math.sqrt(sum(x * x for x in v))
-
-
-def _haversine_km(lat1, lon1, lat2, lon2):
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = (math.sin(dlat / 2) ** 2
-         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
-         * math.sin(dlon / 2) ** 2)
-    return R_EARTH * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
-
-def _bearing_deg(lat1, lon1, lat2, lon2):
-    dlon = math.radians(lon2 - lon1)
-    lat1r = math.radians(lat1)
-    lat2r = math.radians(lat2)
-    x = math.sin(dlon) * math.cos(lat2r)
-    y = math.cos(lat1r) * math.sin(lat2r) - math.sin(lat1r) * math.cos(lat2r) * math.cos(dlon)
-    return math.degrees(math.atan2(x, y)) % 360
 
 
 def _bistatic_delay_at(target_enu, tx_enu, rx_enu=(0, 0, 0)):
@@ -1450,8 +1441,8 @@ class InterNodeAssociator:
 
         lats = np.array([p.lat for p in pairs], dtype=np.float64)
         lons = np.array([p.lon for p in pairs], dtype=np.float64)
-        km_per_lat = R_EARTH * math.pi / 180.0
-        km_per_lon = km_per_lat * math.cos(math.radians(float(np.mean(lats))))
+        km_per_lat = KM_PER_DEG_LAT
+        km_per_lon = km_per_deg_lon(float(np.mean(lats)))
         dist_sq = (((lats[:, None] - lats) * km_per_lat) ** 2
                    + ((lons[:, None] - lons) * km_per_lon) ** 2)
         rows, cols = np.where(
@@ -1568,8 +1559,8 @@ class InterNodeAssociator:
         lats = np.array([c.grid_lat for c in candidates], dtype=np.float64)
         lons = np.array([c.grid_lon for c in candidates], dtype=np.float64)
         mid_lat = float(np.mean(lats))
-        km_per_lat = R_EARTH * math.pi / 180.0
-        km_per_lon = km_per_lat * math.cos(math.radians(mid_lat))
+        km_per_lat = KM_PER_DEG_LAT
+        km_per_lon = km_per_deg_lon(mid_lat)
         dlat_km = (lats[:, None] - lats) * km_per_lat
         dlon_km = (lons[:, None] - lons) * km_per_lon
         dist_sq = dlat_km ** 2 + dlon_km ** 2

@@ -1,11 +1,15 @@
 """Detection area characterisation from observed delay/Doppler bounds."""
 
 import heapq
-import math
 import time as _time
 from dataclasses import dataclass, field
 
-from retina_analytics.constants import C_KM_US, YAGI_BEAM_WIDTH_DEG, YAGI_MAX_RANGE_KM
+from retina_analytics.constants import (
+    C_KM_US,
+    YAGI_BEAM_WIDTH_DEG,
+    YAGI_MAX_RANGE_KM,
+    haversine_km,
+)
 
 
 @dataclass
@@ -72,11 +76,9 @@ class DetectionAreaState:
         elif dist_km > self.furthest_detections[0][0]:
             heapq.heapreplace(self.furthest_detections, heap_entry)
 
-    @staticmethod
-    def _haversine_km(lat1, lon1, lat2, lon2):
-        dlat = (lat1 - lat2) * 111.0
-        dlon = (lon1 - lon2) * 111.0 * math.cos(math.radians((lat1 + lat2) / 2.0))
-        return math.sqrt(dlat ** 2 + dlon ** 2)
+    # Was a flat-earth approximation at 111.0 km/deg, which reads 0.175% short
+    # against the spherical form the rest of the system gates on.
+    _haversine_km = staticmethod(haversine_km)
 
     @property
     def delay_range(self) -> tuple[float, float]:

@@ -2,7 +2,7 @@
 
 import math
 
-from retina_analytics.constants import haversine_km, R_EARTH
+from retina_analytics.constants import haversine_km, offset_latlon, point_in_beam
 from retina_analytics.detection_area import DetectionAreaState
 
 
@@ -36,17 +36,22 @@ def compute_delay_bin_overlap(area_a: DetectionAreaState,
 
 
 def _point_in_beam(area: DetectionAreaState, lat: float, lon: float) -> bool:
-    """Check whether a lat/lon point falls inside a node's detection cone."""
-    dist = haversine_km(area.rx_lat, area.rx_lon, lat, lon)
-    if dist > area.max_range_km:
-        return False
-    dlat = lat - area.rx_lat
-    dlon = lon - area.rx_lon
-    bearing = math.degrees(math.atan2(
-        dlon * math.cos(math.radians(area.rx_lat)), dlat
-    )) % 360
-    angle_diff = abs((bearing - area.beam_azimuth_deg + 180) % 360 - 180)
-    return angle_diff < area.beam_width_deg / 2
+    """Check whether a lat/lon point falls inside a node's detection cone.
+
+    Delegates to the shared gate.  This used to test a monostatic circle with a
+    flat-earth bearing, ignoring the bistatic limit the node declares — so it
+    scored coverage over a region up to 2x too far in radius away from the
+    transmitter, and under-reached toward it.
+    """
+    return point_in_beam(
+        lat, lon,
+        rx_lat=area.rx_lat, rx_lon=area.rx_lon,
+        tx_lat=area.tx_lat or None, tx_lon=area.tx_lon or None,
+        beam_azimuth_deg=area.beam_azimuth_deg,
+        beam_width_deg=area.beam_width_deg,
+        max_range_km=area.max_range_km,
+        max_bistatic_range_km=area.max_bistatic_range_km,
+    )
 
 
 def _count_covering_nodes(areas: list[DetectionAreaState],
@@ -85,9 +90,16 @@ def coverage_suggestion(areas: list[DetectionAreaState],
     use_expansion = saturated and overlap_density > 0.3
 
     for label, bearing_deg in directions:
+        # The old expression divided by both R_EARTH *and* 111.32, so the "80 km"
+        # probe points landed 0.72 km from the centre — the gap analysis was
+        # measuring the middle of the metro in eight directions.  Advisory
+        # output only, but it was wrong by a factor of 111.
         bearing_rad = math.radians(bearing_deg)
-        test_lat = center_lat + (desired_range_km / R_EARTH) * math.degrees(1) * math.cos(bearing_rad) / 111.32
-        test_lon = center_lon + (desired_range_km / R_EARTH) * math.degrees(1) * math.sin(bearing_rad) / (111.32 * math.cos(math.radians(center_lat)))
+        test_lat, test_lon = offset_latlon(
+            center_lat, center_lon,
+            east_km=desired_range_km * math.sin(bearing_rad),
+            north_km=desired_range_km * math.cos(bearing_rad),
+        )
 
         covered = any(_point_in_beam(a, test_lat, test_lon) for a in areas)
 
