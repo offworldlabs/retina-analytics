@@ -586,7 +586,7 @@ class InterNodeAssociator:
         self.track_pairs_accepted: int = 0
         self.track_pairs_unfitted: int = 0    # too few epochs, or the fit failed
         self.track_pairs_superseded: int = 0  # lost their tracks to a better fit
-        self.track_pairs_deferred: int = 0    # rounds that ran out of fit budget
+        self.track_pairs_deferred: int = 0    # rounds cut short by a budget (once per round)
         # Adjacency index: node_id → set of neighbor node_ids that share a real
         # overlap zone (delay_pairs is non-empty).  Built during registration so
         # submit_frame can iterate O(K) neighbors instead of O(N) all nodes.
@@ -764,6 +764,13 @@ class InterNodeAssociator:
             self.node_configs.pop(node_id, None)
             self._pending_frames.pop(node_id, None)
             self._pending_tracks.pop(node_id, None)
+            # Rate-limit timestamp and rotation cursor too: a fleet
+            # regeneration reuses node ids, and a stale _last_assoc
+            # suppressed the replacement node's first association round
+            # while a stale cursor started its rotation at a leftover
+            # offset.
+            self._last_assoc.pop(node_id, None)
+            self._neighbor_cursor.pop(node_id, None)
 
             stale_pairs = [k for k in self.overlap_zones if node_id in k]
             for key in stale_pairs:
@@ -877,8 +884,12 @@ class InterNodeAssociator:
         start = self._neighbor_cursor.get(node_id, 0) % n_total
         visit = [ordered_neighbors[(start + i) % n_total] for i in range(cap)]
         if cap < n_total:
+            # Advance the cursor for the capped fleet, but do NOT count this
+            # as a deferral: nothing has been deferred yet, and the counter
+            # (documented as "rounds that deferred work") was incrementing on
+            # every rotated round — and a second time below when the budget
+            # also ran out in the same round.
             self._neighbor_cursor[node_id] = (start + cap) % n_total
-            self.track_pairs_deferred += 1
 
         out: list[TrackPairCandidate] = []
         # Two budgets, because they bound different costs.  fits bounds inline
@@ -908,6 +919,8 @@ class InterNodeAssociator:
                 # Round exhausted.  Remaining neighbours are picked up next
                 # round from the cursor above, so nothing is lost, only
                 # deferred — which is only true because the cursor rotates.
+                # This is the one place work is actually deferred, so it is
+                # the one place the counter increments: once per such round.
                 self._neighbor_cursor[node_id] = (
                     (start + visit.index(other_id) + 1) % n_total)
                 self.track_pairs_deferred += 1

@@ -29,6 +29,11 @@ class HistoricalCoverageMap:
     max_entries: int = 10000
     _grid: dict[tuple[int, int], dict] = field(default_factory=dict)
     _grid_resolution_deg: float = 0.01  # ~1.1 km
+    # Cell cap: `entries` was capped but the grid was not — a node observed
+    # across a 60 km footprint fills 10^4–10^5 cells, all serialised to disk
+    # on every autosave.  20k cells ≈ a 165×165 km footprint at 0.01°;
+    # beyond that the least-recently-seen cells are evicted.
+    max_grid_cells: int = 20000
 
     def add_detection(self, lat: float, lon: float, alt_km: float,
                       snr: float, delay_error: float):
@@ -46,6 +51,8 @@ class HistoricalCoverageMap:
         )
         cell = self._grid.get(grid_key)
         if cell is None:
+            if len(self._grid) >= self.max_grid_cells:
+                self._evict_oldest_cells()
             self._grid[grid_key] = {
                 "lat": lat, "lon": lon,
                 "count": 1, "avg_snr": snr,
@@ -55,6 +62,14 @@ class HistoricalCoverageMap:
             cell["count"] += 1
             cell["avg_snr"] = (cell["avg_snr"] * (cell["count"] - 1) + snr) / cell["count"]
             cell["last_seen"] = time.time()
+
+    def _evict_oldest_cells(self) -> None:
+        """Drop the least-recently-seen 10% of cells to make room."""
+        n_drop = max(1, len(self._grid) // 10)
+        for key, _ in sorted(
+            self._grid.items(), key=lambda kv: kv[1].get("last_seen", 0.0)
+        )[:n_drop]:
+            del self._grid[key]
 
     @property
     def coverage_area_km2(self) -> float:
@@ -148,7 +163,13 @@ class HistoricalCoverageMap:
                 timestamp=e["timestamp"], snr=e["snr"],
                 delay_error=e["delay_error"],
             ))
+        # Re-apply the caps: a file written before they existed (or under
+        # larger ones) must not resurrect unbounded state.
+        if len(cmap.entries) > cmap.max_entries:
+            cmap.entries = cmap.entries[-cmap.max_entries:]
         for k_str, v in data.get("grid", {}).items():
             parts = k_str.split(",")
             cmap._grid[(int(parts[0]), int(parts[1]))] = v
+        while len(cmap._grid) > cmap.max_grid_cells:
+            cmap._evict_oldest_cells()
         return cmap

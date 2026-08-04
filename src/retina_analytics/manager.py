@@ -39,11 +39,21 @@ class NodeAnalyticsManager:
         self._summaries_cache: dict | None = None
         self._summaries_cache_ts: float = 0.0
         self._analytics_lock = threading.Lock()
-        self._save_lock = threading.Lock()
+        # RLock: guards the per-node dicts against structural mutation
+        # (register/retire) racing the save/load iterations.  Re-entrant so
+        # maybe_auto_save → save_coverage_maps can hold it across both.
+        self._save_lock = threading.RLock()
         if storage_dir:
             self._load_coverage_maps()
 
     def register_node(self, node_id: str, config: dict):
+        # Locked: save_coverage_maps / _load_coverage_maps iterate these dicts
+        # from other threads, and an unlocked insert mid-iteration raises
+        # "dictionary changed size during iteration".
+        with self._save_lock:
+            self._register_node_locked(node_id, config)
+
+    def _register_node_locked(self, node_id: str, config: dict):
         if node_id not in self.trust_scores:
             self.trust_scores[node_id] = TrustScoreState(node_id=node_id)
 
@@ -66,10 +76,18 @@ class NodeAnalyticsManager:
             max_bistatic_range_km=config.get("max_bistatic_range_km"),
         )
 
-        self.metrics[node_id] = NodeMetrics(
-            node_id=node_id,
-            connected_at=time.time(),
-        )
+        # Preserve accumulated metrics across reconnects.  Every other
+        # per-node store here is conditional, but this one was replaced
+        # unconditionally — a reconnect wiped total_frames / SNR / gap
+        # history and then fed reputation a fresh 0.0 detection rate.
+        existing_metrics = self.metrics.get(node_id)
+        if existing_metrics is None:
+            self.metrics[node_id] = NodeMetrics(
+                node_id=node_id,
+                connected_at=time.time(),
+            )
+        else:
+            existing_metrics.connected_at = time.time()
 
         if node_id not in self.reputations:
             self.reputations[node_id] = NodeReputation(node_id=node_id)
@@ -172,22 +190,23 @@ class NodeAnalyticsManager:
         Returns what was actually dropped, so a caller can report it rather
         than guess.
         """
-        dropped = {
-            name: (node_id in store)
-            for name, store in (
-                ("trust_score", self.trust_scores),
-                ("detection_area", self.detection_areas),
-                ("metrics", self.metrics),
-                ("reputation", self.reputations),
-                ("coverage_map", self.coverage_maps),
-                ("empirical_coverage", self.empirical_coverages),
-            )
-        }
-        for store in (
-            self.trust_scores, self.detection_areas, self.metrics,
-            self.reputations, self.coverage_maps, self.empirical_coverages,
-        ):
-            store.pop(node_id, None)
+        with self._save_lock:
+            dropped = {
+                name: (node_id in store)
+                for name, store in (
+                    ("trust_score", self.trust_scores),
+                    ("detection_area", self.detection_areas),
+                    ("metrics", self.metrics),
+                    ("reputation", self.reputations),
+                    ("coverage_map", self.coverage_maps),
+                    ("empirical_coverage", self.empirical_coverages),
+                )
+            }
+            for store in (
+                self.trust_scores, self.detection_areas, self.metrics,
+                self.reputations, self.coverage_maps, self.empirical_coverages,
+            ):
+                store.pop(node_id, None)
 
         files = []
         if self._storage_dir:
@@ -424,13 +443,17 @@ class NodeAnalyticsManager:
         if not self._storage_dir:
             return
         os.makedirs(self._storage_dir, exist_ok=True)
-        for node_id, cmap in self.coverage_maps.items():
-            if cmap.entries:
-                cmap.save_to_file(self._coverage_map_path(node_id))
-        for node_id, ec in self.empirical_coverages.items():
-            if ec.n_points > 0:
-                ec.save_to_file(self._empirical_path(node_id))
-        self._last_save_time = time.time()
+        # Under the (re-entrant) save lock: register/retire mutate these
+        # dicts from other threads, and an unguarded iteration raised
+        # RuntimeError mid-save.
+        with self._save_lock:
+            for node_id, cmap in list(self.coverage_maps.items()):
+                if cmap.entries:
+                    cmap.save_to_file(self._coverage_map_path(node_id))
+            for node_id, ec in list(self.empirical_coverages.items()):
+                if ec.n_points > 0:
+                    ec.save_to_file(self._empirical_path(node_id))
+            self._last_save_time = time.time()
 
     def maybe_auto_save(self):
         if not self._storage_dir:

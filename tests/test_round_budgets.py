@@ -179,3 +179,30 @@ class TestPairBudget:
         a.submit_tracks("n0", a._pending_tracks["n0"], 1000)
 
         assert calls["n"] <= a._MAX_FITS_PER_ROUND
+
+
+class TestDeferredCounterMeansDeferred:
+    """track_pairs_deferred increments once per round that actually cut work
+    short — not on every rotated round of a large fleet, and not twice when
+    rotation and budget exhaustion coincide."""
+
+    def test_rotation_alone_does_not_count_as_deferral(self):
+        a = InterNodeAssociator(grid_step_km=25.0, assoc_interval_s=0.0,
+                                max_neighbors=2)
+        for i in range(6):
+            a.register_node(f"n{i}", _cfg(i))
+        # No pending tracks anywhere: the round rotates the cursor but defers
+        # no actual work.
+        a.submit_tracks("n0", [], 1000)
+        assert a.track_pairs_deferred == 0
+
+    def test_budget_exhaustion_counts_once(self):
+        a = InterNodeAssociator(grid_step_km=25.0, assoc_interval_s=0.0,
+                                max_pairs_per_round=1)
+        for i in range(2):
+            a.register_node(f"n{i}", _cfg(i))
+        t0, t1 = _tracks_on_grid(a, "n0", "n1", 12)
+        a._pending_tracks["n0"], a._pending_tracks["n1"] = t0, t1
+        before = a.track_pairs_deferred
+        a.submit_tracks("n0", a._pending_tracks["n0"], 1000)
+        assert a.track_pairs_deferred - before <= 1

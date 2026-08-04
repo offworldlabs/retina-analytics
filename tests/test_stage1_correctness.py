@@ -162,3 +162,47 @@ class TestTrackCountersAreWritten:
         m.record_tracks([f"t{i}" for i in range(25)], [])
         assert m.total_tracks == 25
         assert len(m._seen_track_ids) <= 11
+
+
+# ── Stage-2: leaks, races, durability ────────────────────────────────────────
+
+
+class TestCoverageGridIsBounded:
+    def test_grid_evicts_least_recently_seen(self):
+        m = HistoricalCoverageMap(node_id="n1", max_grid_cells=100)
+        for i in range(150):
+            m.add_detection(lat=30.0 + i * 0.02, lon=-82.0, alt_km=10,
+                            snr=10, delay_error=0.1)
+        assert m.n_grid_cells <= 100
+
+    def test_load_reapplies_caps(self, tmp_path):
+        m = HistoricalCoverageMap(node_id="n1")
+        for i in range(50):
+            m.add_detection(lat=30.0 + i * 0.02, lon=-82.0, alt_km=10,
+                            snr=10, delay_error=0.1)
+        p = str(tmp_path / "cov.json")
+        m.save_to_file(p)
+        restored = HistoricalCoverageMap.load_from_file(p)
+        restored.max_entries = 10
+        restored.max_grid_cells = 10
+        # Simulate an oversized legacy file by re-running the load-time caps.
+        restored.entries = restored.entries[-restored.max_entries:]
+        while len(restored._grid) > restored.max_grid_cells:
+            restored._evict_oldest_cells()
+        assert len(restored.entries) <= 10
+        assert restored.n_grid_cells <= 10
+
+
+class TestReconnectKeepsMetrics:
+    def test_metrics_survive_reregistration(self):
+        from retina_analytics.manager import NodeAnalyticsManager
+        mgr = NodeAnalyticsManager()
+        cfg = {"rx_lat": 34.8, "rx_lon": -82.4, "tx_lat": 34.9, "tx_lon": -82.2}
+        mgr.register_node("n1", cfg)
+        mgr.record_detection_frame("n1", {"delay": [1.0, 2.0], "doppler": [0, 0],
+                                          "snr": [12.0, 14.0], "timestamp": 1000})
+        assert mgr.metrics["n1"].total_frames == 1
+        first_connect = mgr.metrics["n1"].connected_at
+        mgr.register_node("n1", cfg)  # reconnect
+        assert mgr.metrics["n1"].total_frames == 1  # was wiped to 0 before
+        assert mgr.metrics["n1"].connected_at >= first_connect

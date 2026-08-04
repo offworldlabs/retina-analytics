@@ -125,6 +125,19 @@ class TestAssociatorRetirement:
         assert "gone" not in a._pending_frames
         assert "gone" not in a._pending_tracks
 
+    def test_rate_limit_and_cursor_state_are_discarded(self):
+        """Fleet regenerations reuse node ids: a stale _last_assoc suppressed
+        the replacement node's first round, and a stale cursor started its
+        neighbour rotation at a leftover offset."""
+        a = self._pair()
+        a._last_assoc["gone"] = 1e12
+        a._neighbor_cursor["gone"] = 7
+
+        a.unregister_node("gone")
+
+        assert "gone" not in a._last_assoc
+        assert "gone" not in a._neighbor_cursor
+
     def test_unregistering_an_unknown_node_is_a_no_op(self):
         a = self._pair()
         before = dict(a.overlap_zones)
