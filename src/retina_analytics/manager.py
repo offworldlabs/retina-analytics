@@ -114,6 +114,7 @@ class NodeAnalyticsManager:
             self.empirical_coverages[node_id] = EmpiricalCoverageState(
                 rx_lat=rx_lat, rx_lon=rx_lon,
                 max_range_km=cfg_max_range,
+                tx_lat=tx_lat, tx_lon=tx_lon,
             )
             # Record the rule this polygon was built under so the next
             # registration can tell whether it is still valid.
@@ -131,6 +132,26 @@ class NodeAnalyticsManager:
             # calibration but track bound.
             ec.max_range_km = cfg_max_range
             ec.max_bistatic_range_km = cfg_bistatic
+            # A reconnect can carry a corrected TX; the clamp follows it.
+            ec.tx_lat, ec.tx_lon = tx_lat, tx_lon
+
+    def coverage_limit_for(self, node_id: str):
+        """A bearing → observed-limit-km callable for one node, or None.
+
+        Handed to InterNodeAssociator so the overlap grid can be tightened to
+        what a node has actually been seen to detect.  Returns None when the
+        node has no polygon at all, so a fresh node is unconstrained rather than
+        blind.
+        """
+        ec = self.empirical_coverages.get(node_id)
+        if ec is None:
+            return None
+        return ec.observed_limit_km
+
+    def coverage_digest(self, node_id: str):
+        """Change token for a node's observed limits; see constraint_digest."""
+        ec = self.empirical_coverages.get(node_id)
+        return ec.constraint_digest() if ec is not None else None
 
     def is_node_blocked(self, node_id: str) -> bool:
         rep = self.reputations.get(node_id)

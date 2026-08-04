@@ -29,6 +29,7 @@ from retina_analytics.constants import (
     bistatic_max_radius_km,
     resolve_beam_azimuth_deg,
 )
+from retina_analytics.empirical_coverage import OBSERVED_LIMIT_MARGIN
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -184,6 +185,10 @@ class NodeGeometry:
     # monostatic circle of radius max_range_km, so a node that does not declare
     # one gates exactly as before.
     max_bistatic_range_km: float | None = None
+    # bearing (deg) -> furthest this node has been *observed* to detect, or
+    # None where there is not enough evidence.  Shrink-only: it may tighten the
+    # theoretical footprint, never extend it.  See _point_in_beam.
+    coverage_limit: object = None
 
     @property
     def baseline_km(self) -> float:
@@ -338,7 +343,25 @@ def _point_in_beam(lat, lon, geo: NodeGeometry) -> bool:
         return False
     bearing = _bearing_deg(geo.rx_lat, geo.rx_lon, lat, lon)
     angle_diff = abs((bearing - geo.beam_azimuth_deg + 180) % 360 - 180)
-    return angle_diff <= geo.beam_width_deg / 2
+    if angle_diff > geo.beam_width_deg / 2:
+        return False
+
+    # Shrink-only empirical prior.  Where a node has been observed often enough
+    # on this bearing to say something, the grid is pulled in to what it has
+    # actually detected — a node aimed at a ridge does not cover the far side of
+    # it, however good the geometry looks.
+    #
+    # Only ever tightens.  The polygon is fed from ADS-B fixes alone, so it
+    # grows where cooperative traffic flies and stays empty elsewhere; an empty
+    # bearing means nobody flew there, not that the node is deaf.  Reading it as
+    # an upper bound would carve blind spots into good footprints, so
+    # observed_limit_km abstains below its evidence floor and this test lets an
+    # abstention through untouched.
+    if geo.coverage_limit is not None:
+        observed = geo.coverage_limit(bearing)
+        if observed is not None and dist > observed * OBSERVED_LIMIT_MARGIN:
+            return False
+    return True
 
 
 def compute_overlap_zone(geo_a: NodeGeometry, geo_b: NodeGeometry,
@@ -759,7 +782,8 @@ class InterNodeAssociator:
     def __init__(self, delay_gate_us: float = 5.0, doppler_gate_hz: float = 30.0,
                  grid_step_km: float = 30.0, assoc_interval_s: float = 30.0,
                  cv_fit=None, cv_chi2_max: float = 2.0, cv_min_epochs: int = 4,
-                 cv_min_span_s: float = 12.0, cv_exclusive: bool = True):
+                 cv_min_span_s: float = 12.0, cv_exclusive: bool = True,
+                 coverage_provider=None):
         self.delay_gate_us = delay_gate_us
         self.doppler_gate_hz = doppler_gate_hz
         self.grid_step_km = grid_step_km
@@ -805,6 +829,13 @@ class InterNodeAssociator:
         # stage 2 for why this exists and why greedy-on-chi2 is safe where two
         # earlier exclusivity schemes were not.
         self.cv_exclusive = cv_exclusive
+        # node_id -> (bearing -> observed limit km | None), or None for no
+        # constraint.  Injected the same way cv_fit is, so this library keeps
+        # knowing nothing about NodeAnalyticsManager.
+        self.coverage_provider = coverage_provider
+        # The constraint digest each node's grids were last built under, so a
+        # polygon that tightens later can be detected and the grids rebuilt.
+        self._coverage_digests: dict[str, tuple] = {}
         # Counters for what the fine test actually did, so its value is
         # observable rather than assumed.
         self.track_pairs_gated: int = 0       # survived the coarse delay grid
@@ -927,6 +958,8 @@ class InterNodeAssociator:
             beam_width_deg=config.get("beam_width_deg", 41),
             max_range_km=config.get("max_range_km", 50),
             max_bistatic_range_km=config.get("max_bistatic_range_km"),
+            coverage_limit=(self.coverage_provider(node_id)
+                            if self.coverage_provider else None),
         )
 
         # Honour an explicit aim (aimed coverage-ring Yagi); otherwise broadside
@@ -977,6 +1010,49 @@ class InterNodeAssociator:
                     self._neighbors.setdefault(existing_id, set()).add(node_id)
 
             self.node_geometries[node_id] = geo
+
+    def rebuild_zones_for(self, node_id: str) -> int:
+        """Recompute this node's overlap grids against its current coverage.
+
+        Grids are built once at registration, so a polygon that tightens
+        afterwards does not retroactively tighten them — the constraint would
+        only ever take effect on a restart.  Callers detect the change with
+        coverage_digest and call this.
+
+        Returns the number of pairs rebuilt.  Costs one grid computation per
+        neighbour, so it is meant for a background cadence, not the frame path.
+        """
+        geo = self.node_geometries.get(node_id)
+        if geo is None:
+            return 0
+        if self.coverage_provider is not None:
+            geo.coverage_limit = self.coverage_provider(node_id)
+        rebuilt = 0
+        with self._register_lock:
+            for other_id, other_geo in list(self.node_geometries.items()):
+                if other_id == node_id:
+                    continue
+                pair_key = tuple(sorted([node_id, other_id]))
+                a, b = ((geo, other_geo) if pair_key[0] == node_id
+                        else (other_geo, geo))
+                zone = compute_overlap_zone(
+                    a, b,
+                    grid_step_km=self.grid_step_km,
+                    delay_gate_us=self.delay_gate_us,
+                    doppler_gate_hz=self.doppler_gate_hz,
+                )
+                self.overlap_zones[pair_key] = zone
+                # Adjacency follows: a grid that has tightened to nothing is no
+                # longer a neighbour, and leaving it in place would keep pairing
+                # frames against an empty zone every round.
+                if zone.delay_pairs:
+                    self._neighbors.setdefault(node_id, set()).add(other_id)
+                    self._neighbors.setdefault(other_id, set()).add(node_id)
+                else:
+                    self._neighbors.get(node_id, set()).discard(other_id)
+                    self._neighbors.get(other_id, set()).discard(node_id)
+                rebuilt += 1
+        return rebuilt
 
     def submit_frame(self, node_id: str, frame: dict, timestamp_ms: int) -> list[AssociationCandidate]:
         """Submit a detection frame and find associations with other recent frames.
