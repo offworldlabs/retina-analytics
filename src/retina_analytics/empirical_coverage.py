@@ -30,6 +30,7 @@ from retina_analytics.constants import (
     bearing_deg,
     bistatic_range_limit_km,
     haversine_km,
+    offset_latlon,
 )
 
 N_BINS = 72          # 5 ° per bin  (360 / 5 = 72)
@@ -73,21 +74,26 @@ def _bearing_and_range(rx_lat: float, rx_lon: float,
                        lat: float, lon: float) -> tuple[float, float]:
     """Return (bearing °, range_km) from RX to target.
 
-    DELIBERATELY NOT YET on constants.bearing_deg / haversine_km, unlike every
-    other geometry site in this library.  This one decides which 5° bin an
-    ADS-B point lands in, while the association gate reads those bins using the
-    spherical bearing — so switching it is a behavioural change to the coverage
-    prior, not a consolidation, and it must be measured on its own rather than
-    hidden inside a no-op commit.  It also has to move together with
-    to_polygon's inverse projection, or the emitted polygon stops matching the
-    bins it came from.  See the coverage-bearing step of the refactor plan.
+    Spherical, matching the rest of the system.  This was flat-earth while the
+    association gate read the resulting bins with the spherical bearing, so a
+    point could be *filed* under one bin and *looked up* under its neighbour.
+    The mismatch is small — 0.27° at this latitude, about 2% of points crossing
+    a 5° boundary — but it was real, it is the cause named in observed_limit_km's
+    docstring, and it also made the clamp in add_point mix models: the bearing
+    came from here flat, and _reach_at derived the TX bearing spherically.
+
+    Persisted state is not re-binned, because it cannot be: to_dict stores
+    ranges per bin, not the points they came from.  Nothing needs re-binning
+    though — old points already carry this mismatch relative to the query, new
+    ones do not, and bins age out at _MAX_PER_BIN.  The state is therefore
+    monotonically self-healing and CALIBRATION_SCHEMA is deliberately NOT
+    bumped: a bump would discard every node's polygon (days of cooperative
+    traffic each, since a bin needs _MIN_BIN_POINTS_TO_CONSTRAIN to say
+    anything) to correct an error that then averages through a P85, a 3-bin
+    rolling mean and a 1.25x margin.
     """
-    dlat = lat - rx_lat
-    cos_lat = math.cos(math.radians(rx_lat))
-    dlon = (lon - rx_lon) * cos_lat
-    range_km = math.sqrt((dlat * 111.320) ** 2 + (dlon * 111.320) ** 2)
-    bearing = math.degrees(math.atan2(dlon, dlat)) % 360.0
-    return bearing, range_km
+    return (bearing_deg(rx_lat, rx_lon, lat, lon),
+            haversine_km(rx_lat, rx_lon, lat, lon))
 
 
 def _p85(values: list[float]) -> float:
@@ -268,7 +274,6 @@ class EmpiricalCoverageState:
             smoothed[i] = sum(vals) / len(vals)
 
         # Step 4: generate sector polygon (pie-slice shape)
-        cos_lat = math.cos(math.radians(self.rx_lat))
         polygon: list[list[float]] = []
 
         # Start at RX (sector tip)
@@ -286,9 +291,16 @@ class EmpiricalCoverageState:
             r_km = smoothed[i]
             if r_km < 0.1:
                 r_km = 0.1
+            # Emission must use the inverse of the model the bins were filed
+            # under.  While _bearing_and_range was flat and this stayed flat the
+            # two agreed; changing one alone would have replaced the old
+            # mismatch with a new one, between a bin and the vertex drawn for it.
             bearing_rad = math.radians(i * _DEG_PER_BIN)
-            lat = self.rx_lat + (r_km * math.cos(bearing_rad)) / 111.320
-            lon = self.rx_lon + (r_km * math.sin(bearing_rad)) / (111.320 * cos_lat)
+            lat, lon = offset_latlon(
+                self.rx_lat, self.rx_lon,
+                east_km=r_km * math.sin(bearing_rad),
+                north_km=r_km * math.cos(bearing_rad),
+            )
             polygon.append([round(lat, 5), round(lon, 5)])
 
         # Close back to RX
@@ -315,14 +327,21 @@ class EmpiricalCoverageState:
         it, and it abstains below _MIN_BIN_POINTS_TO_CONSTRAIN.
 
         Answers from the bin *and its two neighbours*, taking the most
-        permissive.  Bins are 5 deg wide and the two bearings involved are
-        computed differently — add_point uses a flat approximation, the
-        association gate a spherical one — so a query can land one bin over
-        from the evidence it belongs to.  Sampling a single bin then flickers
-        between a limit and None across every boundary.  Widening to the
-        neighbours costs a little resolution; for a constraint that can only
-        tighten, erring permissive is the safe direction, since the failure
-        mode of erring tight is a blind spot.
+        permissive.  The original reason was a formula mismatch — add_point
+        binned with a flat-earth bearing while the association gate queried
+        with a spherical one — and that is now fixed; both are spherical.
+
+        The widening stays, for two reasons that never depended on it.  Bins
+        are 5 deg wide, so a query at 4.9 deg still reads a bin whose evidence
+        mostly sits at 5.1: quantisation is inherent at +-2.5 deg, an order of
+        magnitude larger than the 0.27 deg the formulas differed by.  And it
+        doubles as a sparsity smoother, letting a bin one sample short of
+        _MIN_BIN_POINTS_TO_CONSTRAIN borrow its neighbour's evidence.
+
+        Removing it is strictly tightening, and the failure mode of tightening
+        is a blind spot — a real detection gated out of association, which is
+        silent and shows up only as unattributed recall loss.  If it is to go,
+        it should go on its own with its own measurement.
         """
         i = _bin_for_bearing(bearing_deg_ % 360.0)
         best = None
