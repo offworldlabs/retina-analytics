@@ -525,7 +525,8 @@ class InterNodeAssociator:
                  grid_step_km: float = 30.0, assoc_interval_s: float = 30.0,
                  cv_fit=None, cv_chi2_max: float = 2.0, cv_min_epochs: int = 4,
                  cv_min_span_s: float = 12.0, cv_exclusive: bool = True,
-                 coverage_provider=None):
+                 coverage_provider=None, max_neighbors: int = 50,
+                 max_pairs_per_round: int = 64):
         self.delay_gate_us = delay_gate_us
         self.doppler_gate_hz = doppler_gate_hz
         self.grid_step_km = grid_step_km
@@ -629,33 +630,40 @@ class InterNodeAssociator:
         # from config (it was dead config before, defined but never passed), so
         # this is tunable without editing library source.
         self._ASSOC_MIN_INTERVAL_S: float = assoc_interval_s
-        self._ASSOC_MAX_NEIGHBORS: int = 50
-        # Constant-velocity fits attempted per node pair per round.  Each is a
-        # real LM solve over both tracks' whole history, and it runs in the
-        # frame worker, so an unbounded count is unbounded frame latency —
-        # measured on staging as a frame queue at 92% depth with the processor
-        # 21 s behind a 6 frame/s feed.  Pairings are tried in order of coarse
-        # delay residual and the rest deferred, not dropped: every pairing is
-        # re-tested each round, so a genuine one that loses a crowded round
-        # comes back on the next.
+        # Neighbours visited per association round.  submit_frame had this cap
+        # from the start; submit_tracks did not, so the live path was the
+        # uncapped one and ASSOC_MAX_NEIGHBORS was dead config — the same shape
+        # of bug as assoc_interval_s, which was also defined and never passed.
+        self._ASSOC_MAX_NEIGHBORS: int = max_neighbors
+        # Where the round stopped last time, per node.  Set iteration order is
+        # fixed for the life of the process, so cutting the list off at the cap
+        # would visit the same neighbours every round and starve the tail
+        # permanently — which would make the "nothing is lost, only deferred"
+        # claim in submit_tracks false.  A rotating cursor makes it true.
+        self._neighbor_cursor: dict[str, int] = {}
         # Constant-velocity fits attempted per association *round*, across all
         # of a node's neighbours.  Each fit is a real LM solve over both tracks'
-        # whole history and costs ~86 ms measured, and it runs inside the frame
-        # worker — so this number times 86 ms is how long one round blocks the
-        # frame queue.  Unbounded, staging went to 92% queue depth with the
-        # processor 21 s behind a 6 frame/s feed and the map went empty.
+        # whole history and costs ~86 ms measured; when it runs inline this
+        # number times 86 ms is how long one round blocks the frame queue.
+        # Unbounded, staging went to 92% queue depth with the processor 21 s
+        # behind a 6 frame/s feed and the map went empty.
         #
         # Per *node pair* would not bound it: a node has up to
         # _ASSOC_MAX_NEIGHBORS of them, so a 12-fit pair budget is really a
-        # 600-fit round.  Pairings are tried in order of coarse delay residual
-        # and the rest deferred, not dropped — every pairing is re-tested each
-        # round, so a genuine one that loses a crowded round comes back on the
-        # next.
-        #
-        # This is a bound, not a fix.  An 86 ms solve does not belong on the
-        # frame path at all; it belongs on the solver's worker queue, which
-        # exists for exactly this.  Until it moves, keep this small.
+        # 600-fit round.
         self._MAX_FITS_PER_ROUND: int = 8
+        # Pairings emitted per round when the fit is *deferred* (cv_fit=None,
+        # which is production).  This used to be governed by the fit budget,
+        # which was only decremented inside the fit branch — so with no fit
+        # running the budget never depleted and the truncation acted as a fixed
+        # cap of 8 pairings per node pair, discarding candidates to bound a cost
+        # that was not being paid.
+        #
+        # It still needs a bound: each surviving pairing costs a _merge_epochs
+        # over both histories, a TrackPairCandidate carrying those epochs, and a
+        # slot on the solver queue.  Removing the cap would convert a bounded
+        # frame path into a solver-queue overflow, which fails more quietly.
+        self._MAX_PAIRS_PER_ROUND: int = max_pairs_per_round
         self._last_assoc: dict[str, float] = {}  # node_id → last association wall-time
         # Maximum allowed age difference between two frames being associated.
         # Aircraft at 250 m/s move ~0.5 km in 2 s; frames further apart than
@@ -859,9 +867,28 @@ class InterNodeAssociator:
             return []
         self._last_assoc[node_id] = now
 
+        # Visit at most _ASSOC_MAX_NEIGHBORS, starting where the last round
+        # stopped.  Sorted so the rotation is over a stable sequence — a set's
+        # iteration order is fixed but arbitrary, and slicing it unrotated would
+        # hand the same neighbours every round and never reach the tail.
+        ordered_neighbors = sorted(neighbors)
+        n_total = len(ordered_neighbors)
+        cap = min(self._ASSOC_MAX_NEIGHBORS, n_total)
+        start = self._neighbor_cursor.get(node_id, 0) % n_total
+        visit = [ordered_neighbors[(start + i) % n_total] for i in range(cap)]
+        if cap < n_total:
+            self._neighbor_cursor[node_id] = (start + cap) % n_total
+            self.track_pairs_deferred += 1
+
         out: list[TrackPairCandidate] = []
-        budget = {"fits": self._MAX_FITS_PER_ROUND}
-        for other_id in list(neighbors):
+        # Two budgets, because they bound different costs.  fits bounds inline
+        # LM solves; pairs bounds candidates handed to the solver worker when
+        # the fit is deferred.  Merging them was the bug: the fit budget was
+        # decremented only inside the fit branch, so on the deferred path it
+        # never depleted and its cap silently applied per node pair instead.
+        budget = {"fits": self._MAX_FITS_PER_ROUND,
+                  "pairs": self._MAX_PAIRS_PER_ROUND}
+        for other_id in visit:
             other_tracks = self._pending_tracks.get(other_id)
             if not other_tracks:
                 continue
@@ -873,11 +900,16 @@ class InterNodeAssociator:
                 tracks_a, tracks_b = tracks, other_tracks
             else:
                 tracks_a, tracks_b = other_tracks, tracks
-            out.extend(self._pair_tracks(zone, tracks_a, tracks_b, timestamp_ms,
-                                         budget))
-            if budget["fits"] <= 0:
+            emitted = self._pair_tracks(zone, tracks_a, tracks_b, timestamp_ms,
+                                        budget)
+            out.extend(emitted)
+            budget["pairs"] -= len(emitted)
+            if budget["fits"] <= 0 or budget["pairs"] <= 0:
                 # Round exhausted.  Remaining neighbours are picked up next
-                # round; nothing is lost, only deferred.
+                # round from the cursor above, so nothing is lost, only
+                # deferred — which is only true because the cursor rotates.
+                self._neighbor_cursor[node_id] = (
+                    (start + visit.index(other_id) + 1) % n_total)
                 self.track_pairs_deferred += 1
                 break
         return out
@@ -908,19 +940,27 @@ class InterNodeAssociator:
         if not matches:
             return []
 
-        # The constant-velocity fit is a bounded-but-real LM solve, and it also
-        # runs in the frame worker.  Ordering by coarse delay residual and
-        # capping the count keeps one association round's latency bounded
-        # regardless of how many aircraft share the zone; the survivors are
-        # re-tested every round, so a genuine pairing that loses a crowded round
-        # is deferred rather than dropped.
+        # Ordering by coarse delay residual and capping the count keeps one
+        # association round bounded regardless of how many aircraft share the
+        # zone; the survivors are re-tested every round, so a genuine pairing
+        # that loses a crowded round is deferred rather than dropped.
+        #
+        # Which cap applies depends on what the round is paying for.  Fitting
+        # inline, it is the LM budget.  Deferring (cv_fit=None, i.e. production)
+        # no fit runs here at all, so bounding on the fit budget would discard
+        # candidates for a cost nobody incurs — the pair budget is the real one,
+        # and it is an order of magnitude larger.
+        _b = budget or {}
+        limit = (_b.get("fits", self._MAX_FITS_PER_ROUND)
+                 if self.cv_fit is not None
+                 else _b.get("pairs", self._MAX_PAIRS_PER_ROUND))
         ordered = sorted(
             matches.items(),
             key=lambda kv: abs(zone._np_pred_a[kv[1]]
                                - float(usable_a[kv[0][0]]["history"][-1]["delay_us"]))
             + abs(zone._np_pred_b[kv[1]]
                   - float(usable_b[kv[0][1]]["history"][-1]["delay_us"])),
-        )[: (budget or {}).get("fits", self._MAX_FITS_PER_ROUND)]
+        )[: max(limit, 0)]
 
         for (i_a, i_b), best_g in ordered:
             ta, tb = usable_a[i_a], usable_b[i_b]
