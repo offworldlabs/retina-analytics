@@ -22,6 +22,32 @@ class NodeMetrics:
     _frame_timestamps: list = field(default_factory=list)
     _max_frame_ts: int = 500
     gap_threshold_s: float = 60.0
+    # Dedup state for the track counters.  Track ids are monotonically new per
+    # node, so a bounded seen-set gives exact distinct counts while capping
+    # memory: an id evicted by the clear can never reappear.
+    _seen_track_ids: set = field(default_factory=set)
+    _seen_geo_ids: set = field(default_factory=set)
+    _MAX_SEEN_IDS: int = 4096
+
+    def record_tracks(self, confirmed_ids, geolocated_ids=()):
+        """Count distinct confirmed / geolocated track ids.
+
+        total_tracks and geolocated_tracks were declared, exported through
+        summary(), and never incremented anywhere — the admin per-node track
+        count read a permanent 0.
+        """
+        for tid in confirmed_ids:
+            if tid not in self._seen_track_ids:
+                self._seen_track_ids.add(tid)
+                self.total_tracks += 1
+        for tid in geolocated_ids:
+            if tid not in self._seen_geo_ids:
+                self._seen_geo_ids.add(tid)
+                self.geolocated_tracks += 1
+        if len(self._seen_track_ids) > self._MAX_SEEN_IDS:
+            self._seen_track_ids.clear()
+        if len(self._seen_geo_ids) > self._MAX_SEEN_IDS:
+            self._seen_geo_ids.clear()
 
     def record_frame(self, frame: dict):
         self.total_frames += 1

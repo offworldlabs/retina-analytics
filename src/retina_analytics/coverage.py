@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from retina_analytics.constants import KM_PER_DEG_LAT, bearing_deg
+from retina_analytics.constants import KM_PER_DEG_LAT, bearing_deg, km_per_deg_lon
 
 
 @dataclass
@@ -58,8 +58,14 @@ class HistoricalCoverageMap:
 
     @property
     def coverage_area_km2(self) -> float:
-        cell_area = (self._grid_resolution_deg * KM_PER_DEG_LAT) ** 2
-        return len(self._grid) * cell_area
+        # A 0.01° × 0.01° cell is not square: the lat side is fixed but the
+        # lon side shrinks by cos(lat).  Squaring KM_PER_DEG_LAT overstated
+        # every area by 1/cos(lat) — 22% at the Greenville latitude.
+        lat_side_km = self._grid_resolution_deg * KM_PER_DEG_LAT
+        return sum(
+            lat_side_km * self._grid_resolution_deg * km_per_deg_lon(cell["lat"])
+            for cell in self._grid.values()
+        )
 
     @property
     def n_grid_cells(self) -> int:
@@ -109,7 +115,8 @@ class HistoricalCoverageMap:
             "total_entries": len(self.entries),
             "grid_cells": self.n_grid_cells,
             "coverage_area_km2": round(self.coverage_area_km2, 1),
-            "estimated_beam_width_deg": round(beam_est, 1) if beam_est else None,
+            # `is not None`: a genuine 0.0° estimate is a value, not an absence.
+            "estimated_beam_width_deg": round(beam_est, 1) if beam_est is not None else None,
         }
 
     def save_to_file(self, path: str):

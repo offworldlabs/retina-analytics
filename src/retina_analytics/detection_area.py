@@ -8,6 +8,7 @@ from retina_analytics.constants import (
     C_KM_US,
     YAGI_BEAM_WIDTH_DEG,
     YAGI_MAX_RANGE_KM,
+    bistatic_max_radius_km,
     haversine_km,
 )
 
@@ -91,6 +92,29 @@ class DetectionAreaState:
         if self.n_detections == 0:
             return (0.0, 0.0)
         return (self.min_doppler, self.max_doppler)
+
+    @property
+    def has_tx(self) -> bool:
+        """True when this node declares a transmitter position.
+
+        (0, 0) is the unset sentinel; testing either coordinate alone with
+        `or None` disables the bistatic branch for any TX with one zero axis.
+        """
+        return bool(self.tx_lat or self.tx_lon)
+
+    def footprint_radius_km(self) -> float:
+        """Largest RX-relative distance this node's footprint can reach.
+
+        For a bistatic node that is r(ψ=0) = Δ/2 + L, up to 2x max_range_km
+        away from the transmitter — pre-filtering neighbour pairs with
+        max_range_km sums pruned genuinely overlapping pairs before
+        compute_delay_bin_overlap ever saw them.  Mirrors
+        association.NodeGeometry.footprint_radius_km.
+        """
+        if self.max_bistatic_range_km and self.has_tx:
+            baseline = haversine_km(self.rx_lat, self.rx_lon, self.tx_lat, self.tx_lon)
+            return bistatic_max_radius_km(baseline, self.max_bistatic_range_km)
+        return self.max_range_km
 
     @property
     def estimated_max_range_km(self) -> float:

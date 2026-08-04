@@ -43,10 +43,13 @@ def _point_in_beam(area: DetectionAreaState, lat: float, lon: float) -> bool:
     scored coverage over a region up to 2x too far in radius away from the
     transmitter, and under-reached toward it.
     """
+    # has_tx tests the pair: (0, 0) is the unset sentinel, but `tx_lat or
+    # None` alone also nulled genuine transmitters with one zero axis.
     return point_in_beam(
         lat, lon,
         rx_lat=area.rx_lat, rx_lon=area.rx_lon,
-        tx_lat=area.tx_lat or None, tx_lon=area.tx_lon or None,
+        tx_lat=area.tx_lat if area.has_tx else None,
+        tx_lon=area.tx_lon if area.has_tx else None,
         beam_azimuth_deg=area.beam_azimuth_deg,
         beam_width_deg=area.beam_width_deg,
         max_range_km=area.max_range_km,
@@ -82,7 +85,10 @@ def coverage_suggestion(areas: list[DetectionAreaState],
     for i, a in enumerate(areas):
         for b in areas[i + 1:]:
             dist = haversine_km(a.rx_lat, a.rx_lon, b.rx_lat, b.rx_lon)
-            if dist < a.max_range_km + b.max_range_km:
+            # footprint_radius_km, not max_range_km: a bistatic footprint
+            # reaches Δ/2 + L from the RX, so the monostatic sum undercounted
+            # genuinely overlapping pairs.
+            if dist < a.footprint_radius_km() + b.footprint_radius_km():
                 n_overlap_pairs += 1
     max_pairs = len(areas) * (len(areas) - 1) / 2 if len(areas) > 1 else 1
     overlap_density = n_overlap_pairs / max_pairs if max_pairs else 0

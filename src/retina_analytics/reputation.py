@@ -18,6 +18,28 @@ class NodeReputation:
     max_penalties: int = 100
     max_detections_per_frame: float = 50.0
     min_heartbeat_interval_s: float = 300.0
+    # Which named conditions are currently active — see _penalize_condition.
+    _condition_active: dict = field(default_factory=dict)
+
+    def _penalize_condition(self, key: str, active: bool, amount: float, reason: str):
+        """Penalise the *onset* of a condition, not every pass it persists.
+
+        Used for conditions that are absences or static configuration facts
+        (stale heartbeat, geometric disagreement with a neighbour), which the
+        30 s evaluation cadence re-observes unchanged every cycle.  Per-call
+        penalties compounded there: a node that merely went quiet crossed the
+        block threshold in ~8 cycles, and unblock() restored it to 0.3 — one
+        penalty above re-blocking, with rewards a no-op while blocked.
+
+        Deliberately NOT used for trust and detection-rate penalties: those
+        are evidence of bad *data* actively being submitted, and repeated
+        escalation to a block is the intended defence
+        (test_bad_actor_gets_blocked pins it).
+        """
+        was_active = self._condition_active.get(key, False)
+        self._condition_active[key] = active
+        if active and not was_active:
+            self.apply_penalty(amount, reason)
 
     def apply_penalty(self, amount: float, reason: str):
         self.reputation = max(0.0, self.reputation - amount)
@@ -38,6 +60,8 @@ class NodeReputation:
             self.reputation = min(1.0, self.reputation + amount)
 
     def evaluate_trust(self, trust_score: float):
+        # Per-pass on purpose: low trust means bad data is being submitted
+        # right now, and escalation to a block is the point.
         if trust_score < self.trust_block_threshold:
             self.apply_penalty(0.15, f"Trust score critically low: {trust_score:.3f}")
         elif trust_score < self.trust_warn_threshold:
@@ -48,16 +72,30 @@ class NodeReputation:
     def evaluate_heartbeat(self, last_heartbeat: float):
         if last_heartbeat > 0:
             gap = time.time() - last_heartbeat
-            if gap > self.min_heartbeat_interval_s:
-                self.apply_penalty(0.1, f"Heartbeat stale: {gap:.0f}s")
+            self._penalize_condition(
+                "heartbeat_stale", gap > self.min_heartbeat_interval_s,
+                0.1, f"Heartbeat stale: {gap:.0f}s",
+            )
 
     def evaluate_detection_rate(self, avg_det_per_frame: float):
+        # Per-pass on purpose: sustained flooding should escalate (see
+        # evaluate_trust).
         if avg_det_per_frame > self.max_detections_per_frame:
             self.apply_penalty(0.05, f"High detection rate: {avg_det_per_frame:.1f}/frame")
 
-    def evaluate_neighbour_consistency(self, overlap_ratio: float, neighbour_trust: float):
-        if neighbour_trust > 0.7 and overlap_ratio < 0.05:
-            self.apply_penalty(0.08, f"Inconsistent with trusted neighbour (overlap={overlap_ratio:.2f})")
+    def evaluate_neighbour_consistency(self, overlap_ratio: float,
+                                       neighbour_trust: float,
+                                       neighbour_id: str = ""):
+        # Keyed per neighbour: the caller loops over every pair each cycle,
+        # so an un-keyed condition would both mask distinct neighbours and
+        # re-penalise the same disagreement every pass.
+        self._penalize_condition(
+            f"neighbour_inconsistent:{neighbour_id}",
+            neighbour_trust > 0.7 and overlap_ratio < 0.05,
+            0.08,
+            f"Inconsistent with trusted neighbour {neighbour_id or '?'} "
+            f"(overlap={overlap_ratio:.2f})",
+        )
 
     def unblock(self):
         self.blocked = False

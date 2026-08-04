@@ -379,6 +379,7 @@ class EmpiricalCoverageState:
             "tx_lat": self.tx_lat,
             "tx_lon": self.tx_lon,
             "schema": self.schema,
+            "range_clamp_mult": self.range_clamp_mult,
             "bins": [b[:] for b in self._bins],
         }
 
@@ -388,6 +389,10 @@ class EmpiricalCoverageState:
                   max_range_km=d.get("max_range_km"),
                   tx_lat=d.get("tx_lat"), tx_lon=d.get("tx_lon"))
         obj.max_bistatic_range_km = d.get("max_bistatic_range_km")
+        # Round-trip the clamp: dropping it silently reset a customised
+        # multiplier to the 2.0 default on every restart.
+        if d.get("range_clamp_mult") is not None:
+            obj.range_clamp_mult = float(d["range_clamp_mult"])
         # Absent means v1 — written before the field existed, i.e. accumulated
         # from solver positions.
         obj.schema = d.get("schema", 1)

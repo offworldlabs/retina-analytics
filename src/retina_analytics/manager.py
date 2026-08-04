@@ -246,6 +246,12 @@ class NodeAnalyticsManager:
         if node_id in self.metrics:
             self.metrics[node_id].record_heartbeat()
 
+    def record_node_tracks(self, node_id: str, confirmed_ids, geolocated_ids=()):
+        """Feed the per-node distinct-track counters (see NodeMetrics.record_tracks)."""
+        m = self.metrics.get(node_id)
+        if m is not None:
+            m.record_tracks(confirmed_ids, geolocated_ids)
+
     def evaluate_reputations(self):
         for node_id, rep in self.reputations.items():
             ts = self.trust_scores.get(node_id)
@@ -265,17 +271,19 @@ class NodeAnalyticsManager:
                 if area_a and area_b and area_a.n_detections > 0 and area_b.n_detections > 0:
                     dist = haversine_km(area_a.rx_lat, area_a.rx_lon,
                                         area_b.rx_lat, area_b.rx_lon)
-                    if dist > area_a.max_range_km + area_b.max_range_km:
+                    # Bistatic footprints reach delta/2 + L from the RX; the
+                    # monostatic sum pruned genuinely overlapping pairs.
+                    if dist > area_a.footprint_radius_km() + area_b.footprint_radius_km():
                         continue
                     overlap = compute_delay_bin_overlap(area_a, area_b)
                     ts_a = self.trust_scores.get(a_id)
                     ts_b = self.trust_scores.get(b_id)
                     if ts_a and ts_b:
                         self.reputations[a_id].evaluate_neighbour_consistency(
-                            overlap["overlap_ratio"], ts_b.score
+                            overlap["overlap_ratio"], ts_b.score, neighbour_id=b_id
                         )
                         self.reputations[b_id].evaluate_neighbour_consistency(
-                            overlap["overlap_ratio"], ts_a.score
+                            overlap["overlap_ratio"], ts_a.score, neighbour_id=a_id
                         )
 
     def unblock_node(self, node_id: str):
@@ -345,7 +353,9 @@ class NodeAnalyticsManager:
                     area_b = self.detection_areas[b_id]
                     dist = haversine_km(area_a.rx_lat, area_a.rx_lon,
                                         area_b.rx_lat, area_b.rx_lon)
-                    if dist > area_a.max_range_km + area_b.max_range_km:
+                    # Bistatic footprints reach delta/2 + L from the RX; the
+                    # monostatic sum pruned genuinely overlapping pairs.
+                    if dist > area_a.footprint_radius_km() + area_b.footprint_radius_km():
                         continue
                     overlap = compute_delay_bin_overlap(area_a, area_b)
                     if overlap["overlap_ratio"] > 0:
