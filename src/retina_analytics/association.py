@@ -1011,6 +1011,28 @@ class InterNodeAssociator:
 
             self.node_geometries[node_id] = geo
 
+    def unregister_node(self, node_id: str) -> int:
+        """Drop a node and every overlap zone it participates in.
+
+        register_node only ever adds, so without this a node that leaves the
+        fleet keeps its geometry, its grids against every neighbour, and its
+        adjacency entries until the process restarts — and each round still
+        walks them.  Returns the number of overlap zones removed.
+        """
+        with self._register_lock:
+            self.node_geometries.pop(node_id, None)
+            self.node_configs.pop(node_id, None)
+            self._pending_frames.pop(node_id, None)
+            self._pending_tracks.pop(node_id, None)
+
+            stale_pairs = [k for k in self.overlap_zones if node_id in k]
+            for key in stale_pairs:
+                del self.overlap_zones[key]
+
+            for other in self._neighbors.pop(node_id, set()):
+                self._neighbors.get(other, set()).discard(node_id)
+        return len(stale_pairs)
+
     def rebuild_zones_for(self, node_id: str) -> int:
         """Recompute this node's overlap grids against its current coverage.
 

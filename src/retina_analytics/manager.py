@@ -153,6 +153,59 @@ class NodeAnalyticsManager:
         ec = self.empirical_coverages.get(node_id)
         return ec.constraint_digest() if ec is not None else None
 
+    def retire_node(self, node_id: str) -> dict:
+        """Forget a node entirely — in-memory state and its files on disk.
+
+        Nothing else removes a node.  register_node only ever adds, and the
+        refresh/save paths iterate whatever is in these dicts, so a receiver
+        that leaves the fleet keeps its trust score, detection area, coverage
+        polygon and empirical calibration for the life of the deployment, and
+        every subsequent pass pays for them.  On staging, 10 receivers from a
+        superseded fleet layout were still being iterated and re-saved 40
+        minutes after they stopped existing.
+
+        This is deliberately *not* driven by a staleness timer.  A real
+        receiver offline for a week is still a real receiver whose accumulated
+        coverage we want when it comes back; only an explicit decision that the
+        node is gone should discard it.  Callers own that decision.
+
+        Returns what was actually dropped, so a caller can report it rather
+        than guess.
+        """
+        dropped = {
+            name: (node_id in store)
+            for name, store in (
+                ("trust_score", self.trust_scores),
+                ("detection_area", self.detection_areas),
+                ("metrics", self.metrics),
+                ("reputation", self.reputations),
+                ("coverage_map", self.coverage_maps),
+                ("empirical_coverage", self.empirical_coverages),
+            )
+        }
+        for store in (
+            self.trust_scores, self.detection_areas, self.metrics,
+            self.reputations, self.coverage_maps, self.empirical_coverages,
+        ):
+            store.pop(node_id, None)
+
+        files = []
+        if self._storage_dir:
+            for path in (self._coverage_map_path(node_id), self._empirical_path(node_id)):
+                try:
+                    os.remove(path)
+                    files.append(os.path.basename(path))
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+
+        # Any summary cached before this call still names the node.
+        self._summaries_cache = None
+        self._cross_node_cache = None
+
+        return {"node_id": node_id, "dropped": dropped, "files_removed": files}
+
     def is_node_blocked(self, node_id: str) -> bool:
         rep = self.reputations.get(node_id)
         return rep.blocked if rep else False
