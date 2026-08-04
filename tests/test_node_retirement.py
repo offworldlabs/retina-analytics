@@ -7,7 +7,6 @@ rewritten on every save, and the associator keeps a grid for every pair it was
 in.  Staging showed all three after a fleet layout change.
 """
 
-import os
 
 from retina_analytics.association import InterNodeAssociator
 from retina_analytics.manager import NodeAnalyticsManager
