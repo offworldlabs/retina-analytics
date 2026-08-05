@@ -521,8 +521,12 @@ def _merge_epochs(hist_a: list, node_a_id: str, hist_b: list, node_b_id: str) ->
 class InterNodeAssociator:
     """Manages overlap zones for all node pairs and runs association at runtime."""
 
+    # grid_step_km default matches what production ships (ASSOC_GRID_STEP_KM
+    # = 3.0) so a bare construction exercises the real geometry.  It was 30.0
+    # — a grid 10x coarser and ~100x sparser than any deployment, and the
+    # merge-distance rationale in detection_association assumes 3.0.
     def __init__(self, delay_gate_us: float = 5.0, doppler_gate_hz: float = 30.0,
-                 grid_step_km: float = 30.0, assoc_interval_s: float = 30.0,
+                 grid_step_km: float = 3.0, assoc_interval_s: float = 30.0,
                  cv_fit=None, cv_chi2_max: float = 2.0, cv_min_epochs: int = 4,
                  cv_min_span_s: float = 12.0, cv_exclusive: bool = True,
                  coverage_provider=None, max_neighbors: int = 50,
@@ -544,6 +548,10 @@ class InterNodeAssociator:
         # siblings for no structural reason.  None disables the fine test, which
         # is what the unit tests and any caller without a solver want.
         self.cv_fit = cv_fit
+        # INLINE-MODE ONLY: with cv_fit=None (production) nothing here ever
+        # scores a pairing, so cv_chi2_max and cv_exclusive are inert — the
+        # live n=2 threshold is the solver worker's.  Only the offline bench's
+        # --cv-fit inline mode exercises this.
         # Provisional threshold, to be set properly by the ROC sweep on real
         # scenes.  What is measured so far: with the simulator's noise model a
         # true pairing runs a median 0.5 and a p95 of ~0.8, and a crossed

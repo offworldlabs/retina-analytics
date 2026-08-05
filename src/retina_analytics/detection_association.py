@@ -301,10 +301,15 @@ class DetectionAssociator(InterNodeAssociator):
     """InterNodeAssociator plus the superseded detection-level entry points.
 
     A subclass rather than free functions: submit_frame reads _pending_frames,
-    _neighbors, _last_assoc, _ASSOC_MIN_INTERVAL_S, _ASSOC_MAX_NEIGHBORS and
-    overlap_zones, and format_candidates_for_solver reads node_geometries.  As
-    free functions all of that would have to become public API on the base
-    class, which is the opposite of the point.
+    _neighbors, _last_assoc, _ASSOC_MIN_INTERVAL_S, _ASSOC_MAX_NEIGHBORS,
+    _FRAME_SYNC_MAX_AGE_MS and overlap_zones (plus OverlapZone._ensure_np and
+    its _np_pred_* arrays).  As free functions all of that would have to
+    become public API on the base class, which is the opposite of the point.
+
+    NOTE the shared _last_assoc: submit_frame and the inherited submit_tracks
+    rate-limit through the same per-node timestamp, so in a bench A/B a
+    submit_frame round suppresses the next submit_tracks round on that node.
+    Fine for the bench (each mode runs alone); do not interleave them.
 
     The frame-skew counters live here too.  They are only ever incremented by
     submit_frame, so on the track path they read zero for ever — which is what
