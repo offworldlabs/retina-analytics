@@ -16,6 +16,7 @@ from retina_analytics.association import (
     TrackPairCandidate,
     _merge_epochs,
 )
+from retina_analytics.constants import KM_PER_DEG_LAT
 
 _C_KM_S = 299792.458
 _R_EARTH_KM = 6371.0
@@ -81,8 +82,8 @@ def _history(cfg, lat, lon, alt_km, ve, vn, n=_N, dt=_DT, anchor="start"):
     out = []
     for k in range(n):
         t = k * dt
-        la = lat + vn * (t - t_anchor) / 111_320.0
-        lo = lon + ve * (t - t_anchor) / (111_320.0 * math.cos(math.radians(lat)))
+        la = lat + vn * (t - t_anchor) / (KM_PER_DEG_LAT * 1000.0)
+        lo = lon + ve * (t - t_anchor) / ((KM_PER_DEG_LAT * 1000.0) * math.cos(math.radians(lat)))
         d, f = _measure(cfg, la, lo, alt_km, ve, vn)
         out.append({"t_s": t, "delay_us": d, "doppler_hz": f, "snr": 15.0})
     return out
@@ -209,9 +210,9 @@ class TestConstantVelocityGate:
         # reported at the *last* epoch — where the target is now — so the
         # expectation is the start dead-reckoned across the observation window.
         span = (_N - 1) * _DT
-        exp_lat = 34.88 + -90.0 * span / 111_320.0
-        exp_lon = -82.35 + 180.0 * span / (111_320.0 * math.cos(math.radians(34.88)))
-        assert math.hypot((p.lat - exp_lat) * 111.32, (p.lon - exp_lon) * 91.3) < 1.0
+        exp_lat = 34.88 + -90.0 * span / (KM_PER_DEG_LAT * 1000.0)
+        exp_lon = -82.35 + 180.0 * span / ((KM_PER_DEG_LAT * 1000.0) * math.cos(math.radians(34.88)))
+        assert math.hypot((p.lat - exp_lat) * KM_PER_DEG_LAT, (p.lon - exp_lon) * 91.3) < 1.0
         assert p.vel_east_ms == pytest.approx(180.0, abs=15.0)
         assert p.vel_north_ms == pytest.approx(-90.0, abs=15.0)
 

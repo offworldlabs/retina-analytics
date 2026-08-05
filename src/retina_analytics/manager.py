@@ -1,5 +1,6 @@
 """Central analytics aggregator for all connected nodes."""
 
+import logging
 import os
 import time
 import threading
@@ -232,7 +233,8 @@ class NodeAnalyticsManager:
                 except FileNotFoundError:
                     pass
                 except OSError:
-                    pass
+                    logging.warning("could not remove %s during retirement",
+                                    path, exc_info=True)
 
         # Any summary cached before this call still names the node.
         self._summaries_cache = None
@@ -443,7 +445,10 @@ class NodeAnalyticsManager:
                     cmap = HistoricalCoverageMap.load_from_file(path)
                     self.coverage_maps[cmap.node_id] = cmap
                 except Exception:
-                    pass
+                    # A corrupt file used to be indistinguishable from an
+                    # absent one — the node silently started with no coverage.
+                    logging.warning("could not load coverage map %s", fname,
+                                    exc_info=True)
             elif fname.startswith("empirical_") and fname.endswith(".json"):
                 try:
                     path = os.path.join(self._storage_dir, fname)
@@ -452,7 +457,8 @@ class NodeAnalyticsManager:
                     node_id = fname[len("empirical_"):-len(".json")]
                     self.empirical_coverages[node_id] = ec
                 except Exception:
-                    pass
+                    logging.warning("could not load empirical coverage %s",
+                                    fname, exc_info=True)
 
     def save_coverage_maps(self):
         if not self._storage_dir:

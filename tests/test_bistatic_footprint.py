@@ -18,6 +18,7 @@ from retina_analytics.association import (
     compute_overlap_zone,
 )
 from retina_analytics.constants import (
+    KM_PER_DEG_LAT,
     bistatic_max_radius_km,
     bistatic_range_limit_km,
 )
@@ -167,14 +168,14 @@ class TestOverlapGridRespectsTheEllipse:
         limit_behind = bistatic_range_limit_km(180.0, geo.baseline_km, _DELTA)
         assert limit_behind == pytest.approx(30.0)
 
-        far_south = geo.rx_lat - 45.0 / 111.32
+        far_south = geo.rx_lat - 45.0 / KM_PER_DEG_LAT
         assert _point_in_beam(far_south, geo.rx_lon, geo), (
             "the bearing sector should still accept it — the range rule rejects it"
         )
 
         zone = self._zone(_DELTA)
         southmost = min(lat for lat, _lon, _alt in zone.grid_points)
-        south_reach_km = (geo.rx_lat - southmost) * 111.32
+        south_reach_km = (geo.rx_lat - southmost) * KM_PER_DEG_LAT
         assert south_reach_km < limit_behind + 3.0  # one grid step of slack
 
     def test_legacy_grid_is_unchanged(self):

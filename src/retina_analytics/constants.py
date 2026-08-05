@@ -2,7 +2,8 @@
 
 import math
 
-C_KM_US = 0.299792458   # speed of light km/μs
+C_KM_US = 0.299792458
+C_KM_S = 299792.458      # speed of light, km/s   # speed of light km/μs
 R_EARTH = 6371.0         # Earth radius km
 
 # One kilometres-per-degree, derived rather than typed.  Four different values

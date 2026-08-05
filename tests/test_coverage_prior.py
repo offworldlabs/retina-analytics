@@ -21,6 +21,7 @@ from retina_analytics.empirical_coverage import (
     EmpiricalCoverageState,
     _MIN_BIN_POINTS_TO_CONSTRAIN,
 )
+from retina_analytics.constants import KM_PER_DEG_LAT
 
 _RX_LAT, _RX_LON = 34.85, -82.40
 _TX_LAT, _TX_LON = 35.236, -82.40      # 43 km due north
@@ -40,8 +41,8 @@ def _at_bearing(bearing_deg, range_km):
     """A lat/lon that many km from the RX on that bearing (flat approximation)."""
     import math
     rad = math.radians(bearing_deg)
-    return (_RX_LAT + range_km * math.cos(rad) / 111.32,
-            _RX_LON + range_km * math.sin(rad) / (111.32 * math.cos(math.radians(_RX_LAT))))
+    return (_RX_LAT + range_km * math.cos(rad) / KM_PER_DEG_LAT,
+            _RX_LON + range_km * math.sin(rad) / (KM_PER_DEG_LAT * math.cos(math.radians(_RX_LAT))))
 
 
 class TestClampFollowsTheEllipse:

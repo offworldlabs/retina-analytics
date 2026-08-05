@@ -4,6 +4,7 @@ import os
 
 from retina_analytics.manager import NodeAnalyticsManager
 from retina_analytics.constants import bearing_deg
+from retina_analytics.constants import KM_PER_DEG_LAT
 
 _RX_LAT, _RX_LON = 32.90, -97.00
 _TX_LAT, _TX_LON = 32.78, -96.80
@@ -49,7 +50,7 @@ def test_same_rx_reregistration_updates_max_range():
     assert ec.max_range_km == 300
     # A ~250 km detection is now within 300*2 and must be accepted (was rejected at 50).
     before = ec.n_points
-    m.record_calibration_point("N", _RX_LAT + 250.0 / 111.320, _RX_LON)
+    m.record_calibration_point("N", _RX_LAT + 250.0 / KM_PER_DEG_LAT, _RX_LON)
     assert ec.n_points == before + 1
 
 

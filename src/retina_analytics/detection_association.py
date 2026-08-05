@@ -283,15 +283,10 @@ def find_associations(zone: OverlapZone,
             adsb_hex      = _candidate_hex,
             vel_est_ms    = vel_est,
         )
-        key = (i_a, i_b)
-        existing = candidates.get(key)
-        if existing is None:
-            candidates[key] = cand
-        else:
-            old_res = abs(existing.delay_a - existing.grid_delay_a) + abs(existing.delay_b - existing.grid_delay_b)
-            new_res = abs(cand.delay_a - cand.grid_delay_a) + abs(cand.delay_b - cand.grid_delay_b)
-            if new_res < old_res:
-                candidates[key] = cand
+        # np.where yields each (i_a, i_b) exactly once, so no dedupe is
+        # needed here — the residual-comparison else-branch this used to
+        # carry was unreachable.
+        candidates[(i_a, i_b)] = cand
 
     return list(candidates.values())
 
@@ -508,7 +503,7 @@ class DetectionAssociator(InterNodeAssociator):
 
             # Use the altitude of the best-matching grid point (min delay
             # residual) from each candidate, then take the mean across the
-            # group.  Layers are restricted to [7, 9, 11] km so low-altitude
+            # group.  Layers default to (1.5, 3, 5, 7, 9, 11) km so low-altitude
             # bistatic ghost solutions (which can map to positions hundreds of
             # km away) are never considered.
             g_alt_km = sum(c.grid_alt_km for c in group) / len(group)

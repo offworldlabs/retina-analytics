@@ -97,7 +97,7 @@ def _bearing_and_range(rx_lat: float, rx_lon: float,
 
 
 def _p85(values: list[float]) -> float:
-    """85th-percentile of a non-empty list (sorts in place)."""
+    """85th-percentile of a non-empty list (sorted() — the input is untouched)."""
     s = sorted(values)
     idx = min(int(len(s) * 0.85), len(s) - 1)
     return s[idx]

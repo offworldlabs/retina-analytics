@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from retina_analytics.constants import (
+    C_KM_S,
     C_KM_US,
     KM_PER_DEG_LAT,
     R_EARTH,
@@ -52,7 +53,6 @@ from retina_analytics.empirical_coverage import OBSERVED_LIMIT_MARGIN
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-C_KM_S = 299792.458     # speed of light km/s
 
 
 # ── Geometry helpers ─────────────────────────────────────────────────────────
@@ -243,7 +243,8 @@ class OverlapZone:
 class TrackPairCandidate:
     """Two single-node tracks judged to be the same target.
 
-    The detection-level AssociationCandidate above pairs one echo with one echo,
+    The detection-level AssociationCandidate (now in detection_association.py)
+    pairs one echo with one echo,
     which at n=2 is untestable: 4 measurements against 6 unknowns, so every
     residual gate passes a cross pairing exactly as it passes a real one.  This
     pairs a *track* with a *track*, and a confirmed track already carries
@@ -419,7 +420,7 @@ def compute_overlap_zone(geo_a: NodeGeometry, geo_b: NodeGeometry,
                 delay_pairs.append((delay_a, delay_b))
                 # Bistatic bisector b = u_tx + u_rx (unit vectors from the
                 # target toward each station).  Doppler measures v · b — see
-                # _velocity_from_projections — so these are the projection axes
+                # implied_horizontal_velocity — so these are the projection axes
                 # the two nodes observe the velocity along.  Precomputed here
                 # because the grid is fixed at registration and the runtime
                 # test then costs a couple of dot products.
@@ -447,7 +448,8 @@ def _batch_grid_match(zone: OverlapZone, delays_a: list, delays_b: list) -> dict
 
     Returns {(i_a, i_b): best_grid_index}; absent keys had no common point.
 
-    Vectorised for the same reason find_associations is: the gate is a
+    Vectorised for the same reason detection_association.find_associations
+    is: the gate is a
     (Ta x G) x (G x Tb) boolean contraction, which numpy dispatches to one BLAS
     matmul, and doing it per pairing instead costs Ta x Tb full scans of a grid
     that runs to ~16 000 points.  A first version of this function did exactly
@@ -586,7 +588,6 @@ class InterNodeAssociator:
         self.coverage_provider = coverage_provider
         # The constraint digest each node's grids were last built under, so a
         # polygon that tightens later can be detected and the grids rebuilt.
-        self._coverage_digests: dict[str, tuple] = {}
         # Counters for what the fine test actually did, so its value is
         # observable rather than assumed.
         self.track_pairs_gated: int = 0       # survived the coarse delay grid
@@ -604,7 +605,7 @@ class InterNodeAssociator:
         # K ≈ N (wide beams, small area).
         #
         # BUDGET CALCULATION (1000-node fleet on 2-core / GIL-bound):
-        #   find_associations ≈ 50 µs/call.
+        #   detection_association.find_associations ≈ 50 µs/call.
         #   K ≈ 999 neighbors (all nodes overlap in simulation).
         #   Nodes send every 40 s; trigger every max(interval, 2×send) seconds.
         #   At interval=60 s → 11.4 rounds/s → 11.4 × 999 × 50 µs = 570 ms/s
@@ -854,7 +855,8 @@ class InterNodeAssociator:
                       timestamp_ms: int) -> list[TrackPairCandidate]:
         """Associate this node's confirmed single-node tracks with its neighbours'.
 
-        The detection-level path above pairs one echo with one echo, and at n=2
+        The detection-level path (now in detection_association.py) pairs one echo
+        with one echo, and at n=2
         that pairing cannot be tested: two nodes give 4 measurements against 6
         unknowns, so a cross pairing between two real aircraft produces zero
         residual exactly as a real target does.  Nor does watching it help —

@@ -111,7 +111,9 @@ class TestAssocInterval:
         self._register(assoc, 15)
         assert assoc._ASSOC_MIN_INTERVAL_S == 30.0
 
-    def test_large_fleet_is_unchanged_too(self):
+    def test_three_node_fleet_is_unchanged_too(self):
+        # (Renamed: it registered 3 nodes while claiming a large fleet, and was
+        # a strictly weaker duplicate of the 15-node test above.)
         assoc = InterNodeAssociator(grid_step_km=30.0)
         self._register(assoc, 3)
         assert assoc._ASSOC_MIN_INTERVAL_S == 30.0

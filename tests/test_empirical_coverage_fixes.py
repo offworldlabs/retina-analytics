@@ -23,6 +23,7 @@ from retina_analytics.empirical_coverage import (
     _bearing_and_range,
     _p85,
 )
+from retina_analytics.constants import KM_PER_DEG_LAT
 
 
 RX_LAT, RX_LON = 33.4484, -112.0740  # Phoenix, AZ
@@ -32,8 +33,8 @@ BEAM_WIDTH_DEG = 43.9
 def _offset_point(bearing_deg: float, range_km: float) -> tuple[float, float]:
     bearing_rad = math.radians(bearing_deg)
     cos_lat = math.cos(math.radians(RX_LAT))
-    lat = RX_LAT + (range_km * math.cos(bearing_rad)) / 111.320
-    lon = RX_LON + (range_km * math.sin(bearing_rad)) / (111.320 * cos_lat)
+    lat = RX_LAT + (range_km * math.cos(bearing_rad)) / KM_PER_DEG_LAT
+    lon = RX_LON + (range_km * math.sin(bearing_rad)) / (KM_PER_DEG_LAT * cos_lat)
     return lat, lon
 
 

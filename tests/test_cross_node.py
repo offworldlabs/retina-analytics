@@ -190,29 +190,11 @@ class TestCoverageSuggestion:
         # Should have at least some suggestions (covered but < 3 nodes, or uncovered)
         assert len(result) > 0
 
-    def test_saturation_detection_triggers_expansion(self):
-        """When solver RMS plateaus and overlap is high → expansion strategy."""
-        # Create overlapping nodes
-        areas = [_area(node_id=f"n{i}", max_range_km=200.0, beam_width=120.0) for i in range(5)]
-        # Flat RMS history = saturation
-        rms_history = [1.0, 1.0, 1.0, 1.0, 1.0, 0.99, 0.99, 0.99, 0.99, 0.99]
-        result = coverage_suggestion(
-            areas, center_lat=33.45, center_lon=-112.07,
-            solver_rms_history=rms_history,
-        )
-        # With saturated RMS and high overlap_density, uncovered points → expansion
-        expansion_count = sum(1 for s in result if s["strategy"] == "expansion")
-        assert expansion_count >= 0  # may or may not trigger
-
-    def test_short_rms_history_no_saturation(self):
-        """< 10 RMS samples → saturation should NOT trigger."""
-        areas = [_area(node_id=f"n{i}", max_range_km=200.0, beam_width=120.0) for i in range(5)]
-        rms_history = [1.0, 1.0, 1.0]  # only 3, need 10
-        result = coverage_suggestion(
-            areas, center_lat=33.45, center_lon=-112.07,
-            solver_rms_history=rms_history,
-        )
-        assert len(result) > 0  # should still work, just no saturation-driven expansion
+    # The solver_rms_history "saturation" strategy was deleted: no production
+    # caller ever passed the history (only these tests did), so the branch —
+    # and its O(N²) overlap pass — was unreachable outside the suite.  Note
+    # its own assertion had decayed to `expansion_count >= 0`, which cannot
+    # fail.
 
 
 # ── DetectionAreaState tests ──────────────────────────────────────────────────

@@ -140,7 +140,12 @@ class DetectionAreaState:
             "max_bistatic_range_km": self.max_bistatic_range_km,
             "observed_delay_range_us": [round(x, 2) for x in self.delay_range],
             "observed_doppler_range_hz": [round(x, 2) for x in self.doppler_range],
+            # DIFFERENTIAL range (max observed delay × c) — NOT an RX-relative
+            # radius like max_range_km above; the two differ by up to 2x away
+            # from the transmitter.  estimated_max_range_km is the legacy key
+            # existing consumers read; the honest name is emitted beside it.
             "estimated_max_range_km": round(self.estimated_max_range_km, 2),
+            "observed_max_differential_km": round(self.estimated_max_range_km, 2),
             "n_detections": self.n_detections,
             "furthest_detections": furthest,
         }

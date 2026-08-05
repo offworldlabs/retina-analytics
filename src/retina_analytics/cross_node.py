@@ -66,34 +66,22 @@ def coverage_suggestion(areas: list[DetectionAreaState],
                         center_lat: float, center_lon: float,
                         desired_range_km: float = 80.0,
                         trust_scores: dict | None = None,
-                        solver_rms_history: list[float] | None = None,
                         ) -> list[dict]:
-    """Suggest where to place additional nodes for better coverage."""
+    """Suggest where to place additional nodes for better coverage.
+
+    A `solver_rms_history` "saturation" strategy used to live here: when a
+    caller supplied ≥10 RMS samples with <5% improvement AND overlap density
+    exceeded 0.3, covered directions were suppressed in favour of
+    expansion-only output.  No production caller ever passed the history —
+    only tests did — so the branch was unreachable, and it dragged a full
+    O(N²) pairwise-overlap pass along with it on every cache miss.  Deleted;
+    the covered/uncovered logic below is the whole strategy.
+    """
     suggestions = []
     directions = [
         ("N", 0), ("NE", 45), ("E", 90), ("SE", 135),
         ("S", 180), ("SW", 225), ("W", 270), ("NW", 315),
     ]
-
-    saturated = False
-    if solver_rms_history and len(solver_rms_history) >= 10:
-        recent = solver_rms_history[-10:]
-        improvement = (recent[0] - recent[-1]) / max(recent[0], 0.001)
-        saturated = improvement < 0.05
-
-    n_overlap_pairs = 0
-    for i, a in enumerate(areas):
-        for b in areas[i + 1:]:
-            dist = haversine_km(a.rx_lat, a.rx_lon, b.rx_lat, b.rx_lon)
-            # footprint_radius_km, not max_range_km: a bistatic footprint
-            # reaches Δ/2 + L from the RX, so the monostatic sum undercounted
-            # genuinely overlapping pairs.
-            if dist < a.footprint_radius_km() + b.footprint_radius_km():
-                n_overlap_pairs += 1
-    max_pairs = len(areas) * (len(areas) - 1) / 2 if len(areas) > 1 else 1
-    overlap_density = n_overlap_pairs / max_pairs if max_pairs else 0
-
-    use_expansion = saturated and overlap_density > 0.3
 
     for label, bearing_deg in directions:
         # The old expression divided by both R_EARTH *and* 111.32, so the "80 km"
@@ -109,44 +97,33 @@ def coverage_suggestion(areas: list[DetectionAreaState],
 
         covered = any(_point_in_beam(a, test_lat, test_lon) for a in areas)
 
-        if use_expansion:
-            if not covered:
+        if covered:
+            n_covering = _count_covering_nodes(areas, test_lat, test_lon)
+            if n_covering < 3:
+                best_trust = 0.0
+                if trust_scores:
+                    for a in areas:
+                        ts = trust_scores.get(a.node_id)
+                        if ts and ts.score > best_trust and _point_in_beam(a, test_lat, test_lon):
+                            best_trust = ts.score
                 suggestions.append({
                     "direction": label,
                     "bearing_deg": bearing_deg,
                     "test_point": {"lat": round(test_lat, 5), "lon": round(test_lon, 5)},
                     "gap_km": round(desired_range_km, 1),
-                    "strategy": "expansion",
-                    "overlap_count": 0,
+                    "strategy": "densification",
+                    "overlap_count": n_covering,
+                    "nearest_trust": round(best_trust, 3),
                 })
         else:
-            if covered:
-                n_covering = _count_covering_nodes(areas, test_lat, test_lon)
-                if n_covering < 3:
-                    best_trust = 0.0
-                    if trust_scores:
-                        for a in areas:
-                            ts = trust_scores.get(a.node_id)
-                            if ts and ts.score > best_trust and _point_in_beam(a, test_lat, test_lon):
-                                best_trust = ts.score
-                    suggestions.append({
-                        "direction": label,
-                        "bearing_deg": bearing_deg,
-                        "test_point": {"lat": round(test_lat, 5), "lon": round(test_lon, 5)},
-                        "gap_km": round(desired_range_km, 1),
-                        "strategy": "densification",
-                        "overlap_count": n_covering,
-                        "nearest_trust": round(best_trust, 3),
-                    })
-            else:
-                suggestions.append({
-                    "direction": label,
-                    "bearing_deg": bearing_deg,
-                    "test_point": {"lat": round(test_lat, 5), "lon": round(test_lon, 5)},
-                    "gap_km": round(desired_range_km, 1),
-                    "strategy": "expansion",
-                    "overlap_count": 0,
-                })
+            suggestions.append({
+                "direction": label,
+                "bearing_deg": bearing_deg,
+                "test_point": {"lat": round(test_lat, 5), "lon": round(test_lon, 5)},
+                "gap_km": round(desired_range_km, 1),
+                "strategy": "expansion",
+                "overlap_count": 0,
+            })
 
     suggestions.sort(key=lambda s: (-1 if s["strategy"] == "densification" else 0, -s.get("overlap_count", 0)))
     return suggestions

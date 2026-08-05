@@ -197,7 +197,10 @@ class TestNodeAnalyticsManager:
         assert "coverage_map" in s
 
     def test_evaluate_reputations(self, mgr):
-        mgr.evaluate_reputations()  # should not raise
+        mgr.evaluate_reputations()
+        # More than "does not raise": every registered node must still hold a
+        # live reputation object after a pass.
+        assert all(nid in mgr.reputations for nid in mgr.trust_scores)
 
     def test_cross_node_analysis(self, mgr):
         cross = mgr.get_cross_node_analysis()
@@ -278,8 +281,3 @@ class TestCoverageSuggestion:
                                      trust_scores={"cs-A": ts_a, "cs-B": ts_b})
         assert isinstance(result, list)
 
-    def test_strategy_2_with_solver_rms(self, areas):
-        rms = [5.0, 4.8, 4.7, 4.65, 4.62, 4.60, 4.59, 4.58, 4.575, 4.572]
-        result = coverage_suggestion(areas, 34.0, -84.5,
-                                     solver_rms_history=rms)
-        assert isinstance(result, list)
