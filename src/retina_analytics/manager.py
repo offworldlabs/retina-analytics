@@ -46,6 +46,21 @@ class NodeAnalyticsManager:
         if storage_dir:
             self._load_coverage_maps()
 
+    def _reset_for_tests(self) -> None:
+        """Clear every per-node store and cache.  Test isolation only —
+        production removal goes through retire_node."""
+        with self._save_lock:
+            for store in (
+                self.trust_scores, self.detection_areas, self.metrics,
+                self.reputations, self.coverage_maps, self.empirical_coverages,
+            ):
+                store.clear()
+            self._cross_node_cache = None
+            self._cross_node_cache_ts = 0.0
+            self._summaries_cache = None
+            self._summaries_cache_ts = 0.0
+            self._last_save_time = 0.0
+
     def register_node(self, node_id: str, config: dict):
         # Locked: save_coverage_maps / _load_coverage_maps iterate these dicts
         # from other threads, and an unlocked insert mid-iteration raises

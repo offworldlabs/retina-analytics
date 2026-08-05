@@ -751,6 +751,25 @@ class InterNodeAssociator:
 
             self.node_geometries[node_id] = geo
 
+    def _reset_for_tests(self) -> None:
+        """Clear every per-node store, cursor and counter.  Test isolation
+        only — production removal goes through unregister_node."""
+        with self._register_lock:
+            self.node_geometries.clear()
+            self.node_configs.clear()
+            self._pending_frames.clear()
+            self._pending_tracks.clear()
+            self.overlap_zones.clear()
+            self._neighbors.clear()
+            self._last_assoc.clear()
+            self._neighbor_cursor.clear()
+            for name in (
+                "track_pairs_gated", "track_pairs_rejected",
+                "track_pairs_accepted", "track_pairs_unfitted",
+                "track_pairs_superseded", "track_pairs_deferred",
+            ):
+                setattr(self, name, 0)
+
     def unregister_node(self, node_id: str) -> int:
         """Drop a node and every overlap zone it participates in.
 
