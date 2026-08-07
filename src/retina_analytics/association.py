@@ -1211,6 +1211,15 @@ class InterNodeAssociator:
                         by_node[nid] = {"node_id": nid, "delay_us": d,
                                         "doppler_hz": f, "snr": s}
 
+            # Per-node track id sets, so a downstream trim (dropping one
+            # contaminated node's measurement and re-solving) can also drop
+            # exactly that node's source tracks from the published solve's
+            # provenance instead of carrying the whole cluster's track_ids.
+            track_ids_by_node: dict[str, set] = defaultdict(set)
+            for p in group:
+                track_ids_by_node[p.node_a_id].add(p.track_a_id)
+                track_ids_by_node[p.node_b_id].add(p.track_b_id)
+
             fitted = [p for p in group if p.chi2_per_dof is not None]
             # Worst fit in the cluster, not the best: a cluster is published as
             # one target, so a pairing that failed to justify itself should not
@@ -1244,6 +1253,9 @@ class InterNodeAssociator:
                 )[:1],
                 "track_ids": sorted({p.track_a_id for p in group}
                                     | {p.track_b_id for p in group}),
+                "track_ids_by_node": {
+                    nid: sorted(ids) for nid, ids in track_ids_by_node.items()
+                },
             })
         return solver_inputs
 
