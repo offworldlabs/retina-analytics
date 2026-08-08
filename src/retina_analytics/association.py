@@ -32,6 +32,7 @@ Key concepts:
     node measurements that could correspond to the same target.
 """
 
+import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -47,12 +48,40 @@ from retina_analytics.constants import (
     bistatic_max_radius_km,
     haversine_km as _haversine_km,
     km_per_deg_lon,
+    offset_latlon_m,
     resolve_beam_azimuth_deg,
 )
 from retina_analytics.empirical_coverage import OBSERVED_LIMIT_MARGIN
 
+_logger = logging.getLogger(__name__)
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
+# Top-down claiming (ASSOC_CLAIM_MODE) — see _claim_round.  Predicted-vs-
+# measured gates, deliberately different from the bottom-up delay_gate_us
+# (which compares two *measurements* of the same instant): a claim compares a
+# measurement against a dead-reckoned projection of a published position.
+#
+# Wider than delay_gate_us=5.0: delay sensitivity is ~3-6.7 us/km and a
+# published dark position carries 0.5-2.5 km of its own error, plus EWMA lag
+# and DR drift on top.
+CLAIM_DELAY_GATE_US = 10.0
+# Doppler IS gated here, unlike the bottom-up path — a global track has a
+# velocity to project, where a bare tracklet does not.  f_d error ~
+# Delta(v.b)*fc/c ~ 10-20 Hz for a 10-15 m/s velocity error at 100-200 MHz.
+CLAIM_DOPPLER_GATE_HZ = 25.0
+# Maximum age of the global track's own last solve before a projection is no
+# longer trusted to dead-reckon forward.
+CLAIM_MAX_DR_AGE_S = 30.0
+# Eligibility is an OR of the two below — the ghost guard.  A track qualifies
+# either by corroboration (enough distinct nodes already agree) or by
+# persistence (it has survived enough rounds that a one-shot phantom would
+# already have expired) — see claim_eligible.
+CLAIM_ELIGIBLE_MIN_N_NODES = 3
+CLAIM_ELIGIBLE_MIN_SOLVE_COUNT = 2
+# Round cost bound: caps how many global tracks one claim round projects,
+# regardless of how many are live.  See _claim_round's cost comment.
+CLAIM_MAX_GLOBAL_TRACKS = 200
 
 
 # ── Geometry helpers ─────────────────────────────────────────────────────────
@@ -292,6 +321,47 @@ def _compute_node_enu(geo: NodeGeometry, ref_lat: float, ref_lon: float, ref_alt
     return rx_enu, tx_enu
 
 
+def predict_observation(geo: NodeGeometry, lat: float, lon: float, alt_km: float,
+                        vel_east_ms: float, vel_north_ms: float,
+                        vel_up_ms: float = 0.0) -> tuple[float, float]:
+    """Predicted (delay_us, doppler_hz) this node would observe for a target
+    at (lat, lon, alt_km) moving at (vel_east_ms, vel_north_ms, vel_up_ms).
+
+    ENU anchored at the node's own RX (matches _compute_node_enu / the test
+    fixtures' convention of rx_enu=(0,0,0)).  doppler_hz = (v . b) *
+    geo.fc_hz / (C_KM_S * 1000.0) is the exact inverse of the m/s conversion
+    applied to a *measured* Doppler at the velocity-seed step above
+    (m = f_d * lambda, lambda = c/fc): here f_d = (v.b)/lambda, so a claim's
+    predicted Doppler and a tracklet's measured Doppler are directly
+    comparable in Hz.  Positive is closing, matching _bisector's convention
+    (b points from the target toward TX and RX, so v.b > 0 shrinks the
+    bistatic path).
+    """
+    rx_enu, tx_enu = _compute_node_enu(geo, geo.rx_lat, geo.rx_lon, geo.rx_alt_km)
+    target_enu = _lla_to_enu(lat, lon, alt_km, geo.rx_lat, geo.rx_lon, geo.rx_alt_km)
+    delay_us = _bistatic_delay_at(target_enu, tx_enu, rx_enu)
+    b = _bisector(target_enu, tx_enu, rx_enu)
+    v_dot_b = vel_east_ms * b[0] + vel_north_ms * b[1] + vel_up_ms * b[2]
+    doppler_hz = v_dot_b * geo.fc_hz / (C_KM_S * 1000.0)
+    return delay_us, doppler_hz
+
+
+def claim_eligible(track: dict) -> bool:
+    """Ghost guard for top-down claiming: eligible by corroboration OR by
+    persistence, never by a single unconfirmed solve.
+
+    A track qualifying only by n_nodes has enough independent nodes that the
+    bottom-up solve is already trustworthy; one qualifying only by
+    solve_count has survived enough rounds that a one-shot mirror/wrong-frame
+    ghost would already have been superseded or expired.  Either is enough —
+    the OR is deliberate, not a placeholder for AND.
+    """
+    return (
+        track.get("n_nodes", 0) >= CLAIM_ELIGIBLE_MIN_N_NODES
+        or track.get("solve_count", 0) >= CLAIM_ELIGIBLE_MIN_SOLVE_COUNT
+    )
+
+
 def _point_in_beam(lat, lon, geo: NodeGeometry) -> bool:
     """Check if a point falls within the node's beam sector (2D check).
 
@@ -518,6 +588,50 @@ def _merge_epochs(hist_a: list, node_a_id: str, hist_b: list, node_b_id: str) ->
     return epochs
 
 
+def _merge_epochs_multi(histories: list[tuple[str, list[dict]]]) -> list:
+    """N-node generalisation of _merge_epochs, same output shape.
+
+    Used to build cv_epochs for a claim's anchored solver input, which may
+    span 2 or more matched nodes — _merge_epochs is fixed at exactly two.
+    Same no-resampling rule applies: see _merge_epochs.
+    """
+    samples = []
+    for node_id, hist in histories:
+        samples += [(float(h["t_s"]), node_id, h) for h in hist]
+    samples.sort(key=lambda s: s[0])
+
+    epochs: list[dict] = []
+    for t_s, node_id, h in samples:
+        meas = {
+            "node_id": node_id,
+            "delay_us": float(h["delay_us"]),
+            "doppler_hz": float(h["doppler_hz"]),
+            "snr": float(h.get("snr", 0.0)),
+        }
+        if epochs and epochs[-1]["t_s"] == t_s:
+            epochs[-1]["measurements"].append(meas)
+        else:
+            epochs.append({"t_s": t_s, "measurements": [meas]})
+    return epochs
+
+
+@dataclass
+class AssociationRound:
+    """Everything one submit_tracks_round call produced.
+
+    pairs is the bottom-up result submit_tracks always returned.
+    anchored_inputs and claims are the top-down claiming stage's output —
+    empty unless claim_mode != "off" and a provider is set; anchored_inputs
+    is additionally forced empty in shadow mode (see submit_tracks_round).
+    claims carries per-claim debug records ({anchor_key, node_id, track_id,
+    d_res_us, f_res_hz, dr_age_s, won}) regardless of mode, for the shadow
+    DEBUG log and tests — it is never filtered by mode.
+    """
+    pairs: list = field(default_factory=list)
+    anchored_inputs: list = field(default_factory=list)
+    claims: list = field(default_factory=list)
+
+
 # ── InterNodeAssociator ──────────────────────────────────────────────────────
 
 class InterNodeAssociator:
@@ -532,7 +646,12 @@ class InterNodeAssociator:
                  cv_fit=None, cv_chi2_max: float = 2.0, cv_min_epochs: int = 4,
                  cv_min_span_s: float = 12.0, cv_exclusive: bool = True,
                  coverage_provider=None, max_neighbors: int = 50,
-                 max_pairs_per_round: int = 64):
+                 max_pairs_per_round: int = 64, *,
+                 claim_mode: str = "off",
+                 claim_delay_gate_us: float = CLAIM_DELAY_GATE_US,
+                 claim_doppler_gate_hz: float = CLAIM_DOPPLER_GATE_HZ,
+                 claim_max_dr_age_s: float = CLAIM_MAX_DR_AGE_S,
+                 global_track_provider=None):
         self.delay_gate_us = delay_gate_us
         self.doppler_gate_hz = doppler_gate_hz
         self.grid_step_km = grid_step_km
@@ -683,6 +802,35 @@ class InterNodeAssociator:
         self._FRAME_SYNC_MAX_AGE_MS: int = 4_000
         self._register_lock = __import__('threading').Lock()
 
+        # ── Top-down claiming (ASSOC_CLAIM_MODE) ──────────────────────────
+        # off/shadow/active, following the SOLVER_CONSENSUS_MODE precedent —
+        # an unrecognised value falls back to "off" rather than raising, so a
+        # typo'd env var degrades to today's bottom-up-only behaviour instead
+        # of taking the pipeline down.
+        self.claim_mode: str = (
+            claim_mode if claim_mode in ("off", "shadow", "active") else "off"
+        )
+        self.claim_delay_gate_us = claim_delay_gate_us
+        self.claim_doppler_gate_hz = claim_doppler_gate_hz
+        self.claim_max_dr_age_s = claim_max_dr_age_s
+        # Injected the same way cv_fit/coverage_provider are: this library
+        # keeps knowing nothing about state.multinode_tracks.  Provider
+        # contract — an iterable of dicts, each:
+        #   {key, lat, lon, alt_m, vel_east, vel_north, vel_up?,
+        #    timestamp_ms, n_nodes, solve_count}
+        # The LIB applies claim_eligible, the DR-age cap, and the
+        # CLAIM_MAX_GLOBAL_TRACKS truncation — the provider stays a dumb
+        # snapshot (list(state.multinode_tracks.items())) so the offline
+        # bench measures the shipped filtering rather than a backend-side
+        # pre-filter the bench cannot see.
+        self.global_track_provider = global_track_provider
+        # Counters — plain += like track_pairs_*, added to _reset_for_tests.
+        self.claim_rounds: int = 0
+        self.claims_matched: int = 0
+        self.claim_conflicts: int = 0
+        self.anchored_inputs_emitted: int = 0
+        self.tracklets_excluded: int = 0
+
     def register_node(self, node_id: str, config: dict):
         """Register a node and pre-compute overlap zones with all existing nodes.
 
@@ -776,6 +924,8 @@ class InterNodeAssociator:
                 "track_pairs_gated", "track_pairs_rejected",
                 "track_pairs_accepted", "track_pairs_unfitted",
                 "track_pairs_superseded", "track_pairs_deferred",
+                "claim_rounds", "claims_matched", "claim_conflicts",
+                "anchored_inputs_emitted", "tracklets_excluded",
             ):
                 setattr(self, name, 0)
 
@@ -851,8 +1001,198 @@ class InterNodeAssociator:
                 rebuilt += 1
         return rebuilt
 
-    def submit_tracks(self, node_id: str, tracks: list[dict],
-                      timestamp_ms: int) -> list[TrackPairCandidate]:
+    def _claim_round(self, node_id: str, tracks: list[dict],
+                     neighbor_ids: list[str], timestamp_ms: int
+                     ) -> tuple[dict[str, set], list[dict], list[dict]]:
+        """Top-down claiming: project eligible global tracks into this
+        round's node set and match them against local tracklet views.
+
+        Returns (claimed_ids_by_node, anchored_inputs, claim_records).
+        claimed_ids_by_node maps node_id -> set of track_id claimed at that
+        node this round; the caller decides whether that exclusion actually
+        applies (active mode only).
+
+        Cost: <= CLAIM_MAX_GLOBAL_TRACKS x (1+|neighbor_ids|) x
+        tracklets/node predict_observation calls, each a few dot products —
+        measured <1 ms/round at observed scale, and it runs once per node
+        per _ASSOC_MIN_INTERVAL_S (30 s in production), same cadence as the
+        bottom-up round it rides alongside.
+        """
+        provider = self.global_track_provider
+        if provider is None:
+            return {}, [], []
+
+        globals_ = sorted(
+            (g for g in provider() if claim_eligible(g)),
+            key=lambda g: g.get("timestamp_ms", 0),
+            reverse=True,
+        )[:CLAIM_MAX_GLOBAL_TRACKS]
+        if not globals_:
+            return {}, [], []
+
+        # Round node set: the triggering node plus this round's neighbours,
+        # restricted to nodes actually registered with a geometry — an
+        # unregistered neighbour has nothing to predict an observation with.
+        # Views come from the same unlocked _pending_tracks read the
+        # bottom-up pairing below already does (latest-wins, no lock: a
+        # neighbour's frame worker may be mid-write, and the next round sees
+        # whatever lands).
+        round_nodes: dict[str, list[dict]] = {}
+        if node_id in self.node_geometries:
+            round_nodes[node_id] = tracks
+        for nid in neighbor_ids:
+            if nid in self.node_geometries:
+                round_nodes[nid] = self._pending_tracks.get(nid) or []
+
+        candidates: list[dict] = []
+        for g in globals_:
+            g_key = g.get("key")
+            g_ts_s = g.get("timestamp_ms", 0) / 1000.0
+            for nid, views in round_nodes.items():
+                geo = self.node_geometries[nid]
+                for view in views:
+                    hist = view.get("history")
+                    if not hist:
+                        continue
+                    last = hist[-1]
+                    dt = float(last["t_s"]) - g_ts_s
+                    if not (0.0 <= dt <= self.claim_max_dr_age_s):
+                        continue
+                    dr_lat, dr_lon = offset_latlon_m(
+                        g["lat"], g["lon"],
+                        east_m=g.get("vel_east", 0.0) * dt,
+                        north_m=g.get("vel_north", 0.0) * dt,
+                    )
+                    pred_delay, pred_doppler = predict_observation(
+                        geo, dr_lat, dr_lon, g.get("alt_m", 0.0) / 1000.0,
+                        g.get("vel_east", 0.0), g.get("vel_north", 0.0),
+                        g.get("vel_up", 0.0),
+                    )
+                    d_res = abs(pred_delay - float(last["delay_us"]))
+                    f_res = abs(pred_doppler - float(last["doppler_hz"]))
+                    if (d_res > self.claim_delay_gate_us
+                            or f_res > self.claim_doppler_gate_hz):
+                        continue
+                    candidates.append({
+                        "anchor_key": g_key,
+                        "node_id": nid,
+                        "track_id": str(view.get("track_id")),
+                        "d_res_us": d_res,
+                        "f_res_hz": f_res,
+                        "dr_age_s": dt,
+                        "score": (d_res / self.claim_delay_gate_us
+                                  + f_res / self.claim_doppler_gate_hz),
+                        "_g": g,
+                        "_hist": hist,
+                        "_last": last,
+                    })
+
+        # One-to-one selection, greedy ascending score — same shape as
+        # _pair_tracks stage 2.  Two exclusivity sets rather than one: a
+        # tracklet may be claimed by at most one global (claimed_ids_by_node),
+        # AND a (global, node) slot may be filled by at most one tracklet
+        # (claimed_global_node) — otherwise an ambiguous node with two
+        # tracklets both gating against the same global could hand it two
+        # "matched nodes" that are really the same node.
+        candidates.sort(key=lambda c: c["score"])
+        claimed_ids_by_node: dict[str, set] = defaultdict(set)
+        claimed_global_node: set[tuple] = set()
+        matches_by_global: dict[str, list[dict]] = defaultdict(list)
+        claim_records: list[dict] = []
+
+        for c in candidates:
+            slot = (c["anchor_key"], c["node_id"])
+            won = (c["track_id"] not in claimed_ids_by_node[c["node_id"]]
+                   and slot not in claimed_global_node)
+            if won:
+                claimed_ids_by_node[c["node_id"]].add(c["track_id"])
+                claimed_global_node.add(slot)
+                matches_by_global[c["anchor_key"]].append(c)
+                self.claims_matched += 1
+            else:
+                self.claim_conflicts += 1
+            claim_records.append({
+                "anchor_key": c["anchor_key"], "node_id": c["node_id"],
+                "track_id": c["track_id"], "d_res_us": c["d_res_us"],
+                "f_res_hz": c["f_res_hz"], "dr_age_s": c["dr_age_s"],
+                "won": won,
+            })
+
+        # Anchored input per global with >= 2 matched nodes AND the
+        # triggering node among them.  The trigger-must-match rule dedups
+        # emission to ~one anchored input per matched node per round: every
+        # matched node eventually triggers its own round and emits once,
+        # rather than every node re-emitting the same anchor every round.
+        anchored_inputs: list[dict] = []
+        for g_key, matches in matches_by_global.items():
+            matched_node_ids = {m["node_id"] for m in matches}
+            if len(matched_node_ids) < 2 or node_id not in matched_node_ids:
+                continue
+            g = matches[0]["_g"]
+            g_ts_s = g.get("timestamp_ms", 0) / 1000.0
+            newest = max(matches, key=lambda m: float(m["_last"]["t_s"]))
+            dt_newest = float(newest["_last"]["t_s"]) - g_ts_s
+            guess_lat, guess_lon = offset_latlon_m(
+                g["lat"], g["lon"],
+                east_m=g.get("vel_east", 0.0) * dt_newest,
+                north_m=g.get("vel_north", 0.0) * dt_newest,
+            )
+            cv_epochs = _merge_epochs_multi(
+                [(m["node_id"], m["_hist"]) for m in matches]
+            )
+            by_snr = sorted(
+                matches, key=lambda m: float(m["_last"].get("snr", 0.0)),
+                reverse=True,
+            )
+            track_ids_by_node: dict[str, list] = defaultdict(list)
+            for m in matches:
+                track_ids_by_node[m["node_id"]].append(m["track_id"])
+
+            anchored_inputs.append({
+                "initial_guess": {
+                    "lat": guess_lat, "lon": guess_lon,
+                    "alt_km": g.get("alt_m", 0.0) / 1000.0,
+                },
+                "initial_velocity": {
+                    "vel_east_ms": g.get("vel_east", 0.0),
+                    "vel_north_ms": g.get("vel_north", 0.0),
+                },
+                "measurements": [
+                    {"node_id": m["node_id"],
+                     "delay_us": float(m["_last"]["delay_us"]),
+                     "doppler_hz": float(m["_last"]["doppler_hz"]),
+                     "snr": float(m["_last"].get("snr", 0.0))}
+                    for m in matches
+                ],
+                "n_nodes": len(matched_node_ids),
+                "timestamp_ms": timestamp_ms,
+                "adsb_hex": None,
+                "chi2_per_dof": None,
+                "n_epochs": len(cv_epochs),
+                # REQUIRED: without cv_epochs an anchored n=2 input dies
+                # permanently at the solver's confirmation gate
+                # (_resolve_cv_fit -> None -> n2_unconfirmed), because it has
+                # no epochs to fit and chi2_per_dof is already None here.
+                "cv_epochs": cv_epochs,
+                # Participates in _claim_track_pair arbitration exactly like
+                # a bottom-up pairing's track_pair_ids — the two best-SNR
+                # matched nodes, truncated the same way
+                # format_track_pairs_for_solver truncates a cluster's.
+                "track_pair_ids": (
+                    [tuple(sorted([by_snr[0]["track_id"], by_snr[1]["track_id"]]))]
+                    if len(by_snr) >= 2 else []
+                ),
+                "track_ids": sorted({m["track_id"] for m in matches}),
+                "track_ids_by_node": {
+                    nid: sorted(ids) for nid, ids in track_ids_by_node.items()
+                },
+                "anchor_key": g_key,
+            })
+        self.anchored_inputs_emitted += len(anchored_inputs)
+        return dict(claimed_ids_by_node), anchored_inputs, claim_records
+
+    def submit_tracks_round(self, node_id: str, tracks: list[dict],
+                            timestamp_ms: int) -> AssociationRound:
         """Associate this node's confirmed single-node tracks with its neighbours'.
 
         The detection-level path (now in detection_association.py) pairs one echo
@@ -881,17 +1221,19 @@ class InterNodeAssociator:
             timestamp_ms: current time, stamped onto the emitted candidates.
 
         Returns:
-            TrackPairCandidate for each pairing that passed both the coarse
-            delay-grid gate and, where there was enough history, the
-            constant-velocity fit.
+            AssociationRound: pairs is a TrackPairCandidate for each pairing
+            that passed both the coarse delay-grid gate and, where there was
+            enough history, the constant-velocity fit.  anchored_inputs and
+            claims are the top-down claiming stage's output — see
+            _claim_round and submit_tracks_round's claim-mode handling below.
         """
         self._pending_tracks[node_id] = tracks or []
         if not tracks:
-            return []
+            return AssociationRound()
 
         neighbors = self._neighbors.get(node_id)
         if not neighbors:
-            return []
+            return AssociationRound()
 
         # Same rate limit submit_frame uses, and it matters more here: the
         # coarse grid gate is cheap but every pairing that survives it costs an
@@ -900,7 +1242,7 @@ class InterNodeAssociator:
         # this node's latest history.
         now = __import__('time').monotonic()
         if now - self._last_assoc.get(node_id, 0.0) < self._ASSOC_MIN_INTERVAL_S:
-            return []
+            return AssociationRound()
         self._last_assoc[node_id] = now
 
         # Visit at most _ASSOC_MAX_NEIGHBORS, starting where the last round
@@ -919,6 +1261,37 @@ class InterNodeAssociator:
             # every rotated round — and a second time below when the budget
             # also ran out in the same round.
             self._neighbor_cursor[node_id] = (start + cap) % n_total
+
+        # Top-down claiming rides this same round.  Always computed and
+        # counted when a mode is configured and a provider is set — shadow's
+        # inertness is enforced AFTER counting, not by skipping the work,
+        # because the counters (and the DEBUG line below) are the signal
+        # shadow exists to produce.
+        claimed_by_node: dict[str, set] = {}
+        anchored: list[dict] = []
+        claim_records: list[dict] = []
+        if self.claim_mode != "off" and self.global_track_provider is not None:
+            self.claim_rounds += 1
+            claimed_by_node, anchored, claim_records = self._claim_round(
+                node_id, tracks, visit, timestamp_ms)
+            if claim_records:
+                won = [c for c in claim_records if c["won"]]
+                d_med = f_med = None
+                if won:
+                    d_sorted = sorted(c["d_res_us"] for c in won)
+                    f_sorted = sorted(c["f_res_hz"] for c in won)
+                    d_med, f_med = d_sorted[len(d_sorted) // 2], f_sorted[len(f_sorted) // 2]
+                _logger.debug(
+                    "claim round node=%s mode=%s matched=%d conflicts=%d "
+                    "anchored_inputs=%d d_res_med_us=%s f_res_med_hz=%s",
+                    node_id, self.claim_mode, len(won),
+                    len(claim_records) - len(won), len(anchored), d_med, f_med,
+                )
+            if self.claim_mode != "active":
+                # Shadow: claims computed and counted above, but must not
+                # influence anything downstream — pairs identical to off,
+                # no anchored inputs returned.
+                claimed_by_node, anchored = {}, []
 
         out: list[TrackPairCandidate] = []
         # Two budgets, because they bound different costs.  fits bounds inline
@@ -940,6 +1313,14 @@ class InterNodeAssociator:
                 tracks_a, tracks_b = tracks, other_tracks
             else:
                 tracks_a, tracks_b = other_tracks, tracks
+            if claimed_by_node:
+                # Active-mode exclusivity, filtered round-locally.  This view
+                # (tracks_a/tracks_b) is a local copy from _pending_tracks —
+                # never the stored list itself — so a wrong claim's blast
+                # radius is bounded to this one round: the next round
+                # resubmits the un-mutated tracker views.
+                tracks_a = self._exclude_claimed(pair_key[0], tracks_a, claimed_by_node)
+                tracks_b = self._exclude_claimed(pair_key[1], tracks_b, claimed_by_node)
             emitted = self._pair_tracks(zone, tracks_a, tracks_b, timestamp_ms,
                                         budget)
             out.extend(emitted)
@@ -954,7 +1335,33 @@ class InterNodeAssociator:
                     (start + visit.index(other_id) + 1) % n_total)
                 self.track_pairs_deferred += 1
                 break
-        return out
+        return AssociationRound(pairs=out, anchored_inputs=anchored, claims=claim_records)
+
+    def _exclude_claimed(self, node_for: str, trk_list: list[dict],
+                         claimed_by_node: dict[str, set]) -> list[dict]:
+        """Drop this round's claimed tracklets from one side of a pairing.
+
+        Round-local only — trk_list is the view submit_tracks_round already
+        holds locally (tracks for the triggering node, or a
+        _pending_tracks.get() snapshot for a neighbour), never mutated.
+        """
+        claimed = claimed_by_node.get(node_for)
+        if not claimed:
+            return trk_list
+        filtered = [t for t in trk_list if str(t.get("track_id")) not in claimed]
+        self.tracklets_excluded += len(trk_list) - len(filtered)
+        return filtered
+
+    def submit_tracks(self, node_id: str, tracks: list[dict],
+                      timestamp_ms: int) -> list[TrackPairCandidate]:
+        """Backward-compatible wrapper over submit_tracks_round.
+
+        Returns just the bottom-up pairs, the shape every existing caller
+        (production's frame_processor pre-migration, lib tests, the bench's
+        baseline paths) expects.  Callers that need anchored_inputs/claims
+        use submit_tracks_round directly.
+        """
+        return self.submit_tracks_round(node_id, tracks, timestamp_ms).pairs
 
     def _pair_tracks(self, zone: OverlapZone, tracks_a: list[dict],
                      tracks_b: list[dict], timestamp_ms: int,
