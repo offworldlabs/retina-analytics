@@ -94,11 +94,18 @@ OBSERVED_LIMIT_MARGIN = 1.25
 #      out-of-wedge bins on 15/29 synthetic nodes in ~25 min).  A v3 polygon
 #      is therefore shaped partly by places the node never detected anything
 #      and cannot be repaired in place.
+#   5: positives additionally require the newest associated detection to be
+#      ADS-B-tagged with the track's own hex.  v4 trusted track identity: a
+#      track that swaps onto an untagged (dark) target keeps its old hex —
+#      the tracker's swap debounce only advances on tagged mismatches — and
+#      recorded the departed aircraft's live position for as long as it kept
+#      associating, painting contiguous out-of-wedge fans (staging
+#      2026-08-09, post-v4).
 #
 # Production and staging mount coverage_data as a named volume that survives
 # rebuilds, so without this a stale-schema polygon would be served indefinitely
 # with no operator action to prompt it.
-CALIBRATION_SCHEMA = 4
+CALIBRATION_SCHEMA = 5
 
 # ── Learned FOV (FOV_MODE shadow/active) ────────────────────────────────────
 #

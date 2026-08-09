@@ -101,8 +101,13 @@ class TestPersistedStateIsNotDiscarded:
         track-fed — coasting emits and published-solve attribution — so a v3
         polygon is shaped partly by ghost feedback and departure paths.  The
         recorders changed what a positive MEANS; the accumulated state
-        cannot be repaired in place, only relearned."""
-        assert CALIBRATION_SCHEMA == 4
+        cannot be repaired in place, only relearned.
+
+        Schema 5: v4 still trusted track identity — a track swapped onto an
+        untagged target kept recording the departed aircraft's position.
+        Positives now require the newest associated detection to carry the
+        track's own ADS-B tag."""
+        assert CALIBRATION_SCHEMA == 5
 
     def test_persisted_bins_carry_no_positions_to_rebin(self):
         s = _state()
