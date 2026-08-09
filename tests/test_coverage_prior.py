@@ -1,22 +1,31 @@
-"""The empirical coverage prior: bistatic clamp, and shrink-only constraint.
+"""The empirical coverage prior (off/shadow) and the learned FOV (FOV_MODE
+shadow/active) that extends the same accumulated bins.
 
-The polygon is fed from ADS-B fixes alone, so it grows where cooperative
-traffic flies and stays empty elsewhere.  That asymmetry is the whole safety
-argument for these tests: an empty bearing means nobody flew there, not that
-the node is deaf, so the observed limit may only ever *tighten* the theoretical
-footprint.  Read as an upper bound it would carve blind spots into perfectly
-good coverage.
+The off-mode polygon is fed from ADS-B fixes alone, so it grows where
+cooperative traffic flies and stays empty elsewhere.  That asymmetry is the
+whole safety argument for TestObservedLimitAbstains/TestBinBoundaries below:
+an empty bearing means nobody flew there, not that the node is deaf, so the
+observed limit may only ever *tighten* the theoretical footprint.  Read as an
+upper bound it would carve blind spots into perfectly good coverage.
+
+TestAsymmetricLearning covers the learned FOV's different, deliberate
+asymmetry: it broadens fast off positives (K=3 to open a bin, no percentile
+floor) and shrinks only on sustained negative evidence — never on mere
+absence — because a tracked target disappearing where it was predicted
+detectable is a real signal that traffic-percentile absence is not.
 """
 
 import pytest
 
 from retina_analytics.association import (
+    InterNodeAssociator,
     NodeGeometry,
     _point_in_beam,
     compute_overlap_zone,
 )
 from retina_analytics.constants import bistatic_range_limit_km
 from retina_analytics.empirical_coverage import (
+    FOV_OPEN_MIN_POINTS,
     OBSERVED_LIMIT_MARGIN,
     EmpiricalCoverageState,
     _MIN_BIN_POINTS_TO_CONSTRAIN,
@@ -80,6 +89,27 @@ class TestClampFollowsTheEllipse:
         for bearing in (0.0, 90.0, 180.0):
             assert ec._reach_at(bearing) == pytest.approx(_DELTA)
 
+    def test_a_monostatic_node_admits_up_to_four_times_reach(self):
+        """FOV_CLAMP_MULT_MONOSTATIC: a node with no declared bistatic limit
+        is scored against a config guess (max_range_km — radar3's is a
+        default 140), so it gets 4x admit room instead of the 2x a real
+        physical ellipse earns."""
+        ec = _state(bistatic=None)
+        lat, lon = _at_bearing(90.0, _DELTA * 3.5)   # beyond 2x, inside 4x
+        ec.add_point(lat, lon)
+        assert ec.n_points == 1
+        lat, lon = _at_bearing(45.0, _DELTA * 4.5)   # beyond even 4x
+        ec.add_point(lat, lon)
+        assert ec.n_points == 1   # the second point was rejected
+
+    def test_a_bistatic_declared_node_keeps_the_2x_ceiling(self):
+        """The ellipse is physical once max_bistatic_range_km is declared —
+        2x it stays implausible, unlike the monostatic config guess."""
+        ec = _state()   # bistatic declared (default)
+        lat, lon = _at_bearing(90.0, ec._reach_at(90.0) * 3.5)   # beyond 2x
+        ec.add_point(lat, lon)
+        assert ec.n_points == 0
+
 
 class TestObservedLimitAbstains:
     def test_no_evidence_means_no_constraint(self):
@@ -125,54 +155,151 @@ def _geo(coverage_limit=None):
     )
 
 
-class TestPriorOnlyTightens:
-    def test_an_abstaining_bearing_is_untouched(self):
-        """A node with an empty polygon gates exactly as one with no polygon."""
-        ec = _state()
-        lat, lon = _at_bearing(90.0, 25.0)
-        assert (_point_in_beam(lat, lon, _geo(ec.observed_limit_km))
-                == _point_in_beam(lat, lon, _geo(None)))
+class TestAsymmetricLearning:
+    """FOV_MODE's read surface: _bin_open / limit_km / contains / wedge_state.
 
-    def test_observed_coverage_pulls_the_gate_in(self):
+    Deliberately different asymmetry from TestObservedLimitAbstains above —
+    this is the shadow/active-mode API over the SAME accumulated bins, not a
+    second copy of the shrink-only prior.  See the module docstring.
+    """
+
+    def test_absence_never_shrinks_an_in_wedge_bin(self):
+        """10 SHORT points inside the theoretical wedge must not pull the
+        limit in below the theoretical reach — the old shrink-only P85 prior
+        did exactly this (TestObservedLimitAbstains/TestPriorOnlyTightens's
+        former subject); limit_km does not."""
         ec = _state()
+        ec.prior_azimuth_deg, ec.prior_width_deg = 90.0, 40.0
+        theoretical = ec._reach_at(92.5)   # bin centre — limit_km's reference
         for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
-            ec.add_point(*_at_bearing(90.0, 12.0))
-        far = _at_bearing(90.0, 40.0)          # inside the ellipse, far past what was seen
-        assert _point_in_beam(*far, _geo(None)) is True
-        assert _point_in_beam(*far, _geo(ec.observed_limit_km)) is False
+            ec.add_point(*_at_bearing(92.5, 5.0))   # short detections only
+        assert ec.limit_km(92.5) == pytest.approx(theoretical)
 
-    def test_the_margin_is_honoured(self):
-        """Traffic does not fly to the edge, so the observed P85 is a floor."""
+    def test_an_out_of_wedge_bin_opens_at_fov_open_min_points(self):
         ec = _state()
+        ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0   # narrow wedge, north
+        assert ec.wedge_state(180.0) == "closed"
+        for _ in range(FOV_OPEN_MIN_POINTS - 1):
+            ec.add_point(*_at_bearing(180.0, 20.0))
+        assert ec.wedge_state(180.0) == "closed"   # one short of K=3
+        ec.add_point(*_at_bearing(180.0, 20.0))
+        assert ec.wedge_state(180.0) != "closed"
+
+    def test_range_extends_past_theoretical_via_p95_times_margin(self):
+        ec = _state()
+        ec.prior_azimuth_deg, ec.prior_width_deg = 90.0, 40.0
+        theoretical = ec._reach_at(92.5)
+        far = theoretical + 20.0   # past theoretical, inside the 2x bistatic admit ceiling
         for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
-            ec.add_point(*_at_bearing(90.0, 20.0))
-        just_inside = _at_bearing(90.0, 20.0 * OBSERVED_LIMIT_MARGIN * 0.9)
-        just_outside = _at_bearing(90.0, 20.0 * OBSERVED_LIMIT_MARGIN * 1.2)
-        assert _point_in_beam(*just_inside, _geo(ec.observed_limit_km)) is True
-        assert _point_in_beam(*just_outside, _geo(ec.observed_limit_km)) is False
+            ec.add_point(*_at_bearing(92.5, far))
+        assert ec.limit_km(92.5) == pytest.approx(far * OBSERVED_LIMIT_MARGIN, rel=0.02)
 
-    def test_it_can_never_extend_the_footprint(self):
-        """Observations beyond the theoretical reach do not buy coverage.
+    def test_extension_ceiling_is_2x_bistatic_but_4x_monostatic(self):
+        """Same raw far detection: a bistatic-declared node cannot see past
+        its 2x admit ceiling to extend from, a monostatic-guess node can."""
+        far_bistatic = _state()._reach_at(92.5) * 2.5   # beyond 2x
+        bi = _state()
+        bi.prior_azimuth_deg, bi.prior_width_deg = 90.0, 40.0
+        for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
+            bi.add_point(*_at_bearing(92.5, far_bistatic))
+        assert bi.n_points == 0   # nothing admitted, nothing to extend from
+        assert bi.limit_km(92.5) == pytest.approx(bi._reach_at(92.5))
 
-        The ellipse stays the hard bound; the prior is one-directional.
-        """
+        mono = _state(bistatic=None)
+        mono.prior_azimuth_deg, mono.prior_width_deg = 90.0, 40.0
+        far_mono = mono._reach_at(92.5) * 2.5   # beyond 2x, still inside 4x
+        for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
+            mono.add_point(*_at_bearing(92.5, far_mono))
+        assert mono.n_points == _MIN_BIN_POINTS_TO_CONSTRAIN
+        assert mono.limit_km(92.5) == pytest.approx(far_mono * OBSERVED_LIMIT_MARGIN, rel=0.02)
+
+    def test_shrink_needs_three_events_spanning_ten_minutes(self):
+        t0 = 1_000_000.0
+
+        # Two events, however far apart in time, are not a pattern.
         ec = _state()
-        # Force a generous observed limit by writing the bin directly — add_point
-        # would clamp it, which is itself the belt to this braces.
-        ec._bins[_bin_for_bearing_of(180.0)] = [200.0] * 40
-        beyond = _at_bearing(180.0, 55.0)      # past the 30 km anti-TX reach
-        geo = _geo(ec.observed_limit_km)
-        geo.beam_width_deg = 360.0
-        # Still admitted by the sector+radius test here, because the *range*
-        # rule lives on the exact delay in compute_overlap_zone — the point is
-        # that the prior did not widen anything.
-        assert _point_in_beam(*beyond, geo) is True
-        zone = compute_overlap_zone(
-            geo, _geo(ec.observed_limit_km), grid_step_km=3.0, altitudes_km=(7.0,),
-        )
-        c_km_us = 0.299792458
-        assert all(d * c_km_us <= _DELTA + 1e-9
-                   for d, _ in zone.delay_pairs)
+        ec.prior_azimuth_deg, ec.prior_width_deg = 90.0, 40.0
+        theoretical = ec._reach_at(92.5)
+        ec.record_disappearance(*_at_bearing(92.5, 20.0), ts=t0)
+        ec.record_disappearance(*_at_bearing(92.5, 20.0), ts=t0 + 5000.0)
+        assert ec.limit_km(92.5) == pytest.approx(theoretical)
+
+        # Three events, but clustered inside one bad minute -- not sustained.
+        ec2 = _state()
+        ec2.prior_azimuth_deg, ec2.prior_width_deg = 90.0, 40.0
+        for dt in (0.0, 20.0, 45.0):
+            ec2.record_disappearance(*_at_bearing(92.5, 20.0), ts=t0 + dt)
+        assert ec2.limit_km(92.5) == pytest.approx(ec2._reach_at(92.5))
+
+        # Three events spanning >= 600 s: a sustained pattern, shrinks.
+        ec3 = _state()
+        ec3.prior_azimuth_deg, ec3.prior_width_deg = 90.0, 40.0
+        for dt in (0.0, 300.0, 650.0):
+            ec3.record_disappearance(*_at_bearing(92.5, 20.0), ts=t0 + dt)
+        assert ec3.limit_km(92.5) < ec3._reach_at(92.5)
+        assert ec3.limit_km(92.5) == pytest.approx(20.0 * 0.95, abs=0.5)
+
+    def test_a_fresh_positive_reopens_a_capped_bin(self):
+        """Positives supersede every negative event older than themselves —
+        broaden fast, shrink slow: a bin that reopens is not haunted by
+        evidence that predates the reopening."""
+        ec = _state()
+        ec.prior_azimuth_deg, ec.prior_width_deg = 90.0, 40.0
+        t0 = 1_000_000.0
+        for dt in (0.0, 300.0, 650.0):
+            ec.record_disappearance(*_at_bearing(92.5, 20.0), ts=t0 + dt)
+        assert ec.limit_km(92.5) < ec._reach_at(92.5)
+        ec.add_point(*_at_bearing(92.5, 25.0), ts=t0 + 1000.0)
+        assert ec.limit_km(92.5) == pytest.approx(ec._reach_at(92.5))
+
+
+class TestDigestMovesOnOpenAndCap:
+    """fov_digest() is the change-detection token _refresh_coverage_constraints
+    (backend/services/tasks/analytics_refresh.py) compares to decide whether a
+    node's overlap grids need rebuilding.  A bin's (state_code, limit) pair
+    must move when the bin's *admission* changes (closed -> prior/observed,
+    or a negative cap lands) — those are exactly the changes that alter which
+    grid points _point_in_beam would admit.  A limit nudging within the same
+    state, well under the backend's 2 km rebuild grain, is not load-bearing
+    and is documented rather than asserted here (see
+    TestCoverageConstraintRefresh in test_analytics_refresh_helpers.py for
+    the quantization itself).
+    """
+
+    def test_a_bin_opening_changes_its_digest_entry(self):
+        ec = _state()
+        ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0   # narrow wedge, north
+        i = _bin_for_bearing_of(180.0)
+        before = ec.fov_digest()[i]
+        assert before[0] == "closed"
+        for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
+            ec.add_point(*_at_bearing(180.0, 20.0))
+        after = ec.fov_digest()[i]
+        assert after != before
+        assert after[0] in ("prior", "observed")
+
+    def test_a_negative_cap_changes_its_digest_entry(self):
+        ec = _state()
+        ec.prior_azimuth_deg, ec.prior_width_deg = 90.0, 40.0
+        i = _bin_for_bearing_of(92.5)
+        before = ec.fov_digest()[i]
+        t0 = 1_000_000.0
+        for dt in (0.0, 300.0, 650.0):
+            ec.record_disappearance(*_at_bearing(92.5, 20.0), ts=t0 + dt)
+        after = ec.fov_digest()[i]
+        assert after != before
+        assert after[1] < before[1]   # limit component dropped
+
+    def test_a_full_bin_reopening_survives_the_round_trip_to_disk(self):
+        """The digest is read from the same object callers persist — a
+        rebuild decision made against a freshly-loaded state must see the
+        same digest as the one that triggered the save."""
+        ec = _state()
+        ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0
+        for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
+            ec.add_point(*_at_bearing(180.0, 20.0))
+        restored = EmpiricalCoverageState.from_dict(ec.to_dict())
+        assert restored.fov_digest() == ec.fov_digest()
 
 
 def _bin_for_bearing_of(bearing):
@@ -180,19 +307,98 @@ def _bin_for_bearing_of(bearing):
     return _bin_for_bearing(bearing)
 
 
-class TestRebuildOnTightening:
-    def test_rebuilding_applies_a_polygon_that_arrived_later(self):
-        """Grids are built at registration; a later tightening needs a rebuild.
+class TestFovGateInAssociation:
+    """association.py's fov wiring: NodeGeometry.fov, _point_in_beam's fov
+    branch, and rebuild_zones_for refreshing it.  fov=None (the off/shadow
+    construction — InterNodeAssociator's fov_provider stays unset in those
+    modes) must reproduce the legacy shrink-only behaviour exactly; a stub
+    fov must REPLACE it, not add to it.
+    """
 
-        Without this the constraint would only ever take effect on a restart.
+    def test_legacy_path_is_pinned_with_fov_none(self):
+        """With geo.fov unset this is byte-identical to the shrink-only
+        prior TestPriorOnlyTightens used to pin directly."""
+        ec = _state()
+        for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
+            ec.add_point(*_at_bearing(90.0, 12.0))
+        far = _at_bearing(90.0, 40.0)   # inside the ellipse, far past what was seen
+        assert _point_in_beam(*far, _geo(None)) is True
+        assert _point_in_beam(*far, _geo(ec.observed_limit_km)) is False
+
+    def test_active_path_replaces_the_legacy_checks_entirely(self):
+        """A stub fov with no bearing constraint at all, on a node whose
+        THEORETICAL wedge is narrow and points somewhere else, proves the
+        fov branch is a replacement — not an additional filter stacked on
+        top.  Falling through to the legacy bearing test afterward would
+        reject a point the fov explicitly admits."""
+        class _StubFov:
+            def max_limit_km(self):
+                return 30.0
+
+            def contains(self, bearing, range_km):
+                return range_km <= 30.0   # no bearing constraint at all
+
+        geo = _geo(None)
+        geo.beam_azimuth_deg = 0.0
+        geo.beam_width_deg = 10.0   # narrow theoretical wedge, pointed north
+        geo.fov = _StubFov()
+
+        # Due east, 20 km out: the legacy 10 deg-wide northward wedge would
+        # reject this on bearing alone (90 deg off boresight).
+        east_20km = _at_bearing(90.0, 20.0)
+        assert _point_in_beam(*east_20km, geo) is True
+
+        far = _at_bearing(90.0, 40.0)   # past the fov's own 30 km cap
+        assert _point_in_beam(*far, geo) is False
+
+    def test_bounding_box_grows_with_the_learned_fov(self):
+        """compute_overlap_zone's grid must reach as far as the fov claims,
+        even past the theoretical footprint — see NodeGeometry.effective_radius_km.
+
+        Both nodes monostatic (no bistatic limit), so footprint_radius_km is a
+        fixed 60 km regardless of position — isolating the widening to geo_a's
+        fov rather than letting a baseline-sensitive bistatic ellipse
+        confound the comparison.
         """
-        from retina_analytics.association import InterNodeAssociator
+        class _WideFov:
+            def max_limit_km(self):
+                return 200.0   # well past the 60 km theoretical footprint
 
-        states = {}
+            def contains(self, bearing, range_km):
+                return range_km <= self.max_limit_km()
 
-        def provider(node_id):
-            ec = states.get(node_id)
-            return ec.observed_limit_km if ec else None
+        far_lat, far_lon = _at_bearing(90.0, 150.0)   # > 60+60, <= 200+60
+
+        def _mono_geo(node_id, rx_lat, rx_lon, fov=None):
+            return NodeGeometry(
+                node_id=node_id, rx_lat=rx_lat, rx_lon=rx_lon, rx_alt_km=0.3,
+                tx_lat=_TX_LAT, tx_lon=_TX_LON, tx_alt_km=0.6, fc_hz=183e6,
+                beam_azimuth_deg=0.0, beam_width_deg=360.0,
+                max_range_km=60.0, max_bistatic_range_km=None, fov=fov,
+            )
+
+        geo_a = _mono_geo("a", _RX_LAT, _RX_LON, fov=_WideFov())
+        geo_b = _mono_geo("b", far_lat, far_lon)
+        assert geo_a.footprint_radius_km + geo_b.footprint_radius_km < 150.0
+
+        zone = compute_overlap_zone(geo_a, geo_b, grid_step_km=5.0, altitudes_km=(7.0,))
+        assert zone.grid_points   # the widened bounding box actually reached node b
+
+    def test_rebuild_zones_for_refreshes_geo_fov(self):
+        class _Fov:
+            def __init__(self, limit):
+                self.limit = limit
+
+            def max_limit_km(self):
+                return self.limit
+
+            def contains(self, bearing, range_km):
+                return range_km <= self.limit
+
+        fovs = {"n1": _Fov(5.0)}
+
+        def fov_provider(node_id):
+            return fovs.get(node_id)
 
         cfg_a = {"rx_lat": _RX_LAT, "rx_lon": _RX_LON, "rx_alt_ft": 1000,
                  "tx_lat": _TX_LAT, "tx_lon": _TX_LON, "tx_alt_ft": 2000,
@@ -200,54 +406,15 @@ class TestRebuildOnTightening:
                  "max_bistatic_range_km": _DELTA, "beam_azimuth_deg": 0.0}
         cfg_b = dict(cfg_a, rx_lon=-82.31, fc_hz=195e6)
 
-        a = InterNodeAssociator(grid_step_km=3.0, coverage_provider=provider)
+        a = InterNodeAssociator(grid_step_km=3.0, fov_provider=fov_provider)
         a.register_node("n1", cfg_a)
         a.register_node("n2", cfg_b)
-        before = len(a.overlap_zones[("n1", "n2")].grid_points)
-        assert before > 0
+        assert a.node_geometries["n1"].fov is fovs["n1"]
 
-        # n1 turns out to see only 8 km, in every direction.
-        ec = _state()
-        for bearing in range(0, 360, 5):
-            for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
-                ec.add_point(*_at_bearing(float(bearing), 8.0))
-        states["n1"] = ec
-
-        assert a.rebuild_zones_for("n1") >= 1
-        after = len(a.overlap_zones[("n1", "n2")].grid_points)
-        assert after < before
-
-    def test_a_zone_tightened_to_nothing_stops_being_a_neighbour(self):
-        """Otherwise every round keeps pairing frames against an empty grid."""
-        from retina_analytics.association import InterNodeAssociator
-
-        states = {}
-
-        def provider(node_id):
-            ec = states.get(node_id)
-            return ec.observed_limit_km if ec else None
-
-        cfg_a = {"rx_lat": _RX_LAT, "rx_lon": _RX_LON, "rx_alt_ft": 1000,
-                 "tx_lat": _TX_LAT, "tx_lon": _TX_LON, "tx_alt_ft": 2000,
-                 "fc_hz": 183e6, "beam_width_deg": 360, "max_range_km": _DELTA,
-                 "max_bistatic_range_km": _DELTA, "beam_azimuth_deg": 0.0}
-        cfg_b = dict(cfg_a, rx_lon=-82.31, fc_hz=195e6)
-
-        a = InterNodeAssociator(grid_step_km=3.0, coverage_provider=provider)
-        a.register_node("n1", cfg_a)
-        a.register_node("n2", cfg_b)
-        assert "n2" in a._neighbors.get("n1", set())
-
-        ec = _state()
-        for bearing in range(0, 360, 5):
-            for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
-                ec.add_point(*_at_bearing(float(bearing), 0.6))
-        states["n1"] = ec
+        fovs["n1"] = _Fov(80.0)   # the node's learned fov widened
         a.rebuild_zones_for("n1")
-
-        assert not a.overlap_zones[("n1", "n2")].delay_pairs
-        assert "n2" not in a._neighbors.get("n1", set())
-        assert "n1" not in a._neighbors.get("n2", set())
+        assert a.node_geometries["n1"].fov is fovs["n1"]
+        assert a.node_geometries["n1"].fov.limit == 80.0
 
 
 class TestBinBoundaries:

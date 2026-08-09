@@ -12,12 +12,45 @@ from retina_analytics.reputation import NodeReputation
 from retina_analytics.coverage import HistoricalCoverageMap
 from retina_analytics.empirical_coverage import (
     CALIBRATION_SCHEMA,
+    N_BINS,
     EmpiricalCoverageState,
 )
 from retina_analytics.cross_node import compute_delay_bin_overlap, coverage_suggestion
-from retina_analytics.constants import YAGI_BEAM_WIDTH_DEG, YAGI_MAX_RANGE_KM, haversine_km, resolve_beam_azimuth_deg
+from retina_analytics.constants import (
+    YAGI_BEAM_WIDTH_DEG,
+    YAGI_MAX_RANGE_KM,
+    bearing_deg,
+    haversine_km,
+    resolve_beam_azimuth_deg,
+)
 
 _RX_RELOCATE_THRESHOLD_KM = 0.05   # 50 m — above real GPS/reporting jitter
+
+
+def _resolve_fov_prior(config: dict, rx_lat: float, rx_lon: float,
+                       tx_lat: float, tx_lon: float) -> tuple[float | None, float | None]:
+    """Theoretical prior (azimuth, width) for a node's learned FOV.
+
+    Mirrors backend services.geo.node_beam_params' azimuth rule — explicit
+    config aim wins (resolved through resolve_beam_azimuth_deg, which is
+    robust to a missing/NaN/unparsable value); else a known TX gives
+    broadside (+90° off the RX->TX baseline); else the prior is omni (None
+    azimuth — every bin starts inside the theoretical wedge).  Reimplemented
+    here rather than imported: this library depends on nothing outside
+    itself, and node_beam_params lives in the backend.
+
+    This is where the radar3 fix becomes automatic: an unaimed node with a
+    known TX still gets a broadside PRIOR (as before), but it is now only a
+    starting point — bins at the node's true aim open on positives regardless
+    of where the invented broadside pointed.
+    """
+    if config.get("beam_azimuth_deg") is not None:
+        az = resolve_beam_azimuth_deg(config, rx_lat, rx_lon, tx_lat, tx_lon)
+        return az, config.get("beam_width_deg", YAGI_BEAM_WIDTH_DEG)
+    if tx_lat and tx_lon:
+        az = (bearing_deg(rx_lat, rx_lon, tx_lat, tx_lon) + 90.0) % 360.0
+        return az, config.get("beam_width_deg", YAGI_BEAM_WIDTH_DEG)
+    return None, None
 
 
 class NodeAnalyticsManager:
@@ -25,7 +58,11 @@ class NodeAnalyticsManager:
 
     _ANALYSIS_CACHE_TTL = 60  # seconds
 
-    def __init__(self, storage_dir: str = ""):
+    def __init__(self, storage_dir: str = "", fov_mode: str = "off"):
+        # off/shadow/active, ASSOC_CLAIM_MODE precedent.  The lib reads no env
+        # vars — the backend resolves FOV_MODE and passes it in.  An
+        # unrecognised value falls back to "off", same as claim_mode.
+        self.fov_mode: str = fov_mode if fov_mode in ("off", "shadow", "active") else "off"
         self.trust_scores: dict[str, TrustScoreState] = {}
         self.detection_areas: dict[str, DetectionAreaState] = {}
         self.metrics: dict[str, NodeMetrics] = {}
@@ -144,11 +181,18 @@ class NodeAnalyticsManager:
         schema_changed = (
             ec is not None and getattr(ec, "schema", 1) != CALIBRATION_SCHEMA
         )
+        # node_beam_params semantics (explicit -> resolved; elif TX known ->
+        # broadside+90; else omni) — see _resolve_fov_prior.  Computed
+        # unconditionally (not gated on fov_mode): it is cheap, and off/shadow
+        # callers never read prior_azimuth_deg/prior_width_deg, so this cannot
+        # change their behaviour.
+        prior_az, prior_width = _resolve_fov_prior(config, rx_lat, rx_lon, tx_lat, tx_lon)
         if ec is None or moved or rule_changed or schema_changed:
             self.empirical_coverages[node_id] = EmpiricalCoverageState(
                 rx_lat=rx_lat, rx_lon=rx_lon,
                 max_range_km=cfg_max_range,
                 tx_lat=tx_lat, tx_lon=tx_lon,
+                prior_azimuth_deg=prior_az, prior_width_deg=prior_width,
             )
             # Record the rule this polygon was built under so the next
             # registration can tell whether it is still valid.
@@ -168,6 +212,11 @@ class NodeAnalyticsManager:
             ec.max_bistatic_range_km = cfg_bistatic
             # A reconnect can carry a corrected TX; the clamp follows it.
             ec.tx_lat, ec.tx_lon = tx_lat, tx_lon
+            # The prior updates in place on every reconnect (a corrected aim
+            # or a TX fix should move it) without ever invalidating the
+            # accumulated bins — only the theoretical starting point moves,
+            # not the evidence.
+            ec.prior_azimuth_deg, ec.prior_width_deg = prior_az, prior_width
 
     def coverage_limit_for(self, node_id: str):
         """A bearing → observed-limit-km callable for one node, or None.
@@ -182,10 +231,39 @@ class NodeAnalyticsManager:
             return None
         return ec.observed_limit_km
 
-    def coverage_digest(self, node_id: str):
-        """Change token for a node's observed limits; see constraint_digest."""
+    def learned_fov_for(self, node_id: str) -> EmpiricalCoverageState | None:
+        """The raw learned-FOV state for one node, or None.
+
+        Handed to InterNodeAssociator (active mode only — see
+        association.fov_provider) and read directly by the solver's beam
+        gate, both of which use EmpiricalCoverageState's contains /
+        wedge_state / limit_km / max_limit_km surface.  Unlike
+        coverage_limit_for (a bound bearing -> limit callable) this returns
+        the state itself, because the solver gate and the disappearance
+        detector both need range AND bearing together, not just a limit.
+        """
+        return self.empirical_coverages.get(node_id)
+
+    def record_negative_event(self, node_id: str, lat: float, lon: float) -> bool:
+        """Mirror of record_calibration_point for negative evidence — a
+        tracked target predicted detectable at (lat, lon) that the node
+        failed to detect.  Returns whether the event actually landed (see
+        EmpiricalCoverageState.record_disappearance), so the backend
+        disappearance detector's per-cycle cap counts only what landed."""
         ec = self.empirical_coverages.get(node_id)
-        return ec.constraint_digest() if ec is not None else None
+        return ec.record_disappearance(lat, lon) if ec is not None else False
+
+    def coverage_digest(self, node_id: str):
+        """Change token for a node's grid-relevant coverage state.
+
+        fov_digest() under FOV_MODE shadow/active (a bin opening must move
+        this even when its rounded limit does not); constraint_digest()
+        (the shrink-only prior) under off, unchanged.
+        """
+        ec = self.empirical_coverages.get(node_id)
+        if ec is None:
+            return None
+        return ec.fov_digest() if self.fov_mode != "off" else ec.constraint_digest()
 
     def retire_node(self, node_id: str) -> dict:
         """Forget a node entirely — in-memory state and its files on disk.
@@ -342,8 +420,11 @@ class NodeAnalyticsManager:
         ec = self.empirical_coverages.get(node_id)
         if ec is not None:
             da = self.detection_areas.get(node_id)
+            fov_mode_active = self.fov_mode != "off"
             poly_kwargs = {}
-            if da is not None:
+            if fov_mode_active:
+                poly_kwargs["use_learned_wedge"] = True
+            elif da is not None:
                 poly_kwargs["beam_azimuth_deg"] = da.beam_azimuth_deg
                 poly_kwargs["beam_width_deg"] = da.beam_width_deg
                 poly_kwargs["max_range_km"] = da.max_range_km
@@ -352,6 +433,30 @@ class NodeAnalyticsManager:
                 "n_filled_bins": ec.n_filled_bins,
                 "polygon": ec.to_polygon(**poly_kwargs),
             }
+            if fov_mode_active:
+                # Flows through /api/radar/analytics automatically — no new
+                # dashboard endpoint needed for shadow verification.
+                n_neg_events = sum(len(evs) for evs in ec._neg_events)
+                bins_prior = bins_observed = bins_closed = 0
+                for i in range(N_BINS):
+                    state_code = ec.wedge_state(i * (360.0 / N_BINS))
+                    if state_code == "prior":
+                        bins_prior += 1
+                    elif state_code == "observed":
+                        bins_observed += 1
+                    else:
+                        bins_closed += 1
+                result["empirical_coverage"]["fov"] = {
+                    "mode": self.fov_mode,
+                    "n_pos": ec.n_points,
+                    "n_neg_events": n_neg_events,
+                    "bins_prior": bins_prior,
+                    "bins_observed": bins_observed,
+                    "bins_closed": bins_closed,
+                    "max_limit_km": round(ec.max_limit_km(), 1),
+                    "prior_azimuth_deg": ec.prior_azimuth_deg,
+                    "prior_width_deg": ec.prior_width_deg,
+                }
         return result
 
     def get_all_summaries(self) -> dict:

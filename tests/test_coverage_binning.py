@@ -89,8 +89,14 @@ class TestPersistedStateIsNotDiscarded:
         new points are filed correctly and old ones age out at _MAX_PER_BIN.
         A bump would discard every node's polygon, which is days of cooperative
         traffic each, to correct an error that then averages through a P85, a
-        3-bin rolling mean and a 1.25x margin."""
-        assert CALIBRATION_SCHEMA == 2
+        3-bin rolling mean and a 1.25x margin.
+
+        Schema 3 (the learned-FOV round) is exactly the kind of deliberate
+        bump this test exists to make explicit: priors, per-bin positive
+        timestamps and negative events changed what a persisted state MEANS,
+        so silently reinterpreting v2 files was the wrong option and the
+        one-time discard was accepted on purpose."""
+        assert CALIBRATION_SCHEMA == 3
 
     def test_persisted_bins_carry_no_positions_to_rebin(self):
         s = _state()

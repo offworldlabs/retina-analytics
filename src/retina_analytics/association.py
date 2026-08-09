@@ -222,6 +222,12 @@ class NodeGeometry:
     # None where there is not enough evidence.  Shrink-only: it may tighten the
     # theoretical footprint, never extend it.  See _point_in_beam.
     coverage_limit: object = None
+    # The node's EmpiricalCoverageState (learned FOV), or None.  Injected via
+    # fov_provider — active mode only, so off/shadow grids are byte-identical
+    # to before this existed.  When set, _point_in_beam's fov branch REPLACES
+    # the theoretical bearing+range checks below it entirely; see
+    # _point_in_beam.
+    fov: object = None
 
     @property
     def baseline_km(self) -> float:
@@ -233,6 +239,23 @@ class NodeGeometry:
         if self.max_bistatic_range_km is None:
             return self.max_range_km
         return bistatic_max_radius_km(self.baseline_km, self.max_bistatic_range_km)
+
+    @property
+    def effective_radius_km(self) -> float:
+        """footprint_radius_km, widened to the learned FOV's reach when it
+        exceeds the theoretical footprint.
+
+        The learned FOV only ever widens past the theoretical wedge (see
+        empirical_coverage.limit_km) — a bin can open outside it and extend
+        past _reach_at on positives — so a bounding box or prefilter sized on
+        footprint_radius_km alone would silently truncate exactly the region
+        FOV_MODE exists to add.  Used by compute_overlap_zone's pair
+        prefilter and grid bounding box.
+        """
+        radius = self.footprint_radius_km
+        if self.fov is not None:
+            radius = max(radius, self.fov.max_limit_km())
+        return radius
 
 
 @dataclass
@@ -373,8 +396,20 @@ def _point_in_beam(lat, lon, geo: NodeGeometry) -> bool:
 
     geo.footprint_radius_km bounds how far the sector can extend, so callers
     that need a radius before any delay exists still have one.
+
+    geo.fov (FOV_MODE active only — see InterNodeAssociator's fov_provider)
+    REPLACES every check below it, rather than adding to them: the learned
+    FOV already embeds the theoretical prior for young bins (_bin_open opens
+    inside the theoretical wedge unconditionally), so falling through to the
+    theoretical checks afterward would double-apply the same prior AND
+    re-impose the shrink-only ceiling this mode exists to lift.
     """
     dist = _haversine_km(geo.rx_lat, geo.rx_lon, lat, lon)
+    if geo.fov is not None:
+        if dist > max(geo.footprint_radius_km, geo.fov.max_limit_km()):
+            return False
+        bearing = _bearing_deg(geo.rx_lat, geo.rx_lon, lat, lon)
+        return geo.fov.contains(bearing, dist)
     if dist > geo.footprint_radius_km:
         return False
     bearing = _bearing_deg(geo.rx_lat, geo.rx_lon, lat, lon)
@@ -416,9 +451,11 @@ def compute_overlap_zone(geo_a: NodeGeometry, geo_b: NodeGeometry,
     # O(n²) grid is skipped entirely.  The radius has to be the *largest* the
     # footprint reaches — Δ/2 + L toward the transmitter, not Δ — or a pair
     # whose overlap lies out along a long baseline gets pruned before it is
-    # ever looked at.
+    # ever looked at.  effective_radius_km additionally widens to the learned
+    # FOV's reach (FOV_MODE active) so a bin that opened past the theoretical
+    # wedge is not pruned before compute_overlap_zone ever gets to test it.
     rx_sep = _haversine_km(geo_a.rx_lat, geo_a.rx_lon, geo_b.rx_lat, geo_b.rx_lon)
-    if rx_sep > geo_a.footprint_radius_km + geo_b.footprint_radius_km:
+    if rx_sep > geo_a.effective_radius_km + geo_b.effective_radius_km:
         return OverlapZone(
             node_a_id=geo_a.node_id,
             node_b_id=geo_b.node_id,
@@ -436,9 +473,11 @@ def compute_overlap_zone(geo_a: NodeGeometry, geo_b: NodeGeometry,
     rx_a_enu, tx_a_enu = _compute_node_enu(geo_a, ref_lat, ref_lon, ref_alt_km)
     rx_b_enu, tx_b_enu = _compute_node_enu(geo_b, ref_lat, ref_lon, ref_alt_km)
 
-    # Determine bounding box for the grid.  Sized on the footprint radius, so a
-    # node aimed along a long baseline still gets its far lobe enumerated.
-    max_range = max(geo_a.footprint_radius_km, geo_b.footprint_radius_km)
+    # Determine bounding box for the grid.  Sized on the footprint radius (or
+    # the learned FOV's reach if wider — see effective_radius_km), so a node
+    # aimed along a long baseline, or one whose learned FOV opened past its
+    # theoretical wedge, still gets its far lobe enumerated.
+    max_range = max(geo_a.effective_radius_km, geo_b.effective_radius_km)
     n_steps = int(2 * max_range / grid_step_km) + 1
 
     grid_points = []
@@ -647,6 +686,7 @@ class InterNodeAssociator:
                  cv_min_span_s: float = 12.0, cv_exclusive: bool = True,
                  coverage_provider=None, max_neighbors: int = 50,
                  max_pairs_per_round: int = 64, *,
+                 fov_provider=None,
                  claim_mode: str = "off",
                  claim_delay_gate_us: float = CLAIM_DELAY_GATE_US,
                  claim_doppler_gate_hz: float = CLAIM_DOPPLER_GATE_HZ,
@@ -705,6 +745,14 @@ class InterNodeAssociator:
         # constraint.  Injected the same way cv_fit is, so this library keeps
         # knowing nothing about NodeAnalyticsManager.
         self.coverage_provider = coverage_provider
+        # node_id -> EmpiricalCoverageState | None, the learned FOV.  Backend
+        # passes this ONLY in FOV_MODE active (core/state.py), so off/shadow
+        # construct this associator with fov_provider=None and every geo.fov
+        # stays None — grids identical to before FOV_MODE existed.  Kept
+        # separate from coverage_provider (a bearing -> limit callable): the
+        # fov branch in _point_in_beam needs the whole state (contains,
+        # max_limit_km), not a single-bearing lookup.
+        self.fov_provider = fov_provider
         # The constraint digest each node's grids were last built under, so a
         # polygon that tightens later can be detected and the grids rebuilt.
         # Counters for what the fine test actually did, so its value is
@@ -857,6 +905,7 @@ class InterNodeAssociator:
             max_bistatic_range_km=config.get("max_bistatic_range_km"),
             coverage_limit=(self.coverage_provider(node_id)
                             if self.coverage_provider else None),
+            fov=(self.fov_provider(node_id) if self.fov_provider else None),
         )
 
         # Honour an explicit aim (aimed coverage-ring Yagi); otherwise broadside
@@ -974,6 +1023,8 @@ class InterNodeAssociator:
             return 0
         if self.coverage_provider is not None:
             geo.coverage_limit = self.coverage_provider(node_id)
+        if self.fov_provider is not None:
+            geo.fov = self.fov_provider(node_id)
         rebuilt = 0
         with self._register_lock:
             for other_id, other_geo in list(self.node_geometries.items()):

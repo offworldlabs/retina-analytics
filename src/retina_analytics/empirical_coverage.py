@@ -19,13 +19,32 @@ Algorithm
 
 The polygon is only returned once at least MIN_POINTS calibration points have
 been recorded; below that the frontend falls back to the theoretical Yagi sector.
+
+Learned FOV (FOV_MODE, schema 3)
+---------------------------------
+The methods above (observed_limit_km / constraint_digest / to_polygon without
+use_learned_wedge) are the shrink-only prior: it may only tighten the
+theoretical wedge, never widen it, and abstains below _MIN_BIN_POINTS_TO_CONSTRAIN.
+That is deliberately kept — it is the off/shadow-mode API and every off-mode
+caller still reads it unchanged.
+
+_bin_open / limit_km / contains / wedge_state / fov_digest are a second,
+independent read surface over the same accumulated bins, for FOV_MODE
+shadow/active callers only.  The semantics differ on purpose: the theoretical
+wedge is a PRIOR, not a hard boundary — a bin outside it opens on
+FOV_OPEN_MIN_POINTS positive detections (broaden fast), and the resulting
+limit only ever shrinks on sustained *negative* evidence (a tracked target
+that disappeared while still predicted detectable), never on mere absence of
+traffic.  See record_disappearance / _neg_cap_km.
 """
 
 import json
 import math
 import os
+import time
 
 from retina_analytics.constants import (
+    YAGI_BEAM_WIDTH_DEG,
     YAGI_MAX_RANGE_KM,
     bearing_deg,
     bistatic_range_limit_km,
@@ -59,11 +78,63 @@ OBSERVED_LIMIT_MARGIN = 1.25
 #      aircraft, so a v1 polygon describes where the solver *thought* targets
 #      were, not where the node can see.
 #   2: reported ADS-B positions only.
+#   3: adds the learned-FOV fields (prior_azimuth_deg/prior_width_deg,
+#      per-bin last-positive timestamps, negative-event history).  A v2 file
+#      has none of these, so under FOV_MODE every bin would silently start
+#      "closed" outside its theoretical wedge regardless of how much v2
+#      evidence it actually carried — auto-discarding it at register is a
+#      clean migration with no operator action, the same reasoning v1->v2
+#      used.
 #
 # Production and staging mount coverage_data as a named volume that survives
-# rebuilds, so without this a v1 polygon would be served indefinitely with no
-# operator action to prompt it.
-CALIBRATION_SCHEMA = 2
+# rebuilds, so without this a stale-schema polygon would be served indefinitely
+# with no operator action to prompt it.
+CALIBRATION_SCHEMA = 3
+
+# ── Learned FOV (FOV_MODE shadow/active) ────────────────────────────────────
+#
+# Positives (bin ± 1) needed to OPEN a bin that sits outside the theoretical
+# wedge.  Small on purpose — the whole point is to broaden fast off real
+# detections instead of waiting on a shrink-only prior.  1 would let a single
+# mis-matched ADS-B hex (wrong-aircraft correlation) open a bin permanently;
+# 3 independent detections at the same bearing is a real pattern.
+FOV_OPEN_MIN_POINTS = 3
+
+# Percentile used for the learned-FOV range extension.  P85 (the shrink-only
+# prior's percentile) exists to be robust to a handful of outliers when the
+# only thing at stake is how far a *tightening* reaches; here the far
+# detections are exactly the evidence a widening claim rests on, and P85
+# would discard the top 15% of it.  Extension additionally requires
+# _MIN_BIN_POINTS_TO_CONSTRAIN (10) points, same floor as the shrink-only
+# prior, so a thin bin cannot swing the reach off one lucky detection.
+FOV_EXTEND_PCTL = 95
+
+# Negative-evidence shrink.  A single disappearance is not evidence — a target
+# coasts, a frame drops, ADS-B glitches — so shrinking needs a *pattern*.
+FOV_NEG_EVENTS_TO_SHRINK = 3
+FOV_NEG_MAX_PER_BIN = 20   # FIFO cap, mirrors _MAX_PER_BIN's role for positives
+# Events must span at least this long. One bad minute of interference (a
+# co-channel transmitter, a maintenance window) cannot close a bin; sustained
+# absence over minutes is what distinguishes an obstruction from noise.
+FOV_NEG_MIN_SPAN_S = 600.0
+# The shrink lands short of the nearest disappearance range, not AT it — the
+# target was predicted detectable there and wasn't, so the true edge is at or
+# inside that range.
+FOV_NEG_CAP_MARGIN = 0.95
+# A "closed" bin's limit is 0.0 km, not "nothing near the RX" — add_point
+# itself never accumulates evidence inside 0.5 km (too close to be
+# informative), so without this floor the node's own immediate vicinity would
+# read as permanently unreachable.  contains() floors every bin at this
+# radius regardless of state.
+FOV_CLOSED_EPSILON_KM = 1.0
+
+# Admit-clamp multiplier for nodes WITHOUT a declared bistatic limit.  Their
+# max_range_km is a config guess (radar3's is the 140 km default), not a
+# physical bound the way a declared bistatic ellipse is — range_clamp_mult
+# (2.0) stays for bistatic-declared nodes because that footprint is physical
+# and a detection past 2x it really is implausible.  A monostatic guess
+# deserves more room before a real detection is thrown away as "too far".
+FOV_CLAMP_MULT_MONOSTATIC = 4.0
 
 
 def _bin_for_bearing(bearing_deg: float) -> int:
@@ -96,11 +167,16 @@ def _bearing_and_range(rx_lat: float, rx_lon: float,
             haversine_km(rx_lat, rx_lon, lat, lon))
 
 
-def _p85(values: list[float]) -> float:
-    """85th-percentile of a non-empty list (sorted() — the input is untouched)."""
+def _percentile(values: list[float], pct: float) -> float:
+    """pct-th percentile of a non-empty list (sorted() — the input is untouched)."""
     s = sorted(values)
-    idx = min(int(len(s) * 0.85), len(s) - 1)
+    idx = min(int(len(s) * pct / 100.0), len(s) - 1)
     return s[idx]
+
+
+def _p85(values: list[float]) -> float:
+    """85th-percentile — the shrink-only prior's percentile.  See _percentile."""
+    return _percentile(values, 85)
 
 
 class EmpiricalCoverageState:
@@ -109,7 +185,9 @@ class EmpiricalCoverageState:
     def __init__(self, rx_lat: float, rx_lon: float,
                  max_range_km: float | None = None,
                  range_clamp_mult: float = 2.0,
-                 tx_lat: float | None = None, tx_lon: float | None = None):
+                 tx_lat: float | None = None, tx_lon: float | None = None,
+                 prior_azimuth_deg: float | None = None,
+                 prior_width_deg: float | None = None):
         self.rx_lat = rx_lat
         self.rx_lon = rx_lon
         # Transmitter position, so the clamp can follow the ellipse the node is
@@ -118,7 +196,7 @@ class EmpiricalCoverageState:
         # precisely where a circle would let a mis-attributed detection through.
         self.tx_lat = tx_lat
         self.tx_lon = tx_lon
-        # Detections beyond range_clamp_mult × max_range_km are rejected as
+        # Detections beyond the admit clamp (see add_point) are rejected as
         # mis-attributed. None (e.g. states loaded from disk) falls back to
         # YAGI_MAX_RANGE_KM at use-time rather than disabling the bound.
         self.max_range_km = max_range_km
@@ -133,8 +211,30 @@ class EmpiricalCoverageState:
         # definition — from_dict is where an old one declares itself.
         self.schema = CALIBRATION_SCHEMA
         self.range_clamp_mult = range_clamp_mult
+        # Theoretical prior for the learned FOV: node_beam_params semantics,
+        # resolved once by the caller (NodeAnalyticsManager._register_node_locked
+        # mirrors geo.node_beam_params — explicit aim -> resolved; elif TX known
+        # -> broadside+90; else None=omni) and updated in place on every
+        # reconnect, never invalidating accumulated bins.  None azimuth means
+        # every bin starts inside the theoretical wedge — an omni node has no
+        # direction to be wrong about.  Unused by the shrink-only prior API
+        # (observed_limit_km / constraint_digest / to_polygon without
+        # use_learned_wedge); only _bin_open/limit_km/wedge_state read it.
+        self.prior_azimuth_deg = prior_azimuth_deg
+        self.prior_width_deg = prior_width_deg
         # Per-bin list of observed ranges (km).  List, not array — no numpy dep.
         self._bins: list[list[float]] = [[] for _ in range(N_BINS)]
+        # Per-bin wall-clock time of the last accepted positive (add_point).
+        # Negative events older than this are superseded — see _neg_cap_km.
+        self._bin_last_pos_ts: list[float] = [0.0] * N_BINS
+        # Per-bin FIFO of (range_km, ts) disappearance events — see
+        # record_disappearance / _neg_cap_km.
+        self._neg_events: list[list[tuple[float, float]]] = [[] for _ in range(N_BINS)]
+        # max_limit_km() cache — O(N_BINS), read by both the pair prefilter and
+        # the grid bounding box at registration/rebuild time.  Invalidated by
+        # add_point and record_disappearance, the only two things that can
+        # move it.
+        self._max_limit_cache: float | None = None
 
     # ── Ingestion ─────────────────────────────────────────────────────────────
 
@@ -153,17 +253,62 @@ class EmpiricalCoverageState:
             return bistatic_range_limit_km(psi, baseline, self.max_bistatic_range_km)
         return self.max_range_km if self.max_range_km is not None else YAGI_MAX_RANGE_KM
 
-    def add_point(self, lat: float, lon: float) -> None:
-        """Record one calibration point (known target position)."""
+    def _admit_mult(self) -> float:
+        """Admit-clamp multiplier on _reach_at for add_point / record_disappearance.
+
+        range_clamp_mult (2.0) for a node with a declared bistatic limit — that
+        footprint is physical, so 2x it really is implausible.  A node with no
+        declared limit is scored against a config guess (max_range_km), which
+        deserves more slack before a real detection is thrown away — see
+        FOV_CLAMP_MULT_MONOSTATIC.
+        """
+        return self.range_clamp_mult if self.max_bistatic_range_km else FOV_CLAMP_MULT_MONOSTATIC
+
+    def add_point(self, lat: float, lon: float, ts: float | None = None) -> None:
+        """Record one calibration point (known target position).
+
+        ts defaults to wall-clock time; the learned-FOV shrink logic
+        (_neg_cap_km) needs it to tell whether a positive supersedes an
+        earlier disappearance, so callers replaying history may supply it.
+        """
         bearing, range_km = _bearing_and_range(self.rx_lat, self.rx_lon, lat, lon)
         if range_km < 0.5:
             return  # too close — not informative
-        if range_km > self._reach_at(bearing) * self.range_clamp_mult:
+        if range_km > self._reach_at(bearing) * self._admit_mult():
             return  # implausibly far — mis-attributed detection
-        b = self._bins[_bin_for_bearing(bearing)]
+        i = _bin_for_bearing(bearing)
+        b = self._bins[i]
         b.append(range_km)
         if len(b) > _MAX_PER_BIN:
             del b[0]  # drop oldest
+        self._bin_last_pos_ts[i] = ts if ts is not None else time.time()
+        self._max_limit_cache = None
+
+    def record_disappearance(self, lat: float, lon: float, ts: float | None = None) -> bool:
+        """Record one negative-evidence event: a target predicted detectable at
+        (lat, lon) that this node failed to detect.
+
+        Same admission rule as add_point (too-close / implausibly-far are
+        rejected the same way) — a disappearance too close to be informative,
+        or too far to plausibly be this node's target, says nothing about this
+        node's FOV.  Returns whether the event was actually recorded, so the
+        backend disappearance detector's per-cycle cap counts only what
+        landed.  This alone never shrinks anything: see _neg_cap_km for the
+        (count, span, supersession) rule that turns accumulated events into a
+        cap.
+        """
+        bearing, range_km = _bearing_and_range(self.rx_lat, self.rx_lon, lat, lon)
+        if range_km < 0.5:
+            return False
+        if range_km > self._reach_at(bearing) * self._admit_mult():
+            return False
+        i = _bin_for_bearing(bearing)
+        events = self._neg_events[i]
+        events.append((range_km, ts if ts is not None else time.time()))
+        if len(events) > FOV_NEG_MAX_PER_BIN:
+            del events[0]  # drop oldest
+        self._max_limit_cache = None
+        return True
 
     # ── Properties ────────────────────────────────────────────────────────────
 
@@ -175,12 +320,149 @@ class EmpiricalCoverageState:
     def n_filled_bins(self) -> int:
         return sum(1 for b in self._bins if b)
 
+    # ── Learned FOV (FOV_MODE shadow/active) ─────────────────────────────────
+
+    def _in_theoretical_wedge(self, i: int) -> bool:
+        """Is bin i inside the theoretical prior (or is the prior omni)?"""
+        if self.prior_azimuth_deg is None:
+            return True
+        centre = i * _DEG_PER_BIN
+        diff = abs((centre - self.prior_azimuth_deg + 180.0) % 360.0 - 180.0)
+        half = (self.prior_width_deg if self.prior_width_deg is not None
+                else YAGI_BEAM_WIDTH_DEG) / 2.0
+        return diff <= half
+
+    def _bin_open(self, i: int) -> bool:
+        """Is bin i part of the node's admitted learned FOV?
+
+        True inside the theoretical wedge (or under an omni prior — see
+        _in_theoretical_wedge), OR when positives at bin i and its two
+        neighbours reach FOV_OPEN_MIN_POINTS.  The neighbour widening mirrors
+        observed_limit_km's — bins are 5° wide, so a detection just inside a
+        boundary is filed one bin over from where a query at the boundary
+        reads it.
+        """
+        if self._in_theoretical_wedge(i):
+            return True
+        pos = sum(len(self._bins[(i + off) % N_BINS]) for off in (-1, 0, 1))
+        return pos >= FOV_OPEN_MIN_POINTS
+
+    def _neg_cap_km(self, i: int) -> float | None:
+        """Negative-evidence range cap for bin i, or None if none applies.
+
+        Only events strictly newer than the bin's last accepted positive
+        count — a fresh positive supersedes every earlier disappearance at
+        that bearing (broaden fast, shrink slow: a bin that reopens does not
+        stay haunted by evidence that predates the reopening).  Shrinking
+        needs >= FOV_NEG_EVENTS_TO_SHRINK events spanning >=
+        FOV_NEG_MIN_SPAN_S seconds, so one bad minute of interference cannot
+        close a bin — only a sustained pattern of a target going undetected
+        where it should have been seen does.
+        """
+        last_pos_ts = self._bin_last_pos_ts[i]
+        events = [(r, ts) for r, ts in self._neg_events[i] if ts > last_pos_ts]
+        if len(events) < FOV_NEG_EVENTS_TO_SHRINK:
+            return None
+        span_s = max(ts for _, ts in events) - min(ts for _, ts in events)
+        if span_s < FOV_NEG_MIN_SPAN_S:
+            return None
+        # The shrink lands short of the nearest disappearance range, not at
+        # it: the target was predicted detectable there and was not seen, so
+        # the true edge is at or inside that range.
+        return min(r for r, _ in events) * FOV_NEG_CAP_MARGIN
+
+    def limit_km(self, bearing_deg_: float) -> float:
+        """How far the learned FOV reaches on this bearing (km).
+
+        0.0 when the bin is not open (_bin_open) — closed, not merely
+        unconstrained.  Otherwise the theoretical reach, widened past it once
+        the bin itself (not neighbours — the extension is a claim about THIS
+        bin's own detections) accumulates >= _MIN_BIN_POINTS_TO_CONSTRAIN
+        positives, to P95 x OBSERVED_LIMIT_MARGIN if that exceeds the
+        theoretical value.  An active negative cap (_neg_cap_km) narrows the
+        result afterward — the ONLY thing that ever pulls this below the
+        theoretical reach: absence never shrinks, only a tracked target that
+        disappeared while still predicted detectable does.
+        """
+        i = _bin_for_bearing(bearing_deg_ % 360.0)
+        if not self._bin_open(i):
+            return 0.0
+        # The bin CENTRE, not the left edge: the whole bin shares one limit,
+        # and the centre is the representative bearing for the ellipse —
+        # to_polygon samples the same way.
+        bearing_i = (i + 0.5) * _DEG_PER_BIN
+        reach = self._reach_at(bearing_i)
+        b = self._bins[i]
+        if len(b) >= _MIN_BIN_POINTS_TO_CONSTRAIN:
+            reach = max(reach, _percentile(b, FOV_EXTEND_PCTL) * OBSERVED_LIMIT_MARGIN)
+        cap = self._neg_cap_km(i)
+        if cap is not None:
+            reach = min(reach, cap)
+        return reach
+
+    def contains(self, bearing_deg_: float, range_km: float) -> bool:
+        """Is (bearing, range) inside the node's learned FOV?
+
+        Floored at FOV_CLOSED_EPSILON_KM regardless of bin state: add_point
+        never accumulates evidence inside 0.5 km (too close to be
+        informative), so without this floor a closed bin (limit 0.0) would
+        make the node's own immediate vicinity permanently unreachable.
+        """
+        return range_km <= max(self.limit_km(bearing_deg_), FOV_CLOSED_EPSILON_KM)
+
+    def wedge_state(self, bearing_deg_: float) -> str:
+        """"closed" (not open — limit_km is 0.0), "observed" (open AND backed
+        by >= _MIN_BIN_POINTS_TO_CONSTRAIN of this bin's own detections), or
+        "prior" (open only via the theoretical wedge/omni, not yet backed by
+        enough of its own evidence to extend past it)."""
+        i = _bin_for_bearing(bearing_deg_ % 360.0)
+        if not self._bin_open(i):
+            return "closed"
+        if len(self._bins[i]) >= _MIN_BIN_POINTS_TO_CONSTRAIN:
+            return "observed"
+        return "prior"
+
+    def max_limit_km(self) -> float:
+        """Largest learned-FOV reach across all bins.
+
+        Used for the pair-overlap prefilter's distance test and the grid
+        bounding box (see association.py) — both need a single worst-case
+        radius before any per-bearing test can run.  Cached: it is
+        O(N_BINS) and both call sites run at grid-build time; invalidated by
+        add_point and record_disappearance, the only two things that can
+        move it.  A stale cache would silently truncate grids to a radius
+        the node has since outgrown.
+        """
+        if self._max_limit_cache is None:
+            self._max_limit_cache = max(
+                (self.limit_km(i * _DEG_PER_BIN) for i in range(N_BINS)),
+                default=0.0,
+            )
+        return self._max_limit_cache
+
+    def fov_digest(self) -> tuple:
+        """Per-bin (state_code, rounded limit) — cheap change detection for
+        FOV_MODE, the fov analogue of constraint_digest.
+
+        state_code is compared exactly by the caller (_quantize_digest): a
+        bin opening (state moving "closed" -> "prior"/"observed") must
+        trigger a grid rebuild even when its rounded limit does not move in
+        the same tick, because a closed bin excludes association entirely
+        while an open one — however small its limit — does not.
+        """
+        out = []
+        for i in range(N_BINS):
+            bearing_i = i * _DEG_PER_BIN
+            out.append((self.wedge_state(bearing_i), round(self.limit_km(bearing_i), 1)))
+        return tuple(out)
+
     # ── Polygon generation ────────────────────────────────────────────────────
 
     def to_polygon(self, min_points: int = MIN_POINTS,
                    beam_azimuth_deg: float | None = None,
                    beam_width_deg: float | None = None,
-                   max_range_km: float | None = None) -> list[list[float]] | None:
+                   max_range_km: float | None = None,
+                   use_learned_wedge: bool = False) -> list[list[float]] | None:
         """Return a closed polygon [[lat, lon], …] or None if insufficient data.
 
         When *beam_azimuth_deg* and *beam_width_deg* are provided the polygon
@@ -188,12 +470,22 @@ class EmpiricalCoverageState:
         at the RX position).  Bins outside the sector are zeroed so the
         interpolation step never bleeds coverage into directions the antenna
         physically cannot observe.
+
+        use_learned_wedge=True replaces both the in-beam test and the per-bin
+        range with the learned FOV (_bin_open / limit_km) and ignores
+        beam_azimuth_deg/beam_width_deg/max_range_km — the learned wedge
+        already encodes which bins are admitted and how far each reaches, so a
+        separate theoretical constraint would only reintroduce the shrink-only
+        prior this mode replaces.
         """
         if self.n_points < min_points:
             return None
 
         # --- Determine which bins fall inside the beam sector -----------------
-        if beam_azimuth_deg is not None and beam_width_deg is not None:
+        if use_learned_wedge:
+            def _in_beam(bin_idx: int) -> bool:
+                return self._bin_open(bin_idx)
+        elif beam_azimuth_deg is not None and beam_width_deg is not None:
             half = beam_width_deg / 2.0
             def _in_beam(bin_idx: int) -> bool:
                 centre = bin_idx * _DEG_PER_BIN
@@ -213,6 +505,13 @@ class EmpiricalCoverageState:
         for i, b in enumerate(self._bins):
             if not _in_beam(i):
                 ranges.append(0.0)
+                continue
+            if use_learned_wedge:
+                # Unclipped from the theoretical sector: limit_km already
+                # carries whatever extension/negative cap applies, and
+                # re-clamping it against range_clamp_mult would silently
+                # reintroduce the shrink-only prior this mode replaces.
+                ranges.append(self.limit_km(i * _DEG_PER_BIN))
                 continue
             bearing_i = i * _DEG_PER_BIN
             clamp = (max_range_km if max_range_km is not None
@@ -380,14 +679,20 @@ class EmpiricalCoverageState:
             "tx_lon": self.tx_lon,
             "schema": self.schema,
             "range_clamp_mult": self.range_clamp_mult,
+            "prior_azimuth_deg": self.prior_azimuth_deg,
+            "prior_width_deg": self.prior_width_deg,
             "bins": [b[:] for b in self._bins],
+            "bin_last_pos_ts": list(self._bin_last_pos_ts),
+            "neg_events": [[list(ev) for ev in evs] for evs in self._neg_events],
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "EmpiricalCoverageState":
         obj = cls(rx_lat=d["rx_lat"], rx_lon=d["rx_lon"],
                   max_range_km=d.get("max_range_km"),
-                  tx_lat=d.get("tx_lat"), tx_lon=d.get("tx_lon"))
+                  tx_lat=d.get("tx_lat"), tx_lon=d.get("tx_lon"),
+                  prior_azimuth_deg=d.get("prior_azimuth_deg"),
+                  prior_width_deg=d.get("prior_width_deg"))
         obj.max_bistatic_range_km = d.get("max_bistatic_range_km")
         # Round-trip the clamp: dropping it silently reset a customised
         # multiplier to the 2.0 default on every restart.
@@ -399,6 +704,16 @@ class EmpiricalCoverageState:
         for i, b in enumerate(d.get("bins", [])):
             if i < N_BINS:
                 obj._bins[i] = list(b)
+        bin_last_pos_ts = d.get("bin_last_pos_ts")
+        if bin_last_pos_ts:
+            for i, ts in enumerate(bin_last_pos_ts):
+                if i < N_BINS:
+                    obj._bin_last_pos_ts[i] = float(ts)
+        neg_events = d.get("neg_events")
+        if neg_events:
+            for i, evs in enumerate(neg_events):
+                if i < N_BINS:
+                    obj._neg_events[i] = [(float(r), float(ts)) for r, ts in evs]
         return obj
 
     def save_to_file(self, path: str) -> None:
