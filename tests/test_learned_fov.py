@@ -33,10 +33,12 @@ def _at_bearing(bearing_deg, range_km, rx_lat=_RX_LAT, rx_lon=_RX_LON):
 
 # ── Schema ───────────────────────────────────────────────────────────────────
 
-class TestSchema3RoundTrip:
-    def test_a_fresh_state_is_schema_3(self):
+class TestSchemaRoundTrip:
+    # The exact schema number is pinned (with the bump-rationale ledger) in
+    # test_coverage_binning.py; here only currency matters.
+    def test_a_fresh_state_is_current_schema(self):
         ec = EmpiricalCoverageState(rx_lat=_RX_LAT, rx_lon=_RX_LON)
-        assert ec.schema == CALIBRATION_SCHEMA == 3
+        assert ec.schema == CALIBRATION_SCHEMA
 
     def test_prior_and_learned_fields_survive_to_dict_from_dict(self):
         ec = EmpiricalCoverageState(
@@ -49,10 +51,10 @@ class TestSchema3RoundTrip:
             ec.record_disappearance(*_at_bearing(200.0, 15.0), ts=2000.0 + dt)
 
         d = ec.to_dict()
-        assert d["schema"] == 3
+        assert d["schema"] == CALIBRATION_SCHEMA
         restored = EmpiricalCoverageState.from_dict(d)
 
-        assert restored.schema == 3
+        assert restored.schema == CALIBRATION_SCHEMA
         assert restored.prior_azimuth_deg == 90.0
         assert restored.prior_width_deg == 40.0
         assert restored.n_points == ec.n_points

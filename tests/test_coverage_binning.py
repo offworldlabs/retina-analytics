@@ -95,8 +95,14 @@ class TestPersistedStateIsNotDiscarded:
         bump this test exists to make explicit: priors, per-bin positive
         timestamps and negative events changed what a persisted state MEANS,
         so silently reinterpreting v2 files was the wrong option and the
-        one-time discard was accepted on purpose."""
-        assert CALIBRATION_SCHEMA == 3
+        one-time discard was accepted on purpose.
+
+        Schema 4 (the detection-backed calibration round): v3 positives were
+        track-fed — coasting emits and published-solve attribution — so a v3
+        polygon is shaped partly by ghost feedback and departure paths.  The
+        recorders changed what a positive MEANS; the accumulated state
+        cannot be repaired in place, only relearned."""
+        assert CALIBRATION_SCHEMA == 4
 
     def test_persisted_bins_carry_no_positions_to_rebin(self):
         s = _state()

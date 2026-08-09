@@ -85,11 +85,20 @@ OBSERVED_LIMIT_MARGIN = 1.25
 #      evidence it actually carried — auto-discarding it at register is a
 #      clean migration with no operator action, the same reasoning v1->v2
 #      used.
+#   4: positives are detection-backed, not track-backed.  v3 recorders
+#      stamped positives for tracks coasting on ADS-B enrichment (up to 15 s
+#      past the last real detection, painting every departure path) and for
+#      every node contributing to a published solve (so a ghost publish
+#      tagged with a real hex opened bins at another aircraft's position —
+#      under an active FOV gate, a feedback loop; staging 2026-08-09 opened
+#      out-of-wedge bins on 15/29 synthetic nodes in ~25 min).  A v3 polygon
+#      is therefore shaped partly by places the node never detected anything
+#      and cannot be repaired in place.
 #
 # Production and staging mount coverage_data as a named volume that survives
 # rebuilds, so without this a stale-schema polygon would be served indefinitely
 # with no operator action to prompt it.
-CALIBRATION_SCHEMA = 3
+CALIBRATION_SCHEMA = 4
 
 # ── Learned FOV (FOV_MODE shadow/active) ────────────────────────────────────
 #
