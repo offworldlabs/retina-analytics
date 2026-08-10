@@ -83,6 +83,23 @@ CLAIM_ELIGIBLE_MIN_SOLVE_COUNT = 2
 # regardless of how many are live.  See _claim_round's cost comment.
 CLAIM_MAX_GLOBAL_TRACKS = 200
 
+# ADS-B seeding (ADSB_SEED_MODE) — see _adsb_seed_round.  Same predicted-vs-
+# measured shape as the CLAIM_* gates above: trust the node's own tag, but
+# verify it against geometry before it can pull a tracklet out of dark
+# solving.  Values match CLAIM_DELAY_GATE_US / CLAIM_DOPPLER_GATE_HZ — the
+# comparison is the identical "measurement vs. dead-reckoned published
+# position" shape, just sourced from a live ADS-B fix instead of a solved
+# global track.
+ADSB_SEED_DELAY_GATE_US = 10.0
+ADSB_SEED_DOPPLER_GATE_HZ = 25.0
+# Maximum |age| between the tracklet's newest epoch and the ADS-B fix,
+# dead-reckoned across the gap in EITHER direction — unlike
+# CLAIM_MAX_DR_AGE_S (a published dark solve, always behind the tracklet),
+# a live ADS-B fix is usually *fresher* than the newest tracklet epoch:
+# synthetic nodes frame at ~40 s, so the fix routinely leads.  45 s covers
+# one frame interval plus margin.
+ADSB_SEED_MAX_DR_AGE_S = 45.0
+
 
 # ── Geometry helpers ─────────────────────────────────────────────────────────
 #
@@ -367,6 +384,93 @@ def predict_observation(geo: NodeGeometry, lat: float, lon: float, alt_km: float
     v_dot_b = vel_east_ms * b[0] + vel_north_ms * b[1] + vel_up_ms * b[2]
     doppler_hz = v_dot_b * geo.fc_hz / (C_KM_S * 1000.0)
     return delay_us, doppler_hz
+
+
+def associate_detections_to_adsb(
+    geo: NodeGeometry,
+    delays_us: list, dopplers_hz: list,
+    adsb_states: dict[str, dict],
+    frame_ts_ms: int, *,
+    delay_gate_us: float = ADSB_SEED_DELAY_GATE_US,
+    doppler_gate_hz: float = ADSB_SEED_DOPPLER_GATE_HZ,
+    max_age_s: float = ADSB_SEED_MAX_DR_AGE_S,
+) -> list | None:
+    """Backend-side ADS-B correlation for a node with no receiver of its own.
+
+    Builds the index-aligned per-detection adsb list a real node's own
+    correlation would attach to frame["adsb"] — {hex, lat, lon, alt_baro,
+    gs, track, flight} or None per detection index — from the region's
+    ADS-B picture instead.
+
+    Returns None when nothing could be produced: no state is fresh enough
+    (abs(frame_ts - fix_ts) <= max_age_s) to dead-reckon, or none of the
+    fresh ones gates against any detection.  None is load-bearing — it means
+    "no ADS-B capability exercised this frame", distinct from an assigned
+    empty list, and the caller (process_one_frame) must never overwrite a
+    node-supplied list with it and must leave the frame untouched when it
+    sees one.
+
+    Per fresh state: dead-reckon to frame_ts_ms, predict_observation,
+    residual against every detection, gate, score with the same
+    d_res/gate + f_res/gate formula _adsb_seed_round uses.  Assignment is
+    global greedy one-to-one — every surviving (detection, hex) pair sorted
+    by score ascending, assigned first-come so neither a detection nor a
+    hex is claimed twice.  Attaches the state's REPORTED lat/lon (not the
+    dead-reckoned position), matching what a real node attaches.
+    """
+    if not delays_us:
+        return None
+
+    frame_ts_s = frame_ts_ms / 1000.0
+    fresh = {
+        h: st for h, st in adsb_states.items()
+        if st.get("lat") is not None and st.get("lon") is not None
+        and abs(frame_ts_s - st.get("timestamp_ms", 0) / 1000.0) <= max_age_s
+    }
+    if not fresh:
+        return None
+
+    candidates = []
+    for hexn, st in fresh.items():
+        dt = frame_ts_s - st.get("timestamp_ms", 0) / 1000.0
+        dr_lat, dr_lon = offset_latlon_m(
+            st["lat"], st["lon"],
+            east_m=st.get("vel_east", 0.0) * dt,
+            north_m=st.get("vel_north", 0.0) * dt,
+        )
+        pred_delay, pred_doppler = predict_observation(
+            geo, dr_lat, dr_lon, st.get("alt_m", 0.0) / 1000.0,
+            st.get("vel_east", 0.0), st.get("vel_north", 0.0),
+        )
+        for i, (d, f) in enumerate(zip(delays_us, dopplers_hz)):
+            d_res = abs(pred_delay - float(d))
+            f_res = abs(pred_doppler - float(f))
+            if d_res > delay_gate_us or f_res > doppler_gate_hz:
+                continue
+            candidates.append(
+                (d_res / delay_gate_us + f_res / doppler_gate_hz, i, hexn, st)
+            )
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda c: c[0])
+    assigned_det: set = set()
+    assigned_hex: set = set()
+    out: list = [None] * len(delays_us)
+    for _score, i, hexn, st in candidates:
+        if i in assigned_det or hexn in assigned_hex:
+            continue
+        assigned_det.add(i)
+        assigned_hex.add(hexn)
+        out[i] = {
+            "hex": hexn,
+            "lat": st["lat"], "lon": st["lon"],
+            "alt_baro": st.get("alt_baro"),
+            "gs": st.get("gs"),
+            "track": st.get("track"),
+            "flight": st.get("flight"),
+        }
+    return out
 
 
 def claim_eligible(track: dict) -> bool:
@@ -665,10 +769,16 @@ class AssociationRound:
     claims carries per-claim debug records ({anchor_key, node_id, track_id,
     d_res_us, f_res_hz, dr_age_s, won}) regardless of mode, for the shadow
     DEBUG log and tests — it is never filtered by mode.
+    adsb_inputs is the ADS-B seeding stage's output (ADSB_SEED_MODE) — same
+    solver-input shape as anchored_inputs but carrying a non-None adsb_hex
+    and no anchor_key; empty unless adsb_seed_mode != "off" and a provider
+    is set, and additionally forced empty in shadow mode (see
+    submit_tracks_round).
     """
     pairs: list = field(default_factory=list)
     anchored_inputs: list = field(default_factory=list)
     claims: list = field(default_factory=list)
+    adsb_inputs: list = field(default_factory=list)
 
 
 # ── InterNodeAssociator ──────────────────────────────────────────────────────
@@ -691,7 +801,12 @@ class InterNodeAssociator:
                  claim_delay_gate_us: float = CLAIM_DELAY_GATE_US,
                  claim_doppler_gate_hz: float = CLAIM_DOPPLER_GATE_HZ,
                  claim_max_dr_age_s: float = CLAIM_MAX_DR_AGE_S,
-                 global_track_provider=None):
+                 global_track_provider=None,
+                 adsb_seed_mode: str = "off",
+                 adsb_seed_delay_gate_us: float = ADSB_SEED_DELAY_GATE_US,
+                 adsb_seed_doppler_gate_hz: float = ADSB_SEED_DOPPLER_GATE_HZ,
+                 adsb_seed_max_dr_age_s: float = ADSB_SEED_MAX_DR_AGE_S,
+                 adsb_provider=None):
         self.delay_gate_us = delay_gate_us
         self.doppler_gate_hz = doppler_gate_hz
         self.grid_step_km = grid_step_km
@@ -879,6 +994,37 @@ class InterNodeAssociator:
         self.anchored_inputs_emitted: int = 0
         self.tracklets_excluded: int = 0
 
+        # ── ADS-B seeding (ADSB_SEED_MODE) ─────────────────────────────────
+        # off/shadow/active, ASSOC_CLAIM_MODE precedent — an unrecognised
+        # value falls back to "off" rather than raising.
+        self.adsb_seed_mode: str = (
+            adsb_seed_mode if adsb_seed_mode in ("off", "shadow", "active")
+            else "off"
+        )
+        self.adsb_seed_delay_gate_us = adsb_seed_delay_gate_us
+        self.adsb_seed_doppler_gate_hz = adsb_seed_doppler_gate_hz
+        self.adsb_seed_max_dr_age_s = adsb_seed_max_dr_age_s
+        # Injected the same way cv_fit/global_track_provider are: this
+        # library keeps knowing nothing about state.adsb_aircraft.  Provider
+        # contract — a callable returning dict[str, dict] keyed by
+        # LOWERCASE ICAO hex, each value:
+        #   {hex, lat, lon, alt_m, vel_east, vel_north, timestamp_ms,
+        #    alt_baro, gs, track, flight}
+        # (alt_m metres, vel_* m/s, timestamp_ms epoch ms of the fix;
+        # alt_baro/gs/track/flight are the raw feed fields, carried so
+        # associate_detections_to_adsb can attach entries in the same shape
+        # nodes themselves report.)  The provider stays a dumb snapshot —
+        # the LIB applies freshness and gating, so the offline bench
+        # measures shipped filtering.
+        self.adsb_provider = adsb_provider
+        # Counters — plain += like the claiming ones above.
+        self.adsb_seed_rounds: int = 0
+        self.adsb_tracklets_tagged: int = 0
+        self.adsb_seed_no_state: int = 0
+        self.adsb_seed_gate_rejects: int = 0
+        self.adsb_tracklets_excluded: int = 0
+        self.adsb_inputs_emitted: int = 0
+
     def register_node(self, node_id: str, config: dict):
         """Register a node and pre-compute overlap zones with all existing nodes.
 
@@ -975,6 +1121,9 @@ class InterNodeAssociator:
                 "track_pairs_superseded", "track_pairs_deferred",
                 "claim_rounds", "claims_matched", "claim_conflicts",
                 "anchored_inputs_emitted", "tracklets_excluded",
+                "adsb_seed_rounds", "adsb_tracklets_tagged",
+                "adsb_seed_no_state", "adsb_seed_gate_rejects",
+                "adsb_tracklets_excluded", "adsb_inputs_emitted",
             ):
                 setattr(self, name, 0)
 
@@ -1052,8 +1201,172 @@ class InterNodeAssociator:
                 rebuilt += 1
         return rebuilt
 
+    def _adsb_seed_round(self, node_id: str, tracks: list[dict],
+                         neighbor_ids: list[str], timestamp_ms: int
+                         ) -> tuple[dict[str, set], list[dict]]:
+        """Verify each round-node tracklet's own ADS-B tag against geometry,
+        then group verified tracklets by hex into same-aircraft seeded
+        solver inputs.
+
+        Returns (tagged_ids_by_node, adsb_inputs).  Round-node assembly is
+        identical to _claim_round's: the triggering node's `tracks` plus
+        registered neighbours' `_pending_tracks` snapshots — a tag is
+        verified in exactly the same node-local geometry a claim is.
+
+        Fail-open throughout: a missing/stale ADS-B fix or a residual
+        outside gate leaves the tracklet untouched (not tagged, not
+        grouped) rather than trusting the node's tag on faith — trusting it
+        unverified is exactly the failure mode this stage exists to catch
+        (a stale or swapped tag pulling a dark target out of solving).
+        """
+        states = self.adsb_provider()
+        if not states:
+            return {}, []
+
+        _norm_hex = lambda h: (h or "").strip().lower()  # noqa: E731 — local helper
+
+        round_nodes: dict[str, list[dict]] = {}
+        if node_id in self.node_geometries:
+            round_nodes[node_id] = tracks
+        for nid in neighbor_ids:
+            if nid in self.node_geometries:
+                round_nodes[nid] = self._pending_tracks.get(nid) or []
+
+        # Best-scoring match per (hex, node_id) — step 4: two tracklets at
+        # one node both verifying against the same hex, the loser is NOT
+        # tagged (it may be a coincidentally-gating distinct target).
+        best_by_hex_node: dict[tuple, dict] = {}
+
+        for nid, views in round_nodes.items():
+            geo = self.node_geometries[nid]
+            for view in views:
+                raw_hex = view.get("adsb_hex")
+                if not raw_hex:
+                    continue
+                self.adsb_tracklets_tagged += 1
+                hist = view.get("history")
+                if not hist:
+                    # Mirrors _claim_round's silent guard — confirmed views
+                    # always carry history, this is defensive only.
+                    continue
+                last = hist[-1]
+                hexn = _norm_hex(raw_hex)
+                st = states.get(hexn)
+                if st is None or st.get("lat") is None or st.get("lon") is None:
+                    self.adsb_seed_no_state += 1
+                    continue
+                dt = float(last["t_s"]) - st.get("timestamp_ms", 0) / 1000.0
+                if abs(dt) > self.adsb_seed_max_dr_age_s:
+                    self.adsb_seed_no_state += 1
+                    continue
+
+                dr_lat, dr_lon = offset_latlon_m(
+                    st["lat"], st["lon"],
+                    east_m=st.get("vel_east", 0.0) * dt,
+                    north_m=st.get("vel_north", 0.0) * dt,
+                )
+                pred_delay, pred_doppler = predict_observation(
+                    geo, dr_lat, dr_lon, st.get("alt_m", 0.0) / 1000.0,
+                    st.get("vel_east", 0.0), st.get("vel_north", 0.0),
+                )
+                d_res = abs(pred_delay - float(last["delay_us"]))
+                f_res = abs(pred_doppler - float(last["doppler_hz"]))
+                if (d_res > self.adsb_seed_delay_gate_us
+                        or f_res > self.adsb_seed_doppler_gate_hz):
+                    self.adsb_seed_gate_rejects += 1
+                    continue
+
+                rec = {
+                    "node_id": nid, "track_id": str(view.get("track_id")),
+                    "hist": hist, "last": last, "_st": st,
+                    "score": (d_res / self.adsb_seed_delay_gate_us
+                              + f_res / self.adsb_seed_doppler_gate_hz),
+                }
+                key = (hexn, nid)
+                cur = best_by_hex_node.get(key)
+                if cur is None or rec["score"] < cur["score"]:
+                    best_by_hex_node[key] = rec
+
+        # Every surviving (hex, node) match is tagged — including
+        # single-node hexes.  Exclusion is deliberate even when no seeded
+        # input can form: a verified lit tracklet's lit-dark cross-pairings
+        # are exactly the ghosts this stage removes, and the aircraft
+        # itself stays displayed via the live ADS-B feed.
+        tagged_ids_by_node: dict[str, set] = defaultdict(set)
+        matches_by_hex: dict[str, list[dict]] = defaultdict(list)
+        for (hexn, nid), rec in best_by_hex_node.items():
+            tagged_ids_by_node[nid].add(rec["track_id"])
+            matches_by_hex[hexn].append(rec)
+
+        # Seeded input per hex with >= 2 matched nodes AND the triggering
+        # node among them — same emission-dedup rule as anchored inputs
+        # (see _claim_round).
+        adsb_inputs: list[dict] = []
+        for hexn, matches in matches_by_hex.items():
+            matched_node_ids = {m["node_id"] for m in matches}
+            if len(matched_node_ids) < 2 or node_id not in matched_node_ids:
+                continue
+            newest = max(matches, key=lambda m: float(m["last"]["t_s"]))
+            st = newest["_st"]
+            dt_newest = (float(newest["last"]["t_s"])
+                        - st.get("timestamp_ms", 0) / 1000.0)
+            guess_lat, guess_lon = offset_latlon_m(
+                st["lat"], st["lon"],
+                east_m=st.get("vel_east", 0.0) * dt_newest,
+                north_m=st.get("vel_north", 0.0) * dt_newest,
+            )
+            cv_epochs = _merge_epochs_multi(
+                [(m["node_id"], m["hist"]) for m in matches]
+            )
+            by_snr = sorted(
+                matches, key=lambda m: float(m["last"].get("snr", 0.0)),
+                reverse=True,
+            )
+            track_ids_by_node: dict[str, list] = defaultdict(list)
+            for m in matches:
+                track_ids_by_node[m["node_id"]].append(m["track_id"])
+
+            adsb_inputs.append({
+                "initial_guess": {
+                    "lat": guess_lat, "lon": guess_lon,
+                    "alt_km": st.get("alt_m", 0.0) / 1000.0,
+                },
+                "initial_velocity": {
+                    "vel_east_ms": st.get("vel_east", 0.0),
+                    "vel_north_ms": st.get("vel_north", 0.0),
+                },
+                "measurements": [
+                    {"node_id": m["node_id"],
+                     "delay_us": float(m["last"]["delay_us"]),
+                     "doppler_hz": float(m["last"]["doppler_hz"]),
+                     "snr": float(m["last"].get("snr", 0.0))}
+                    for m in matches
+                ],
+                "n_nodes": len(matched_node_ids),
+                "timestamp_ms": timestamp_ms,
+                "adsb_hex": hexn,
+                "chi2_per_dof": None,
+                "n_epochs": len(cv_epochs),
+                # REQUIRED, same reason as anchored_inputs: without
+                # cv_epochs an n=2 seeded input dies permanently at the
+                # solver's confirmation gate (_resolve_cv_fit -> None ->
+                # n2_unconfirmed).
+                "cv_epochs": cv_epochs,
+                "track_pair_ids": (
+                    [tuple(sorted([by_snr[0]["track_id"], by_snr[1]["track_id"]]))]
+                    if len(by_snr) >= 2 else []
+                ),
+                "track_ids": sorted({m["track_id"] for m in matches}),
+                "track_ids_by_node": {
+                    nid: sorted(ids) for nid, ids in track_ids_by_node.items()
+                },
+            })
+        self.adsb_inputs_emitted += len(adsb_inputs)
+        return dict(tagged_ids_by_node), adsb_inputs
+
     def _claim_round(self, node_id: str, tracks: list[dict],
-                     neighbor_ids: list[str], timestamp_ms: int
+                     neighbor_ids: list[str], timestamp_ms: int,
+                     exclude_ids_by_node: dict[str, set] | None = None
                      ) -> tuple[dict[str, set], list[dict], list[dict]]:
         """Top-down claiming: project eligible global tracks into this
         round's node set and match them against local tracklet views.
@@ -1062,6 +1375,12 @@ class InterNodeAssociator:
         claimed_ids_by_node maps node_id -> set of track_id claimed at that
         node this round; the caller decides whether that exclusion actually
         applies (active mode only).
+
+        exclude_ids_by_node (node_id -> set of track_id, typically ADS-B
+        seeding's tagged set) removes views from candidacy entirely before
+        any global is tested against them — an already-verified-lit
+        tracklet must never be claimed by a dark global (identity theft),
+        so it produces no claim record at all here, won or lost.
 
         Cost: <= CLAIM_MAX_GLOBAL_TRACKS x (1+|neighbor_ids|) x
         tracklets/node predict_observation calls, each a few dot products —
@@ -1104,6 +1423,9 @@ class InterNodeAssociator:
                 for view in views:
                     hist = view.get("history")
                     if not hist:
+                        continue
+                    if exclude_ids_by_node and str(view.get("track_id")) in (
+                            exclude_ids_by_node.get(nid) or ()):
                         continue
                     last = hist[-1]
                     dt = float(last["t_s"]) - g_ts_s
@@ -1313,6 +1635,29 @@ class InterNodeAssociator:
             # also ran out in the same round.
             self._neighbor_cursor[node_id] = (start + cap) % n_total
 
+        # ADS-B seeding rides this same round, and runs BEFORE claiming: its
+        # tagged set is what keeps a dark global from claiming an already
+        # verified-lit tracklet below.  Always computed and counted when a
+        # mode is configured and a provider is set, same shadow discipline
+        # as claiming — inertness is enforced AFTER counting.
+        adsb_tagged_by_node: dict[str, set] = {}
+        adsb_inputs: list[dict] = []
+        if self.adsb_seed_mode != "off" and self.adsb_provider is not None:
+            self.adsb_seed_rounds += 1
+            adsb_tagged_by_node, adsb_inputs = self._adsb_seed_round(
+                node_id, tracks, visit, timestamp_ms)
+            _logger.debug(
+                "adsb seed round node=%s mode=%s tagged=%d inputs=%d "
+                "gate_rejects=%d",
+                node_id, self.adsb_seed_mode, self.adsb_tracklets_tagged,
+                len(adsb_inputs), self.adsb_seed_gate_rejects,
+            )
+            if self.adsb_seed_mode != "active":
+                # Shadow: computed and counted above, but must not influence
+                # anything downstream — bottom-up exclusion, claiming's
+                # exclude_ids_by_node, and the returned inputs all see {}/[].
+                adsb_tagged_by_node, adsb_inputs = {}, []
+
         # Top-down claiming rides this same round.  Always computed and
         # counted when a mode is configured and a provider is set — shadow's
         # inertness is enforced AFTER counting, not by skipping the work,
@@ -1324,7 +1669,8 @@ class InterNodeAssociator:
         if self.claim_mode != "off" and self.global_track_provider is not None:
             self.claim_rounds += 1
             claimed_by_node, anchored, claim_records = self._claim_round(
-                node_id, tracks, visit, timestamp_ms)
+                node_id, tracks, visit, timestamp_ms,
+                exclude_ids_by_node=adsb_tagged_by_node)
             if claim_records:
                 won = [c for c in claim_records if c["won"]]
                 d_med = f_med = None
@@ -1372,6 +1718,12 @@ class InterNodeAssociator:
                 # resubmits the un-mutated tracker views.
                 tracks_a = self._exclude_claimed(pair_key[0], tracks_a, claimed_by_node)
                 tracks_b = self._exclude_claimed(pair_key[1], tracks_b, claimed_by_node)
+            if adsb_tagged_by_node:
+                # Same blast-radius argument as the claimed-tracklet filter
+                # above: round-local list copies only, _pending_tracks is
+                # never mutated.
+                tracks_a = self._exclude_tagged(pair_key[0], tracks_a, adsb_tagged_by_node)
+                tracks_b = self._exclude_tagged(pair_key[1], tracks_b, adsb_tagged_by_node)
             emitted = self._pair_tracks(zone, tracks_a, tracks_b, timestamp_ms,
                                         budget)
             out.extend(emitted)
@@ -1386,7 +1738,8 @@ class InterNodeAssociator:
                     (start + visit.index(other_id) + 1) % n_total)
                 self.track_pairs_deferred += 1
                 break
-        return AssociationRound(pairs=out, anchored_inputs=anchored, claims=claim_records)
+        return AssociationRound(pairs=out, anchored_inputs=anchored,
+                                claims=claim_records, adsb_inputs=adsb_inputs)
 
     def _exclude_claimed(self, node_for: str, trk_list: list[dict],
                          claimed_by_node: dict[str, set]) -> list[dict]:
@@ -1401,6 +1754,17 @@ class InterNodeAssociator:
             return trk_list
         filtered = [t for t in trk_list if str(t.get("track_id")) not in claimed]
         self.tracklets_excluded += len(trk_list) - len(filtered)
+        return filtered
+
+    def _exclude_tagged(self, node_for: str, trk_list: list[dict],
+                        tagged_by_node: dict[str, set]) -> list[dict]:
+        """Drop this round's ADS-B-verified tracklets from one side of a
+        pairing.  Same body/blast-radius as _exclude_claimed — see there."""
+        tagged = tagged_by_node.get(node_for)
+        if not tagged:
+            return trk_list
+        filtered = [t for t in trk_list if str(t.get("track_id")) not in tagged]
+        self.adsb_tracklets_excluded += len(trk_list) - len(filtered)
         return filtered
 
     def submit_tracks(self, node_id: str, tracks: list[dict],
