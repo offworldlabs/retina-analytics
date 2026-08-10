@@ -59,6 +59,12 @@ class TestSchemaRoundTrip:
         assert restored.prior_width_deg == 40.0
         assert restored.n_points == ec.n_points
         assert restored.fov_digest() == ec.fov_digest()
+        # bin_pos_ts (schema 6) round-trips in lockstep with bins — same
+        # per-bin length, same values, so bin i's k-th range and k-th
+        # timestamp still describe the same positive after the round trip.
+        assert restored._bin_pos_ts == ec._bin_pos_ts
+        for i in range(72):
+            assert len(restored._bin_pos_ts[i]) == len(restored._bins[i])
 
     def test_a_file_without_the_new_fields_reads_back_as_v1(self):
         """A schema-2 file predates prior_azimuth_deg/bin_last_pos_ts/
@@ -72,6 +78,22 @@ class TestSchemaRoundTrip:
         assert restored.prior_azimuth_deg is None
         assert restored._bin_last_pos_ts == [0.0] * 72
         assert restored._neg_events == [[] for _ in range(72)]
+
+    def test_a_v5_shaped_file_with_no_bin_pos_ts_gets_aligned_zero_filled_lists(self):
+        """A schema-5 file predates bin_pos_ts entirely — from_dict must not
+        choke on its absence, and must not leave _bin_pos_ts shorter than
+        _bins: that would break the 1:1 lockstep _bin_open's span rule and
+        add_point's FIFO eviction both rely on.  The discard-at-register
+        happens separately (TestV5DiscardAtRegister below), not here —
+        from_dict on its own must still be safe against any input."""
+        d = {"rx_lat": _RX_LAT, "rx_lon": _RX_LON, "max_range_km": 50.0,
+             "schema": 5, "bins": [[1.0, 2.0, 3.0]] + [[] for _ in range(71)]}
+        restored = EmpiricalCoverageState.from_dict(d)
+        assert restored.schema == 5
+        assert "bin_pos_ts" not in d   # the fixture really is v5-shaped
+        for i in range(72):
+            assert len(restored._bin_pos_ts[i]) == len(restored._bins[i])
+        assert restored._bin_pos_ts[0] == [0.0, 0.0, 0.0]
 
 
 class TestV2DiscardAtRegister:
@@ -105,6 +127,37 @@ class TestV2DiscardAtRegister:
             ec.add_point(_RX_LAT + 0.05 + i * 1e-4, _RX_LON + 0.05)
         m.register_node("N", cfg)
         assert m.empirical_coverages["N"].n_points == 30
+
+
+class TestV5DiscardAtRegister:
+    """Schema 6 (bin_pos_ts + the out-of-wedge open-span rule) discards a v5
+    polygon on the same footing as every prior bump: a v5 file has no
+    per-bin positive timestamps at all, so its bins could never legitimately
+    open an out-of-wedge bin under the new rule — and separately, v5's
+    recorder stamped up to 5 s of post-exit live-fix smear into every bin it
+    touched (staging 2026-08-10, 32/32 directional nodes).  Neither defect
+    is fixable by reinterpreting the stored ranges, so the migration is a
+    clean rebuild, identical in mechanism to TestV2DiscardAtRegister above."""
+
+    def test_a_schema_5_polygon_is_rebuilt_on_registration(self):
+        cfg = dict(rx_lat=_RX_LAT, rx_lon=_RX_LON, tx_lat=_TX_LAT, tx_lon=_TX_LON,
+                  max_range_km=50)
+        m = NodeAnalyticsManager()
+        m.register_node("N", cfg)
+        ec = m.empirical_coverages["N"]
+        for i in range(30):
+            ec.add_point(_RX_LAT + 0.05 + i * 1e-4, _RX_LON + 0.05)
+        assert ec.n_points == 30
+
+        ec.schema = 5   # as if loaded from a pre-bin_pos_ts file
+        m.register_node("N", cfg)   # same RX, same range rule
+
+        assert m.empirical_coverages["N"].n_points == 0
+        assert m.empirical_coverages["N"].schema == CALIBRATION_SCHEMA
+        # Reregistration-preserves-current-schema is already pinned by
+        # TestV2DiscardAtRegister.test_current_schema_survives_reregistration
+        # — the machinery is schema-number-agnostic, so it is not repeated
+        # per bump.
 
 
 # ── Prior resolution (node_beam_params semantics) ────────────────────────────

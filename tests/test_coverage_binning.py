@@ -106,8 +106,17 @@ class TestPersistedStateIsNotDiscarded:
         Schema 5: v4 still trusted track identity — a track swapped onto an
         untagged target kept recording the departed aircraft's position.
         Positives now require the newest associated detection to carry the
-        track's own ADS-B tag."""
-        assert CALIBRATION_SCHEMA == 5
+        track's own ADS-B tag.
+
+        Schema 6: v5 had no per-bin positive timestamps, so an out-of-wedge
+        bin's opening rule could only ever count positives, never check how
+        long they spanned — and v5's recorder stamped the live ADS-B fix for
+        up to 5 s after the node's last real detection ("exit smear"),
+        which a raw count cannot tell apart from a real, sustained pattern.
+        Both are fixed going forward (bin_pos_ts + a span requirement); a v5
+        polygon carries neither the field nor clean evidence, so it is
+        rebuilt, not migrated."""
+        assert CALIBRATION_SCHEMA == 6
 
     def test_persisted_bins_carry_no_positions_to_rebin(self):
         s = _state()

@@ -324,16 +324,24 @@ class NodeAnalyticsManager:
         rep = self.reputations.get(node_id)
         return rep.blocked if rep else False
 
-    def record_calibration_point(self, node_id: str, lat: float, lon: float) -> None:
+    def record_calibration_point(self, node_id: str, lat: float, lon: float,
+                                 ts: float | None = None) -> None:
         """Record a detection at an independently-known target position.
 
         ADS-B only.  Callers used to pass solver output here, which made the
         polygon a picture of what the solver believed rather than of what the
         node can see; see CALIBRATION_SCHEMA.
+
+        ts is when the node detected the target there (wall-clock seconds),
+        not when this call happens to run — it defaults to now for callers
+        with no history to replay, but a caller recording a past detection
+        (e.g. services.calibration, which passes the track's detection
+        timestamp) must supply it so the bin's positive timestamps describe
+        the actual detections, not the recording pass.
         """
         ec = self.empirical_coverages.get(node_id)
         if ec is not None:
-            ec.add_point(lat, lon)
+            ec.add_point(lat, lon, ts=ts)
 
     def record_detection_frame(self, node_id: str, frame: dict):
         if self.is_node_blocked(node_id):

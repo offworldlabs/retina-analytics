@@ -32,10 +32,15 @@ _bin_open / limit_km / contains / wedge_state / fov_digest are a second,
 independent read surface over the same accumulated bins, for FOV_MODE
 shadow/active callers only.  The semantics differ on purpose: the theoretical
 wedge is a PRIOR, not a hard boundary — a bin outside it opens on
-FOV_OPEN_MIN_POINTS positive detections (broaden fast), and the resulting
+FOV_OPEN_MIN_POINTS positive detections spanning at least FOV_OPEN_MIN_SPAN_S
+seconds (broaden fast, but only on a genuine spread of independent passes —
+a raw count cannot tell those from one correlated burst), and the resulting
 limit only ever shrinks on sustained *negative* evidence (a tracked target
 that disappeared while still predicted detectable), never on mere absence of
-traffic.  See record_disappearance / _neg_cap_km.
+traffic.  See record_disappearance / _neg_cap_km.  An out-of-wedge bin that
+does open is limited by its own evidence (P95 x OBSERVED_LIMIT_MARGIN of what
+it actually saw), never by the theoretical reach it sits outside of — see
+limit_km.
 """
 
 import json
@@ -101,11 +106,25 @@ OBSERVED_LIMIT_MARGIN = 1.25
 #      recorded the departed aircraft's live position for as long as it kept
 #      associating, painting contiguous out-of-wedge fans (staging
 #      2026-08-09, post-v4).
+#   6: adds per-bin positive timestamps (bin_pos_ts) that the out-of-wedge
+#      opening-span rule reads (see FOV_OPEN_MIN_SPAN_S / _bin_open) — a v5
+#      file has none of these, so its bins could never legitimately open an
+#      out-of-wedge bin under the new rule, only silently stay closed forever.
+#      And separately, v5's recorder stamped the LIVE ADS-B fix for up to 5 s
+#      after the node's last real detection ("exit smear": both freshness
+#      gates were relative to now, not to the detection event), so v5 bins
+#      are contaminated at the wedge edges — and, near the RX vertex, at
+#      arbitrary bearings, because a few seconds times cruise speed dominates
+#      at short range.  Staging 2026-08-10: 32/32 directional nodes carried
+#      out-of-wedge open bins from this, with lobes reaching out to 160 km.
+#      Neither defect is repairable in place — the contamination is baked
+#      into the stored ranges, and the missing timestamps cannot be
+#      reconstructed after the fact.
 #
 # Production and staging mount coverage_data as a named volume that survives
 # rebuilds, so without this a stale-schema polygon would be served indefinitely
 # with no operator action to prompt it.
-CALIBRATION_SCHEMA = 5
+CALIBRATION_SCHEMA = 6
 
 # ── Learned FOV (FOV_MODE shadow/active) ────────────────────────────────────
 #
@@ -115,6 +134,22 @@ CALIBRATION_SCHEMA = 5
 # mis-matched ADS-B hex (wrong-aircraft correlation) open a bin permanently;
 # 3 independent detections at the same bearing is a real pattern.
 FOV_OPEN_MIN_POINTS = 3
+
+# Wall-clock span the FOV_OPEN_MIN_POINTS positives (bin ± 1) must cover
+# before they may open a bin outside the theoretical wedge.  A raw count
+# cannot certify independence: one pass is a few correlated points from a
+# single aircraft, seconds apart, and the recorder stamps one point per
+# emit cycle — so is an exit smear, the live ADS-B fix recorded for a few
+# seconds after the node actually lost the target (see
+# CAL_FIX_DETECTION_SKEW_S / backend/services/calibration.py, which bounds
+# that at the source but does not make a count-only rule safe on its own).
+# A bearing genuinely inside the node's FOV sees traffic across separate
+# passes minutes apart, not one burst — so requiring the pool to SPAN this
+# long is what a single pass cannot fake.  Half of FOV_NEG_MIN_SPAN_S (the
+# negative-evidence span, 600 s): broadening on real evidence should stay
+# easier than shrinking, the same asymmetry FOV_OPEN_MIN_POINTS itself
+# encodes against the shrink-only prior's higher floor.
+FOV_OPEN_MIN_SPAN_S = 300.0
 
 # Percentile used for the learned-FOV range extension.  P85 (the shrink-only
 # prior's percentile) exists to be robust to a handful of outliers when the
@@ -240,6 +275,13 @@ class EmpiricalCoverageState:
         self.prior_width_deg = prior_width_deg
         # Per-bin list of observed ranges (km).  List, not array — no numpy dep.
         self._bins: list[list[float]] = [[] for _ in range(N_BINS)]
+        # Per-bin list of the wall-clock time each range in self._bins was
+        # recorded at — kept in 1:1 lockstep with _bins (same append, same
+        # FIFO eviction) so bin i's k-th range and k-th timestamp describe
+        # the same positive.  Exists for _bin_open's out-of-wedge span rule
+        # (FOV_OPEN_MIN_SPAN_S), which needs to know not just how many
+        # positives a bin ± 1 pooled, but how long they were spread across.
+        self._bin_pos_ts: list[list[float]] = [[] for _ in range(N_BINS)]
         # Per-bin wall-clock time of the last accepted positive (add_point).
         # Negative events older than this are superseded — see _neg_cap_km.
         self._bin_last_pos_ts: list[float] = [0.0] * N_BINS
@@ -285,7 +327,11 @@ class EmpiricalCoverageState:
 
         ts defaults to wall-clock time; the learned-FOV shrink logic
         (_neg_cap_km) needs it to tell whether a positive supersedes an
-        earlier disappearance, so callers replaying history may supply it.
+        earlier disappearance, and the out-of-wedge open-span rule
+        (_bin_open / FOV_OPEN_MIN_SPAN_S) needs it to tell a genuine spread
+        of passes from one correlated burst — so callers replaying history
+        must supply the time the point was actually detected, not the time
+        this call happens to run.
         """
         bearing, range_km = _bearing_and_range(self.rx_lat, self.rx_lon, lat, lon)
         if range_km < 0.5:
@@ -293,11 +339,15 @@ class EmpiricalCoverageState:
         if range_km > self._reach_at(bearing) * self._admit_mult():
             return  # implausibly far — mis-attributed detection
         i = _bin_for_bearing(bearing)
+        t = ts if ts is not None else time.time()
         b = self._bins[i]
         b.append(range_km)
+        bt = self._bin_pos_ts[i]
+        bt.append(t)
         if len(b) > _MAX_PER_BIN:
             del b[0]  # drop oldest
-        self._bin_last_pos_ts[i] = ts if ts is not None else time.time()
+            del bt[0]  # kept in lockstep with b — see _bin_pos_ts
+        self._bin_last_pos_ts[i] = t
         self._max_limit_cache = None
 
     def record_disappearance(self, lat: float, lon: float, ts: float | None = None) -> bool:
@@ -352,16 +402,38 @@ class EmpiricalCoverageState:
         """Is bin i part of the node's admitted learned FOV?
 
         True inside the theoretical wedge (or under an omni prior — see
-        _in_theoretical_wedge), OR when positives at bin i and its two
-        neighbours reach FOV_OPEN_MIN_POINTS.  The neighbour widening mirrors
-        observed_limit_km's — bins are 5° wide, so a detection just inside a
-        boundary is filed one bin over from where a query at the boundary
-        reads it.
+        _in_theoretical_wedge).  Outside it, opening additionally requires
+        the pooled bin ± 1 positives to SPAN at least FOV_OPEN_MIN_SPAN_S
+        seconds, on top of the existing FOV_OPEN_MIN_POINTS count.  The
+        neighbour widening mirrors observed_limit_km's — bins are 5° wide,
+        so a detection just inside a boundary is filed one bin over from
+        where a query at the boundary reads it.
+
+        The span requirement exists because a raw count cannot tell a real
+        pattern from a single correlated burst: one pass of an aircraft is a
+        few points a couple of seconds apart, and the recorder stamps one
+        point per ~1 s emit cycle — worse, an exit smear (the live ADS-B fix
+        recorded for a few seconds after the node actually lost the target,
+        see CAL_FIX_DETECTION_SKEW_S) produces exactly FOV_OPEN_MIN_POINTS-ish
+        positives clustered in the same handful of seconds, at the wedge edge
+        or — near the RX vertex, where a short displacement is a huge bearing
+        swing — at an arbitrary bearing.  A bearing genuinely inside the
+        node's FOV instead sees separate passes minutes apart, which the
+        count alone cannot distinguish from one lucky burst but the span can.
+
+        This keeps the bin's openness time-independent in the sense that
+        matters for _max_limit_cache: the span is computed from stored
+        timestamps that only change on add_point/record_disappearance, so a
+        bin never flips open or closed from mere passage of wall-clock time
+        between calls — add_point and record_disappearance remain the only
+        two things that can invalidate the cache.
         """
         if self._in_theoretical_wedge(i):
             return True
-        pos = sum(len(self._bins[(i + off) % N_BINS]) for off in (-1, 0, 1))
-        return pos >= FOV_OPEN_MIN_POINTS
+        ts_pool = [t for off in (-1, 0, 1) for t in self._bin_pos_ts[(i + off) % N_BINS]]
+        if len(ts_pool) < FOV_OPEN_MIN_POINTS:
+            return False
+        return max(ts_pool) - min(ts_pool) >= FOV_OPEN_MIN_SPAN_S
 
     def _neg_cap_km(self, i: int) -> float | None:
         """Negative-evidence range cap for bin i, or None if none applies.
@@ -391,14 +463,36 @@ class EmpiricalCoverageState:
         """How far the learned FOV reaches on this bearing (km).
 
         0.0 when the bin is not open (_bin_open) — closed, not merely
-        unconstrained.  Otherwise the theoretical reach, widened past it once
-        the bin itself (not neighbours — the extension is a claim about THIS
-        bin's own detections) accumulates >= _MIN_BIN_POINTS_TO_CONSTRAIN
-        positives, to P95 x OBSERVED_LIMIT_MARGIN if that exceeds the
-        theoretical value.  An active negative cap (_neg_cap_km) narrows the
-        result afterward — the ONLY thing that ever pulls this below the
-        theoretical reach: absence never shrinks, only a tracked target that
-        disappeared while still predicted detectable does.
+        unconstrained.
+
+        Otherwise the asymmetry between inside and outside the theoretical
+        wedge is deliberate, and opposite in direction to _bin_open's:
+        inside the wedge the theoretical prior is TRUSTED, so the bin gets
+        the full theoretical reach, extended past it once the bin itself
+        (not neighbours — the extension is a claim about THIS bin's own
+        detections) accumulates >= _MIN_BIN_POINTS_TO_CONSTRAIN positives, to
+        P95 x OBSERVED_LIMIT_MARGIN if that exceeds the theoretical value.
+
+        Outside the wedge the prior has already said "no" — that is what
+        made the bin closed by default — so an open out-of-wedge bin does
+        NOT inherit the theoretical reach at all; its limit is an evidence
+        claim only, capped at P95 x OBSERVED_LIMIT_MARGIN of the ranges that
+        actually justify it: the bin's own, once it reaches
+        _MIN_BIN_POINTS_TO_CONSTRAIN, else the pooled bin ± 1 ranges — the
+        same pool _bin_open used to decide the bin may open at all.  The
+        margin exists for the same reason it does in-wedge: cooperative
+        traffic under-flies the true edge, so the furthest observed return is
+        a lower bound on reach, not an upper one.  Before this, an open
+        out-of-wedge bin was granted the FULL theoretical _reach_at instead —
+        so 3 near-RX exit-smear points at ~1 km, opened on nothing but a
+        single aircraft's departure, could draw and gate a 20-160 km lobe
+        nowhere near anything the node had actually shown to detect.
+
+        An active negative cap (_neg_cap_km) narrows either result
+        afterward, applied last via min() — the ONLY thing that ever pulls
+        an in-wedge limit below the theoretical reach: absence never
+        shrinks, only a tracked target that disappeared while still
+        predicted detectable does.
         """
         i = _bin_for_bearing(bearing_deg_ % 360.0)
         if not self._bin_open(i):
@@ -407,10 +501,25 @@ class EmpiricalCoverageState:
         # and the centre is the representative bearing for the ellipse —
         # to_polygon samples the same way.
         bearing_i = (i + 0.5) * _DEG_PER_BIN
-        reach = self._reach_at(bearing_i)
         b = self._bins[i]
-        if len(b) >= _MIN_BIN_POINTS_TO_CONSTRAIN:
-            reach = max(reach, _percentile(b, FOV_EXTEND_PCTL) * OBSERVED_LIMIT_MARGIN)
+        if self._in_theoretical_wedge(i):
+            reach = self._reach_at(bearing_i)
+            if len(b) >= _MIN_BIN_POINTS_TO_CONSTRAIN:
+                reach = max(reach, _percentile(b, FOV_EXTEND_PCTL) * OBSERVED_LIMIT_MARGIN)
+        else:
+            # No theoretical grant here — the bin opened on evidence alone,
+            # so it reaches only as far as that evidence says, never the
+            # theoretical wedge it sits outside of.
+            if len(b) >= _MIN_BIN_POINTS_TO_CONSTRAIN:
+                evidence = b
+            else:
+                evidence = [r for off in (-1, 0, 1) for r in self._bins[(i + off) % N_BINS]]
+            if not evidence:
+                # _bin_open pooled bin ± 1 timestamps to open this bin, so an
+                # empty ranges pool here would mean the two lists drifted out
+                # of lockstep — defensive, not expected in practice.
+                return 0.0
+            reach = _percentile(evidence, FOV_EXTEND_PCTL) * OBSERVED_LIMIT_MARGIN
         cap = self._neg_cap_km(i)
         if cap is not None:
             reach = min(reach, cap)
@@ -698,6 +807,7 @@ class EmpiricalCoverageState:
             "prior_azimuth_deg": self.prior_azimuth_deg,
             "prior_width_deg": self.prior_width_deg,
             "bins": [b[:] for b in self._bins],
+            "bin_pos_ts": [t[:] for t in self._bin_pos_ts],
             "bin_last_pos_ts": list(self._bin_last_pos_ts),
             "neg_events": [[list(ev) for ev in evs] for evs in self._neg_events],
         }
@@ -720,6 +830,26 @@ class EmpiricalCoverageState:
         for i, b in enumerate(d.get("bins", [])):
             if i < N_BINS:
                 obj._bins[i] = list(b)
+        bin_pos_ts = d.get("bin_pos_ts")
+        if bin_pos_ts:
+            for i, ts_list in enumerate(bin_pos_ts):
+                if i < N_BINS:
+                    obj._bin_pos_ts[i] = [float(t) for t in ts_list]
+        # The schema discard at registration (register_node) makes loading a
+        # pre-v6 file moot in production — a v5 file has no bin_pos_ts at
+        # all and gets rebuilt from scratch instead of read.  But from_dict
+        # itself must still be safe against any input, so pad/truncate each
+        # bin's timestamp list to exactly match its range list: short (a
+        # missing field, or a field that predates a range) is zero-filled,
+        # long is dropped.  Anything else would break the 1:1 lockstep
+        # _bin_open's span rule and add_point's FIFO eviction both rely on.
+        for i in range(N_BINS):
+            n = len(obj._bins[i])
+            ts_list = obj._bin_pos_ts[i]
+            if len(ts_list) < n:
+                ts_list.extend([0.0] * (n - len(ts_list)))
+            elif len(ts_list) > n:
+                del ts_list[n:]
         bin_last_pos_ts = d.get("bin_last_pos_ts")
         if bin_last_pos_ts:
             for i, ts in enumerate(bin_last_pos_ts):

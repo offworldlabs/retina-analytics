@@ -26,6 +26,7 @@ from retina_analytics.association import (
 from retina_analytics.constants import bistatic_range_limit_km
 from retina_analytics.empirical_coverage import (
     FOV_OPEN_MIN_POINTS,
+    FOV_OPEN_MIN_SPAN_S,
     OBSERVED_LIMIT_MARGIN,
     EmpiricalCoverageState,
     _MIN_BIN_POINTS_TO_CONSTRAIN,
@@ -175,14 +176,40 @@ class TestAsymmetricLearning:
             ec.add_point(*_at_bearing(92.5, 5.0))   # short detections only
         assert ec.limit_km(92.5) == pytest.approx(theoretical)
 
-    def test_an_out_of_wedge_bin_opens_at_fov_open_min_points(self):
+    def test_an_out_of_wedge_bin_opens_at_fov_open_min_points_spanning_min_span_s(self):
+        """Both conditions are required: the count floor (K=3, a single
+        mis-matched hex should not open a bin permanently) AND the span floor
+        (>= FOV_OPEN_MIN_SPAN_S, so the count floor cannot be satisfied by
+        one correlated burst — see test_a_single_pass_does_not_open_a_bin)."""
         ec = _state()
         ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0   # narrow wedge, north
+        t0 = 1_000_000.0
         assert ec.wedge_state(180.0) == "closed"
-        for _ in range(FOV_OPEN_MIN_POINTS - 1):
-            ec.add_point(*_at_bearing(180.0, 20.0))
+        for dt in (0.0, FOV_OPEN_MIN_SPAN_S / 2):
+            ec.add_point(*_at_bearing(180.0, 20.0), ts=t0 + dt)
         assert ec.wedge_state(180.0) == "closed"   # one short of K=3
-        ec.add_point(*_at_bearing(180.0, 20.0))
+        ec.add_point(*_at_bearing(180.0, 20.0), ts=t0 + FOV_OPEN_MIN_SPAN_S)
+        assert ec.wedge_state(180.0) != "closed"
+
+    def test_a_single_pass_does_not_open_a_bin(self):
+        """FOV_OPEN_MIN_POINTS positives clustered in a few seconds — one
+        aircraft's pass, or an exit smear's few emit cycles — must not open
+        an out-of-wedge bin no matter how many of them land: the count alone
+        cannot certify independence, only the span can."""
+        ec = _state()
+        ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0
+        t0 = 1_000_000.0
+        for i in range(FOV_OPEN_MIN_POINTS + 5):
+            ec.add_point(*_at_bearing(180.0, 20.0), ts=t0 + i)   # a few seconds apart
+        assert ec.wedge_state(180.0) == "closed"
+
+    def test_the_same_points_spread_over_the_span_floor_do_open_it(self):
+        ec = _state()
+        ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0
+        t0 = 1_000_000.0
+        for i in range(FOV_OPEN_MIN_POINTS + 5):
+            ec.add_point(*_at_bearing(180.0, 20.0),
+                        ts=t0 + i * (FOV_OPEN_MIN_SPAN_S / FOV_OPEN_MIN_POINTS))
         assert ec.wedge_state(180.0) != "closed"
 
     def test_range_extends_past_theoretical_via_p95_times_margin(self):
@@ -253,6 +280,103 @@ class TestAsymmetricLearning:
         assert ec.limit_km(92.5) == pytest.approx(ec._reach_at(92.5))
 
 
+def _mono_state(max_range_km=50.0):
+    """A monostatic state (no TX) — reach_at is a flat max_range_km at every
+    bearing, which keeps the evidence-proportional-limit tests below about
+    the open/evidence machinery, not the bistatic ellipse TestClampFollows
+    TheEllipse already covers.  Admit clamp is 4x (FOV_CLAMP_MULT_MONOSTATIC),
+    so up to 200 km is accepted by add_point/record_disappearance."""
+    return EmpiricalCoverageState(rx_lat=_RX_LAT, rx_lon=_RX_LON, max_range_km=max_range_km)
+
+
+class TestOutOfWedgeEvidenceProportionalLimit:
+    """limit_km's asymmetry, opposite in direction to _bin_open's: inside the
+    wedge the theoretical prior is trusted and evidence may only extend it;
+    outside, the prior already said "no", so an open bin reaches only as far
+    as its own evidence says — never the theoretical reach it sits outside
+    of.  Before this, an open out-of-wedge bin was granted the FULL
+    theoretical _reach_at, which is how 3 near-RX exit-smear points at ~1 km
+    used to draw and gate a 20-160 km lobe (staging 2026-08-10)."""
+
+    def test_regression_in_wedge_bin_keeps_full_theoretical_reach_below_the_constrain_floor(self):
+        """Guards the asymmetry's other half: this is the behaviour the
+        out-of-wedge change must NOT touch."""
+        ec = _state()
+        ec.prior_azimuth_deg, ec.prior_width_deg = 90.0, 40.0
+        theoretical = ec._reach_at(92.5)
+        for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN - 1):
+            ec.add_point(*_at_bearing(92.5, 5.0))   # short, and below the floor
+        assert ec.limit_km(92.5) == pytest.approx(theoretical)
+
+    def test_below_own_bin_floor_the_limit_is_p95_of_the_pooled_bin_pm_1_evidence(self):
+        ec = _mono_state()
+        ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0   # wedge north; 180 is out
+        t0 = 1_000_000.0
+        i = _bin_for_bearing_of(180.0)
+        # Own bin (180 deg): 2 points, short of _MIN_BIN_POINTS_TO_CONSTRAIN.
+        ec.add_point(*_at_bearing(180.0, 15.0), ts=t0)
+        ec.add_point(*_at_bearing(180.0, 15.0), ts=t0 + FOV_OPEN_MIN_SPAN_S)
+        # Neighbour bin (176 deg, bin i-1): makes up the rest of the count
+        # and the span the pool needs to OPEN the bin in the first place.
+        ec.add_point(*_at_bearing(176.0, 40.0), ts=t0)
+        ec.add_point(*_at_bearing(176.0, 40.0), ts=t0 + FOV_OPEN_MIN_SPAN_S / 2)
+        ec.add_point(*_at_bearing(176.0, 40.0), ts=t0 + FOV_OPEN_MIN_SPAN_S)
+        assert ec.wedge_state(180.0) != "closed"
+        assert len(ec._bins[i]) < _MIN_BIN_POINTS_TO_CONSTRAIN
+
+        from retina_analytics.empirical_coverage import N_BINS, _percentile
+        pooled = [r for off in (-1, 0, 1) for r in ec._bins[(i + off) % N_BINS]]
+        expected = _percentile(pooled, 95) * OBSERVED_LIMIT_MARGIN
+        assert ec.limit_km(180.0) == pytest.approx(expected)
+        # And NOT the theoretical reach this bin sits outside of.
+        assert ec.limit_km(180.0) != pytest.approx(ec._reach_at(180.0))
+
+    def test_at_own_bin_floor_the_limit_is_p95_of_only_its_own_evidence(self):
+        """Once the bin's own count reaches _MIN_BIN_POINTS_TO_CONSTRAIN, a
+        neighbour with wildly different ranges must NOT move the limit —
+        the extension (in-wedge) and this evidence claim (out-of-wedge) are
+        both a statement about what THIS bin itself has shown."""
+        ec = _mono_state()
+        ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0
+        t0 = 1_000_000.0
+        i = _bin_for_bearing_of(180.0)
+        own_ranges = [10.0] * (_MIN_BIN_POINTS_TO_CONSTRAIN - 1) + [50.0]
+        for k, r in enumerate(own_ranges):
+            ec.add_point(*_at_bearing(180.0, r),
+                        ts=t0 + k * (FOV_OPEN_MIN_SPAN_S / (len(own_ranges) - 1)))
+        # A neighbour with a much larger (but still admissible) range — must
+        # be excluded once the bin's own evidence clears the floor.
+        ec.add_point(*_at_bearing(176.0, 150.0), ts=t0)
+
+        from retina_analytics.empirical_coverage import _percentile
+        expected = _percentile(own_ranges, 95) * OBSERVED_LIMIT_MARGIN
+        assert ec.limit_km(180.0) == pytest.approx(expected)
+        assert ec.limit_km(180.0) < 150.0 * OBSERVED_LIMIT_MARGIN
+
+    def test_negative_cap_still_applies_to_the_evidence_proportional_limit(self):
+        """The negative cap is the ONLY thing that shrinks a limit_km result
+        below either the theoretical reach (in-wedge) or the evidence claim
+        (out-of-wedge) — it must keep applying in the out-of-wedge branch,
+        as a final min(), same as it always has in-wedge."""
+        from retina_analytics.empirical_coverage import FOV_NEG_MIN_SPAN_S
+
+        ec = _mono_state()
+        ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0
+        t0 = 1_000_000.0
+        for k in range(5):
+            ec.add_point(*_at_bearing(180.0, 15.0),
+                        ts=t0 + k * (FOV_OPEN_MIN_SPAN_S / 4))
+        before = ec.limit_km(180.0)
+        assert before == pytest.approx(15.0 * OBSERVED_LIMIT_MARGIN, rel=0.02)
+
+        neg_t0 = t0 + FOV_OPEN_MIN_SPAN_S + 1000.0   # after the last positive
+        for dt in (0.0, FOV_NEG_MIN_SPAN_S / 2, FOV_NEG_MIN_SPAN_S):
+            ec.record_disappearance(*_at_bearing(180.0, 8.0), ts=neg_t0 + dt)
+        after = ec.limit_km(180.0)
+        assert after < before
+        assert after == pytest.approx(8.0 * 0.95, abs=0.5)
+
+
 class TestDigestMovesOnOpenAndCap:
     """fov_digest() is the change-detection token _refresh_coverage_constraints
     (backend/services/tasks/analytics_refresh.py) compares to decide whether a
@@ -272,8 +396,12 @@ class TestDigestMovesOnOpenAndCap:
         i = _bin_for_bearing_of(180.0)
         before = ec.fov_digest()[i]
         assert before[0] == "closed"
-        for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
-            ec.add_point(*_at_bearing(180.0, 20.0))
+        t0 = 1_000_000.0
+        for k in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
+            # Spread across >= FOV_OPEN_MIN_SPAN_S so the bin actually opens
+            # under the new span rule, not just the count floor.
+            ec.add_point(*_at_bearing(180.0, 20.0),
+                        ts=t0 + k * (FOV_OPEN_MIN_SPAN_S / (_MIN_BIN_POINTS_TO_CONSTRAIN - 1)))
         after = ec.fov_digest()[i]
         assert after != before
         assert after[0] in ("prior", "observed")
@@ -296,8 +424,11 @@ class TestDigestMovesOnOpenAndCap:
         same digest as the one that triggered the save."""
         ec = _state()
         ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0
-        for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
-            ec.add_point(*_at_bearing(180.0, 20.0))
+        t0 = 1_000_000.0
+        for k in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
+            ec.add_point(*_at_bearing(180.0, 20.0),
+                        ts=t0 + k * (FOV_OPEN_MIN_SPAN_S / (_MIN_BIN_POINTS_TO_CONSTRAIN - 1)))
+        assert ec.wedge_state(180.0) != "closed"   # sanity: the bin actually opened
         restored = EmpiricalCoverageState.from_dict(ec.to_dict())
         assert restored.fov_digest() == ec.fov_digest()
 
