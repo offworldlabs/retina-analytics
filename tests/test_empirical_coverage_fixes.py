@@ -16,14 +16,13 @@ import pytest
 from shapely.geometry import Polygon
 
 from retina_analytics.empirical_coverage import (
-    EmpiricalCoverageState,
+    _DEG_PER_BIN,
     MIN_POINTS,
     N_BINS,
-    _DEG_PER_BIN,
+    EmpiricalCoverageState,
     _bearing_and_range,
     _p85,
 )
-
 
 RX_LAT, RX_LON = 33.4484, -112.0740  # Phoenix, AZ
 BEAM_WIDTH_DEG = 43.9

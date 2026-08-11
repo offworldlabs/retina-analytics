@@ -2,7 +2,7 @@
 
 import math
 
-from retina_analytics.constants import haversine_km, R_EARTH
+from retina_analytics.constants import R_EARTH, haversine_km
 from retina_analytics.detection_area import DetectionAreaState
 
 

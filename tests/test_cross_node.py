@@ -2,7 +2,6 @@
 
 import math
 
-
 from retina_analytics.cross_node import (
     _count_covering_nodes,
     _point_in_beam,
@@ -10,7 +9,6 @@ from retina_analytics.cross_node import (
     coverage_suggestion,
 )
 from retina_analytics.detection_area import DetectionAreaState
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

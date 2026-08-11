@@ -5,13 +5,12 @@ import math
 import pytest
 
 from retina_analytics.empirical_coverage import (
-    EmpiricalCoverageState,
     MIN_POINTS,
+    EmpiricalCoverageState,
     _bearing_and_range,
     _bin_for_bearing,
     _p85,
 )
-
 
 # ── Helper functions ──────────────────────────────────────────────────────────
 

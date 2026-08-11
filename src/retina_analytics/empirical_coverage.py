@@ -248,5 +248,5 @@ class EmpiricalCoverageState:
 
     @classmethod
     def load_from_file(cls, path: str) -> "EmpiricalCoverageState":
-        with open(path, "r") as f:
+        with open(path) as f:
             return cls.from_dict(json.load(f))

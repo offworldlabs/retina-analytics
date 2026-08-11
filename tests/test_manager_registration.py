@@ -2,8 +2,8 @@
 
 import os
 
-from retina_analytics.manager import NodeAnalyticsManager
 from retina_analytics.constants import bearing_deg
+from retina_analytics.manager import NodeAnalyticsManager
 
 _RX_LAT, _RX_LON = 32.90, -97.00
 _TX_LAT, _TX_LON = 32.78, -96.80
