@@ -5,7 +5,6 @@ import math
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass
@@ -77,7 +76,7 @@ class HistoricalCoverageMap:
             for cell in self._grid.values()
         ]
 
-    def estimate_beam_width(self) -> Optional[float]:
+    def estimate_beam_width(self) -> float | None:
         if len(self.entries) < 20:
             return None
         lats = [e.lat for e in self.entries]
@@ -135,7 +134,7 @@ class HistoricalCoverageMap:
 
     @classmethod
     def load_from_file(cls, path: str) -> "HistoricalCoverageMap":
-        with open(path, "r") as f:
+        with open(path) as f:
             data = json.load(f)
         cmap = cls(node_id=data["node_id"])
         for e in data.get("entries", []):

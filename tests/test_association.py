@@ -1,9 +1,12 @@
 """Tests for inter-node association logic."""
 
 from retina_analytics.association import (
-    NodeGeometry, compute_overlap_zone, InterNodeAssociator, _bistatic_delay_at, _lla_to_enu,
+    InterNodeAssociator,
+    NodeGeometry,
+    _bistatic_delay_at,
+    _lla_to_enu,
+    compute_overlap_zone,
 )
-
 
 # ── Overlap zone & bistatic delay ────────────────────────────────────────────
 
