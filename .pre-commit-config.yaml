@@ -1,0 +1,10 @@
+# The dead-code gate lives in offworldlabs/ops and is pinned here. Do not
+# vendor it back into this repo. See 86cb417ty.
+#
+# ruff is deliberately still a separate CI step rather than a hook; aligning
+# this repo with claude-shared's ci-python.yml is a separate piece of work.
+repos:
+  - repo: https://github.com/offworldlabs/ops
+    rev: dead-code-v1.0
+    hooks:
+      - id: dead-code
