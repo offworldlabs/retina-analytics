@@ -29,12 +29,13 @@ from retina_analytics.constants import resolve_beam_azimuth_deg
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-C_KM_US = 0.299792458   # speed of light km/μs
-C_KM_S = 299792.458     # speed of light km/s
-R_EARTH = 6371.0         # Earth radius km
+C_KM_US = 0.299792458  # speed of light km/μs
+C_KM_S = 299792.458  # speed of light km/s
+R_EARTH = 6371.0  # Earth radius km
 
 
 # ── Geometry helpers ─────────────────────────────────────────────────────────
+
 
 def _lla_to_enu(lat, lon, alt_km, ref_lat, ref_lon, ref_alt_km):
     dlat = math.radians(lat - ref_lat)
@@ -59,9 +60,7 @@ def _norm(v):
 def _haversine_km(lat1, lon1, lat2, lon2):
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = (math.sin(dlat / 2) ** 2
-         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
-         * math.sin(dlon / 2) ** 2)
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
     return R_EARTH * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
@@ -84,9 +83,11 @@ def _bistatic_delay_at(target_enu, tx_enu, rx_enu=(0, 0, 0)):
 
 # ── Node Pair Configuration ─────────────────────────────────────────────────
 
+
 @dataclass
 class NodeGeometry:
     """Geometry of a single radar node."""
+
     node_id: str
     rx_lat: float
     rx_lon: float
@@ -103,6 +104,7 @@ class NodeGeometry:
 @dataclass
 class OverlapZone:
     """Pre-computed overlap zone between a pair of nodes."""
+
     node_a_id: str
     node_b_id: str
     # Grid points in the overlap region (lat, lon, alt_km)
@@ -110,7 +112,7 @@ class OverlapZone:
     # For each grid point: (delay_a_us, delay_b_us) expected bistatic delays
     delay_pairs: list[tuple[float, float]] = field(default_factory=list)
     # Association gate parameters
-    delay_gate_us: float = 5.0     # max delay mismatch between prediction and measurement
+    delay_gate_us: float = 5.0  # max delay mismatch between prediction and measurement
     doppler_gate_hz: float = 30.0  # max Doppler mismatch
 
     def __post_init__(self):
@@ -129,13 +131,14 @@ class OverlapZone:
 @dataclass
 class AssociationCandidate:
     """A detection pair from two nodes that may be the same target."""
+
     timestamp_ms: int
     node_a_id: str
     node_b_id: str
-    det_a_idx: int      # index in node A's detection array
-    det_b_idx: int      # index in node B's detection array
-    delay_a: float      # measured delay at node A
-    delay_b: float      # measured delay at node B
+    det_a_idx: int  # index in node A's detection array
+    det_b_idx: int  # index in node B's detection array
+    delay_a: float  # measured delay at node A
+    delay_b: float  # measured delay at node B
     doppler_a: float
     doppler_b: float
     snr_a: float
@@ -159,6 +162,7 @@ class AssociationCandidate:
 
 # ── Pre-computation ──────────────────────────────────────────────────────────
 
+
 def _compute_node_enu(geo: NodeGeometry, ref_lat: float, ref_lon: float, ref_alt_km: float):
     """Compute RX and TX ENU positions relative to a common reference."""
     rx_enu = _lla_to_enu(geo.rx_lat, geo.rx_lon, geo.rx_alt_km, ref_lat, ref_lon, ref_alt_km)
@@ -176,11 +180,14 @@ def _point_in_beam(lat, lon, geo: NodeGeometry) -> bool:
     return angle_diff <= geo.beam_width_deg / 2
 
 
-def compute_overlap_zone(geo_a: NodeGeometry, geo_b: NodeGeometry,
-                         grid_step_km: float = 3.0,
-                         altitudes_km: tuple[float, ...] = (1.5, 3.0, 5.0, 7.0, 9.0, 11.0),
-                         delay_gate_us: float = 5.0,
-                         doppler_gate_hz: float = 30.0) -> OverlapZone:
+def compute_overlap_zone(
+    geo_a: NodeGeometry,
+    geo_b: NodeGeometry,
+    grid_step_km: float = 3.0,
+    altitudes_km: tuple[float, ...] = (1.5, 3.0, 5.0, 7.0, 9.0, 11.0),
+    delay_gate_us: float = 5.0,
+    doppler_gate_hz: float = 30.0,
+) -> OverlapZone:
     """Pre-compute the overlap zone between two nodes.
 
     Creates a grid of test points within both nodes' detection cones
@@ -254,9 +261,8 @@ def compute_overlap_zone(geo_a: NodeGeometry, geo_b: NodeGeometry,
 
 # ── Runtime association ──────────────────────────────────────────────────────
 
-def find_associations(zone: OverlapZone,
-                      frame_a: dict, frame_b: dict,
-                      timestamp_ms: int) -> list[AssociationCandidate]:
+
+def find_associations(zone: OverlapZone, frame_a: dict, frame_b: dict, timestamp_ms: int) -> list[AssociationCandidate]:
     """Find detection associations between two nodes using pre-computed gates.
 
     Vectorised with numpy: replaces the O(Na × G × Nb) pure-Python triple
@@ -272,12 +278,12 @@ def find_associations(zone: OverlapZone,
     Returns:
         List of AssociationCandidate objects (best grid-point per pair).
     """
-    delays_a   = frame_a.get("delay",   [])
+    delays_a = frame_a.get("delay", [])
     dopplers_a = frame_a.get("doppler", [])
-    snrs_a     = frame_a.get("snr",     [])
-    delays_b   = frame_b.get("delay",   [])
+    snrs_a = frame_a.get("snr", [])
+    delays_b = frame_b.get("delay", [])
     dopplers_b = frame_b.get("doppler", [])
-    snrs_b     = frame_b.get("snr",     [])
+    snrs_b = frame_b.get("snr", [])
 
     if not delays_a or not delays_b or not zone.delay_pairs:
         return []
@@ -288,20 +294,20 @@ def find_associations(zone: OverlapZone,
     pred_b = zone._np_pred_b  # (G,) float32 — expected delay at node B
 
     # ── Convert incoming detections to numpy ─────────────────────────────────
-    da = np.array(delays_a,   dtype=np.float32)  # (Na,)
-    db = np.array(delays_b,   dtype=np.float32)  # (Nb,)
+    da = np.array(delays_a, dtype=np.float32)  # (Na,)
+    db = np.array(delays_b, dtype=np.float32)  # (Nb,)
     fa = np.array(dopplers_a, dtype=np.float32)  # (Na,)
     fb = np.array(dopplers_b, dtype=np.float32)  # (Nb,)
     na, nb = len(da), len(db)
 
-    gate   = np.float32(zone.delay_gate_us)
-    dgmax  = np.float32(zone.doppler_gate_hz * 3.0)
+    gate = np.float32(zone.delay_gate_us)
+    dgmax = np.float32(zone.doppler_gate_hz * 3.0)
 
     # ── Delay gate matrices ───────────────────────────────────────────────────
     # gate_a[i, g] = True  ↔  |delay_a[i] − pred_a[g]| < delay_gate
-    gate_a = np.abs(da[:, None] - pred_a) < gate          # (Na, G) bool
+    gate_a = np.abs(da[:, None] - pred_a) < gate  # (Na, G) bool
     # gate_b[g, j] = True  ↔  |pred_b[g]  − delay_b[j]| < delay_gate
-    gate_b = np.abs(pred_b[:, None] - db) < gate          # (G, Nb) bool
+    gate_b = np.abs(pred_b[:, None] - db) < gate  # (G, Nb) bool
 
     # match[i, j] = number of grid points that simultaneously satisfy
     # gate_a[i,g] AND gate_b[g,j].  Cast to float32 so numpy dispatches
@@ -310,7 +316,7 @@ def find_associations(zone: OverlapZone,
 
     # ── Doppler gate (relaxed; only when both non-zero — preserves original) ─
     both_nz = (np.abs(fa[:, None]) > 0.0) & (np.abs(fb) > 0.0)  # (Na, Nb)
-    dop_ok  = ~both_nz | (np.abs(fa[:, None] - fb) <= dgmax)     # (Na, Nb)
+    dop_ok = ~both_nz | (np.abs(fa[:, None] - fb) <= dgmax)  # (Na, Nb)
 
     rows, cols = np.where((match > 0) & dop_ok)  # surviving (i_a, i_b) pairs
     if rows.size == 0:
@@ -337,7 +343,7 @@ def find_associations(zone: OverlapZone,
         valid_g = np.nonzero(gate_a[i_a] & gate_b[:, i_b])[0]
         if valid_g.size == 0:
             continue
-        res   = np.abs(pred_a[valid_g] - da[i_a]) + np.abs(pred_b[valid_g] - db[i_b])
+        res = np.abs(pred_a[valid_g] - da[i_a]) + np.abs(pred_b[valid_g] - db[i_b])
         best_g = int(valid_g[np.argmin(res)])
         g_lat, g_lon, g_alt = zone.grid_points[best_g]
 
@@ -351,12 +357,8 @@ def find_associations(zone: OverlapZone,
         # When NEITHER frame has an ADS-B list (rare: non-ADS-B aircraft, or
         # clutter-only frames) we let the pairing through — the downstream
         # rms_delay and beam-coverage checks provide the last line of defence.
-        _ae_a = (_adsb_list_a[i_a]
-                 if _adsb_list_a is not None and i_a < len(_adsb_list_a)
-                 else None)
-        _ae_b = (_adsb_list_b[i_b]
-                 if _adsb_list_b is not None and i_b < len(_adsb_list_b)
-                 else None)
+        _ae_a = _adsb_list_a[i_a] if _adsb_list_a is not None and i_a < len(_adsb_list_a) else None
+        _ae_b = _adsb_list_b[i_b] if _adsb_list_b is not None and i_b < len(_adsb_list_b) else None
         if _adsb_list_a is not None or _adsb_list_b is not None:
             # At least one frame has ADS-B capability; require both indices to
             # correspond to genuine aircraft (non-None dict entries).
@@ -421,24 +423,24 @@ def find_associations(zone: OverlapZone,
             _had_adsb_override = True
 
         cand = AssociationCandidate(
-            timestamp_ms  = timestamp_ms,
-            node_a_id     = zone.node_a_id,
-            node_b_id     = zone.node_b_id,
-            det_a_idx     = i_a,
-            det_b_idx     = i_b,
-            delay_a       = float(da[i_a]),
-            delay_b       = float(db[i_b]),
-            doppler_a     = float(fa[i_a]),
-            doppler_b     = float(fb[i_b]),
-            snr_a         = float(sa_arr[i_a]),
-            snr_b         = float(sb_arr[i_b]),
-            grid_delay_a  = float(pred_a[best_g]),
-            grid_delay_b  = float(pred_b[best_g]),
-            grid_lat      = g_lat,
-            grid_lon      = g_lon,
-            grid_alt_km   = g_alt,
-            had_adsb_override = _had_adsb_override,
-            adsb_hex      = _candidate_hex,
+            timestamp_ms=timestamp_ms,
+            node_a_id=zone.node_a_id,
+            node_b_id=zone.node_b_id,
+            det_a_idx=i_a,
+            det_b_idx=i_b,
+            delay_a=float(da[i_a]),
+            delay_b=float(db[i_b]),
+            doppler_a=float(fa[i_a]),
+            doppler_b=float(fb[i_b]),
+            snr_a=float(sa_arr[i_a]),
+            snr_b=float(sb_arr[i_b]),
+            grid_delay_a=float(pred_a[best_g]),
+            grid_delay_b=float(pred_b[best_g]),
+            grid_lat=g_lat,
+            grid_lon=g_lon,
+            grid_alt_km=g_alt,
+            had_adsb_override=_had_adsb_override,
+            adsb_hex=_candidate_hex,
         )
         key = (i_a, i_b)
         existing = candidates.get(key)
@@ -455,11 +457,11 @@ def find_associations(zone: OverlapZone,
 
 # ── InterNodeAssociator ──────────────────────────────────────────────────────
 
+
 class InterNodeAssociator:
     """Manages overlap zones for all node pairs and runs association at runtime."""
 
-    def __init__(self, delay_gate_us: float = 5.0, doppler_gate_hz: float = 30.0,
-                 grid_step_km: float = 30.0):
+    def __init__(self, delay_gate_us: float = 5.0, doppler_gate_hz: float = 30.0, grid_step_km: float = 30.0):
         self.delay_gate_us = delay_gate_us
         self.doppler_gate_hz = doppler_gate_hz
         self.grid_step_km = grid_step_km
@@ -492,7 +494,7 @@ class InterNodeAssociator:
         # intra-cluster pairs associate while rejecting distant inter-cluster
         # pairs whose timing error (Δt × v) would otherwise dominate.
         self._FRAME_SYNC_MAX_AGE_MS: int = 4_000
-        self._register_lock = __import__('threading').Lock()
+        self._register_lock = __import__("threading").Lock()
 
     def register_node(self, node_id: str, config: dict):
         """Register a node and pre-compute overlap zones with all existing nodes.
@@ -522,9 +524,7 @@ class InterNodeAssociator:
         # Honour an explicit aim (aimed coverage-ring Yagi); otherwise broadside
         # to the RX→TX baseline. The overlap grid is computed from this azimuth,
         # so it must match the node's true aim. Shared with manager.register_node.
-        geo.beam_azimuth_deg = resolve_beam_azimuth_deg(
-            config, geo.rx_lat, geo.rx_lon, geo.tx_lat, geo.tx_lon
-        )
+        geo.beam_azimuth_deg = resolve_beam_azimuth_deg(config, geo.rx_lat, geo.rx_lon, geo.tx_lat, geo.tx_lon)
 
         with self._register_lock:
             existing = self.node_geometries.get(node_id)
@@ -580,7 +580,7 @@ class InterNodeAssociator:
             return []  # no registered overlap pairs for this node yet
 
         # Rate-limit: only run association at most once per _ASSOC_MIN_INTERVAL_S
-        now = __import__('time').monotonic()
+        now = __import__("time").monotonic()
         if now - self._last_assoc.get(node_id, 0.0) < self._ASSOC_MIN_INTERVAL_S:
             return []
         self._last_assoc[node_id] = now
@@ -592,6 +592,7 @@ class InterNodeAssociator:
         _neighbor_list = list(neighbors)
         if len(_neighbor_list) > self._ASSOC_MAX_NEIGHBORS:
             import random
+
             _neighbor_list = random.sample(_neighbor_list, self._ASSOC_MAX_NEIGHBORS)
 
         for other_id in _neighbor_list:
@@ -627,14 +628,16 @@ class InterNodeAssociator:
         """Return summary of all overlap zones."""
         summaries = []
         for (a_id, b_id), zone in list(self.overlap_zones.items()):
-            summaries.append({
-                "node_a": a_id,
-                "node_b": b_id,
-                "grid_points": len(zone.grid_points),
-                "delay_gate_us": zone.delay_gate_us,
-                "doppler_gate_hz": zone.doppler_gate_hz,
-                "has_overlap": len(zone.grid_points) > 0,
-            })
+            summaries.append(
+                {
+                    "node_a": a_id,
+                    "node_b": b_id,
+                    "grid_points": len(zone.grid_points),
+                    "delay_gate_us": zone.delay_gate_us,
+                    "doppler_gate_hz": zone.doppler_gate_hz,
+                    "has_overlap": len(zone.grid_points) > 0,
+                }
+            )
         return summaries
 
     def format_candidates_for_solver(self, candidates: list[AssociationCandidate]) -> list[dict]:
@@ -683,12 +686,10 @@ class InterNodeAssociator:
         km_per_lon = km_per_lat * math.cos(math.radians(mid_lat))
         dlat_km = (lats[:, None] - lats) * km_per_lat
         dlon_km = (lons[:, None] - lons) * km_per_lon
-        dist_sq = dlat_km ** 2 + dlon_km ** 2
-        merge_sq = _MERGE_DIST_KM ** 2
+        dist_sq = dlat_km**2 + dlon_km**2
+        merge_sq = _MERGE_DIST_KM**2
 
-        row_idx, col_idx = np.where(
-            (dist_sq < merge_sq) & (np.arange(n)[:, None] < np.arange(n))
-        )
+        row_idx, col_idx = np.where((dist_sq < merge_sq) & (np.arange(n)[:, None] < np.arange(n)))
         for i, j in zip(row_idx.tolist(), col_idx.tolist()):
             _union(i, j)
 
@@ -700,18 +701,22 @@ class InterNodeAssociator:
         for group in raw_groups.values():
             measurements = []
             for c in group:
-                measurements.append({
-                    "node_id": c.node_a_id,
-                    "delay_us": c.delay_a,
-                    "doppler_hz": c.doppler_a,
-                    "snr": c.snr_a,
-                })
-                measurements.append({
-                    "node_id": c.node_b_id,
-                    "delay_us": c.delay_b,
-                    "doppler_hz": c.doppler_b,
-                    "snr": c.snr_b,
-                })
+                measurements.append(
+                    {
+                        "node_id": c.node_a_id,
+                        "delay_us": c.delay_a,
+                        "doppler_hz": c.doppler_a,
+                        "snr": c.snr_a,
+                    }
+                )
+                measurements.append(
+                    {
+                        "node_id": c.node_b_id,
+                        "delay_us": c.delay_b,
+                        "doppler_hz": c.doppler_b,
+                        "snr": c.snr_b,
+                    }
+                )
 
             # Deduplicate measurements by node_id (keep highest SNR)
             by_node: dict[str, dict] = {}
@@ -755,16 +760,18 @@ class InterNodeAssociator:
             if _group_hex is None:
                 _group_hex = next((c.adsb_hex for c in group if c.adsb_hex), None)
 
-            solver_inputs.append({
-                "initial_guess": {
-                    "lat": g_lat,
-                    "lon": g_lon,
-                    "alt_km": g_alt_km,
-                },
-                "measurements": list(by_node.values()),
-                "n_nodes": len(by_node),
-                "timestamp_ms": group[0].timestamp_ms,
-                "adsb_hex": _group_hex,
-            })
+            solver_inputs.append(
+                {
+                    "initial_guess": {
+                        "lat": g_lat,
+                        "lon": g_lon,
+                        "alt_km": g_alt_km,
+                    },
+                    "measurements": list(by_node.values()),
+                    "n_nodes": len(by_node),
+                    "timestamp_ms": group[0].timestamp_ms,
+                    "adsb_hex": _group_hex,
+                }
+            )
 
         return solver_inputs

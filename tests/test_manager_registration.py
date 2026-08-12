@@ -35,9 +35,8 @@ def test_placeholder_zero_azimuth_is_honored_as_explicit_aim():
     # would be aimed due north — this asserts the honored-explicit behavior so the
     # regression surfaces here rather than silently.
     from retina_analytics.constants import resolve_beam_azimuth_deg
-    az = resolve_beam_azimuth_deg(
-        {"beam_azimuth_deg": 0.0}, _RX_LAT, _RX_LON, _TX_LAT, _TX_LON
-    )
+
+    az = resolve_beam_azimuth_deg({"beam_azimuth_deg": 0.0}, _RX_LAT, _RX_LON, _TX_LAT, _TX_LON)
     assert az == 0.0  # honored as an explicit aim, NOT broadside
 
 

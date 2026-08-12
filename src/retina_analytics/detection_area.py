@@ -12,6 +12,7 @@ from retina_analytics.constants import C_KM_US, YAGI_BEAM_WIDTH_DEG, YAGI_MAX_RA
 class DetectionAreaState:
     """Characterises the geographic detection footprint of one node from
     observed delay/Doppler bounds."""
+
     node_id: str
     # Node geometry (set once at registration)
     rx_lat: float = 0.0
@@ -70,7 +71,7 @@ class DetectionAreaState:
     def _haversine_km(lat1, lon1, lat2, lon2):
         dlat = (lat1 - lat2) * 111.0
         dlon = (lon1 - lon2) * 111.0 * math.cos(math.radians((lat1 + lat2) / 2.0))
-        return math.sqrt(dlat ** 2 + dlon ** 2)
+        return math.sqrt(dlat**2 + dlon**2)
 
     @property
     def delay_range(self) -> tuple[float, float]:

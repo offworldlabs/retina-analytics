@@ -14,14 +14,28 @@ from retina_analytics.association import (
 class TestOverlapZone:
     def test_overlap_zone_ids(self):
         geo_a = NodeGeometry(
-            node_id="assoc-A", rx_lat=33.939, rx_lon=-84.651, rx_alt_km=0.29,
-            tx_lat=33.756, tx_lon=-84.331, tx_alt_km=0.49,
-            beam_azimuth_deg=135, beam_width_deg=41, max_range_km=50,
+            node_id="assoc-A",
+            rx_lat=33.939,
+            rx_lon=-84.651,
+            rx_alt_km=0.29,
+            tx_lat=33.756,
+            tx_lon=-84.331,
+            tx_alt_km=0.49,
+            beam_azimuth_deg=135,
+            beam_width_deg=41,
+            max_range_km=50,
         )
         geo_b = NodeGeometry(
-            node_id="assoc-B", rx_lat=34.05, rx_lon=-84.4, rx_alt_km=0.3,
-            tx_lat=33.85, tx_lon=-84.15, tx_alt_km=0.5,
-            beam_azimuth_deg=210, beam_width_deg=41, max_range_km=50,
+            node_id="assoc-B",
+            rx_lat=34.05,
+            rx_lon=-84.4,
+            rx_alt_km=0.3,
+            tx_lat=33.85,
+            tx_lon=-84.15,
+            tx_alt_km=0.5,
+            beam_azimuth_deg=210,
+            beam_width_deg=41,
+            max_range_km=50,
         )
         zone = compute_overlap_zone(geo_a, geo_b, grid_step_km=5.0)
         assert zone.node_a_id == "assoc-A"
@@ -42,16 +56,34 @@ class TestOverlapZone:
 class TestInterNodeAssociator:
     def _make_assoc(self):
         assoc = InterNodeAssociator(grid_step_km=5.0)
-        assoc.register_node("assoc-A", {
-            "rx_lat": 33.939, "rx_lon": -84.651, "rx_alt_ft": 950,
-            "tx_lat": 33.756, "tx_lon": -84.331, "tx_alt_ft": 1600,
-            "fc_hz": 195e6, "beam_width_deg": 41, "max_range_km": 50,
-        })
-        assoc.register_node("assoc-B", {
-            "rx_lat": 34.05, "rx_lon": -84.4, "rx_alt_ft": 980,
-            "tx_lat": 33.85, "tx_lon": -84.15, "tx_alt_ft": 1600,
-            "fc_hz": 195e6, "beam_width_deg": 41, "max_range_km": 50,
-        })
+        assoc.register_node(
+            "assoc-A",
+            {
+                "rx_lat": 33.939,
+                "rx_lon": -84.651,
+                "rx_alt_ft": 950,
+                "tx_lat": 33.756,
+                "tx_lon": -84.331,
+                "tx_alt_ft": 1600,
+                "fc_hz": 195e6,
+                "beam_width_deg": 41,
+                "max_range_km": 50,
+            },
+        )
+        assoc.register_node(
+            "assoc-B",
+            {
+                "rx_lat": 34.05,
+                "rx_lon": -84.4,
+                "rx_alt_ft": 980,
+                "tx_lat": 33.85,
+                "tx_lon": -84.15,
+                "tx_alt_ft": 1600,
+                "fc_hz": 195e6,
+                "beam_width_deg": 41,
+                "max_range_km": 50,
+            },
+        )
         return assoc
 
     def test_register_two_nodes(self):
@@ -69,29 +101,59 @@ class TestInterNodeAssociator:
 
     def test_submit_frame_returns_list(self):
         assoc = self._make_assoc()
-        candidates = assoc.submit_frame("assoc-A", {
-            "delay": [30.0, 45.0], "doppler": [60.0, -20.0], "snr": [15.0, 10.0],
-        }, timestamp_ms=1000)
+        candidates = assoc.submit_frame(
+            "assoc-A",
+            {
+                "delay": [30.0, 45.0],
+                "doppler": [60.0, -20.0],
+                "snr": [15.0, 10.0],
+            },
+            timestamp_ms=1000,
+        )
         assert isinstance(candidates, list)
 
     def test_submit_both_frames(self):
         assoc = self._make_assoc()
-        assoc.submit_frame("assoc-A", {
-            "delay": [30.0, 45.0], "doppler": [60.0, -20.0], "snr": [15.0, 10.0],
-        }, timestamp_ms=1000)
-        candidates = assoc.submit_frame("assoc-B", {
-            "delay": [31.0, 46.0], "doppler": [58.0, -22.0], "snr": [14.0, 9.0],
-        }, timestamp_ms=1000)
+        assoc.submit_frame(
+            "assoc-A",
+            {
+                "delay": [30.0, 45.0],
+                "doppler": [60.0, -20.0],
+                "snr": [15.0, 10.0],
+            },
+            timestamp_ms=1000,
+        )
+        candidates = assoc.submit_frame(
+            "assoc-B",
+            {
+                "delay": [31.0, 46.0],
+                "doppler": [58.0, -22.0],
+                "snr": [14.0, 9.0],
+            },
+            timestamp_ms=1000,
+        )
         assert isinstance(candidates, list)
 
     def test_solver_format(self):
         assoc = self._make_assoc()
-        assoc.submit_frame("assoc-A", {
-            "delay": [30.0, 45.0], "doppler": [60.0, -20.0], "snr": [15.0, 10.0],
-        }, timestamp_ms=1000)
-        candidates = assoc.submit_frame("assoc-B", {
-            "delay": [31.0, 46.0], "doppler": [58.0, -22.0], "snr": [14.0, 9.0],
-        }, timestamp_ms=1000)
+        assoc.submit_frame(
+            "assoc-A",
+            {
+                "delay": [30.0, 45.0],
+                "doppler": [60.0, -20.0],
+                "snr": [15.0, 10.0],
+            },
+            timestamp_ms=1000,
+        )
+        candidates = assoc.submit_frame(
+            "assoc-B",
+            {
+                "delay": [31.0, 46.0],
+                "doppler": [58.0, -22.0],
+                "snr": [14.0, 9.0],
+            },
+            timestamp_ms=1000,
+        )
         solver_input = assoc.format_candidates_for_solver(candidates)
         assert isinstance(solver_input, list)
 
@@ -111,23 +173,39 @@ class TestInterNodeAssociator:
         offset = 0.018  # ~2 km in latitude
 
         c_ab = AssociationCandidate(
-            node_a_id="A", node_b_id="B",
-            det_a_idx=0, det_b_idx=0,
-            delay_a=30.0, delay_b=31.0,
-            doppler_a=10.0, doppler_b=11.0,
-            snr_a=15.0, snr_b=14.0,
-            grid_delay_a=30.1, grid_delay_b=31.1,
-            grid_lat=base_lat, grid_lon=base_lon, grid_alt_km=10.0,
+            node_a_id="A",
+            node_b_id="B",
+            det_a_idx=0,
+            det_b_idx=0,
+            delay_a=30.0,
+            delay_b=31.0,
+            doppler_a=10.0,
+            doppler_b=11.0,
+            snr_a=15.0,
+            snr_b=14.0,
+            grid_delay_a=30.1,
+            grid_delay_b=31.1,
+            grid_lat=base_lat,
+            grid_lon=base_lon,
+            grid_alt_km=10.0,
             timestamp_ms=1000,
         )
         c_ac = AssociationCandidate(
-            node_a_id="A", node_b_id="C",
-            det_a_idx=0, det_b_idx=0,
-            delay_a=30.1, delay_b=32.0,
-            doppler_a=10.5, doppler_b=12.0,
-            snr_a=13.0, snr_b=12.0,
-            grid_delay_a=30.2, grid_delay_b=32.1,
-            grid_lat=base_lat + offset, grid_lon=base_lon + offset, grid_alt_km=10.0,
+            node_a_id="A",
+            node_b_id="C",
+            det_a_idx=0,
+            det_b_idx=0,
+            delay_a=30.1,
+            delay_b=32.0,
+            doppler_a=10.5,
+            doppler_b=12.0,
+            snr_a=13.0,
+            snr_b=12.0,
+            grid_delay_a=30.2,
+            grid_delay_b=32.1,
+            grid_lat=base_lat + offset,
+            grid_lon=base_lon + offset,
+            grid_alt_km=10.0,
             timestamp_ms=1000,
         )
 
@@ -148,16 +226,20 @@ class TestInterNodeAssociator:
         from retina_analytics.association import OverlapZone, find_associations
 
         zone = OverlapZone(
-            node_a_id="A", node_b_id="B",
+            node_a_id="A",
+            node_b_id="B",
             grid_points=[(33.9, -84.5, 9.0)],
             delay_pairs=[(10.0, 20.0)],
             delay_gate_us=5.0,
             doppler_gate_hz=30.0,
         )
-        frame_a = {"delay": [9.5], "doppler": [0.0], "snr": [10.0],
-                   "adsb": [None]}  # i_a=0 is clutter
-        frame_b = {"delay": [20.5], "doppler": [0.0], "snr": [10.0],
-                   "adsb": [{"hex": "abc123", "alt_baro": 35000, "lat": 33.9, "lon": -84.5}]}
+        frame_a = {"delay": [9.5], "doppler": [0.0], "snr": [10.0], "adsb": [None]}  # i_a=0 is clutter
+        frame_b = {
+            "delay": [20.5],
+            "doppler": [0.0],
+            "snr": [10.0],
+            "adsb": [{"hex": "abc123", "alt_baro": 35000, "lat": 33.9, "lon": -84.5}],
+        }
         candidates = find_associations(zone, frame_a, frame_b, timestamp_ms=1000)
         assert len(candidates) == 0, "Clutter×real ghost should be rejected"
 
@@ -166,7 +248,8 @@ class TestInterNodeAssociator:
         from retina_analytics.association import OverlapZone, find_associations
 
         zone = OverlapZone(
-            node_a_id="A", node_b_id="B",
+            node_a_id="A",
+            node_b_id="B",
             grid_points=[(33.9, -84.5, 9.0)],
             delay_pairs=[(10.0, 20.0)],
             delay_gate_us=5.0,
@@ -186,7 +269,8 @@ class TestInterNodeAssociator:
         from retina_analytics.association import OverlapZone, find_associations
 
         zone = OverlapZone(
-            node_a_id="A", node_b_id="B",
+            node_a_id="A",
+            node_b_id="B",
             grid_points=[(33.9, -84.5, 9.0)],
             delay_pairs=[(10.0, 20.0)],
             delay_gate_us=5.0,
@@ -203,7 +287,8 @@ class TestInterNodeAssociator:
         from retina_analytics.association import OverlapZone, find_associations
 
         zone = OverlapZone(
-            node_a_id="A", node_b_id="B",
+            node_a_id="A",
+            node_b_id="B",
             grid_points=[(33.9, -84.5, 9.0)],
             delay_pairs=[(10.0, 20.0)],
             delay_gate_us=5.0,
@@ -220,7 +305,8 @@ class TestInterNodeAssociator:
         from retina_analytics.association import OverlapZone, find_associations
 
         zone = OverlapZone(
-            node_a_id="A", node_b_id="B",
+            node_a_id="A",
+            node_b_id="B",
             grid_points=[(33.9, -84.5, 9.0)],
             delay_pairs=[(10.0, 20.0)],
             delay_gate_us=5.0,
@@ -238,7 +324,8 @@ class TestInterNodeAssociator:
         from retina_analytics.association import OverlapZone, find_associations
 
         zone = OverlapZone(
-            node_a_id="A", node_b_id="B",
+            node_a_id="A",
+            node_b_id="B",
             grid_points=[(33.9, -84.5, 9.0)],
             delay_pairs=[(10.0, 20.0)],
             delay_gate_us=5.0,
@@ -257,7 +344,8 @@ class TestInterNodeAssociator:
 
         # Grid point is at (33.9, -84.5).  ADS-B reports the aircraft 0.2° away.
         zone = OverlapZone(
-            node_a_id="A", node_b_id="B",
+            node_a_id="A",
+            node_b_id="B",
             grid_points=[(33.9, -84.5, 9.0)],
             delay_pairs=[(10.0, 20.0)],
             delay_gate_us=5.0,
@@ -275,25 +363,22 @@ class TestInterNodeAssociator:
         assert len(candidates) == 1
         cand = candidates[0]
         # Initial guess must come from ADS-B, not the grid point.
-        assert abs(cand.grid_lat - 34.10) < 1e-5, (
-            f"Expected grid_lat≈34.10 (ADS-B), got {cand.grid_lat}"
-        )
-        assert abs(cand.grid_lon - (-84.70)) < 1e-5, (
-            f"Expected grid_lon≈-84.70 (ADS-B), got {cand.grid_lon}"
-        )
+        assert abs(cand.grid_lat - 34.10) < 1e-5, f"Expected grid_lat≈34.10 (ADS-B), got {cand.grid_lat}"
+        assert abs(cand.grid_lon - (-84.70)) < 1e-5, f"Expected grid_lon≈-84.70 (ADS-B), got {cand.grid_lon}"
 
     def test_adsb_position_override_fallback_to_frame_b(self):
         """If frame_a has no lat/lon, frame_b lat/lon must be used as fallback."""
         from retina_analytics.association import OverlapZone, find_associations
 
         zone = OverlapZone(
-            node_a_id="A", node_b_id="B",
+            node_a_id="A",
+            node_b_id="B",
             grid_points=[(33.9, -84.5, 9.0)],
             delay_pairs=[(10.0, 20.0)],
             delay_gate_us=5.0,
             doppler_gate_hz=30.0,
         )
-        ac_a = {"hex": "aabbcc", "alt_baro": 30000}          # no lat/lon
+        ac_a = {"hex": "aabbcc", "alt_baro": 30000}  # no lat/lon
         ac_b = {"hex": "aabbcc", "alt_baro": 30000, "lat": 34.20, "lon": -84.80}
         frame_a = {"delay": [9.5], "doppler": [0.0], "snr": [10.0], "adsb": [ac_a]}
         frame_b = {"delay": [20.5], "doppler": [0.0], "snr": [10.0], "adsb": [ac_b]}
@@ -308,23 +393,39 @@ class TestInterNodeAssociator:
         from retina_analytics.association import AssociationCandidate
 
         c1 = AssociationCandidate(
-            node_a_id="A", node_b_id="B",
-            det_a_idx=0, det_b_idx=0,
-            delay_a=30.0, delay_b=31.0,
-            doppler_a=10.0, doppler_b=11.0,
-            snr_a=15.0, snr_b=14.0,
-            grid_delay_a=30.1, grid_delay_b=31.1,
-            grid_lat=33.90, grid_lon=-84.60, grid_alt_km=10.0,
+            node_a_id="A",
+            node_b_id="B",
+            det_a_idx=0,
+            det_b_idx=0,
+            delay_a=30.0,
+            delay_b=31.0,
+            doppler_a=10.0,
+            doppler_b=11.0,
+            snr_a=15.0,
+            snr_b=14.0,
+            grid_delay_a=30.1,
+            grid_delay_b=31.1,
+            grid_lat=33.90,
+            grid_lon=-84.60,
+            grid_alt_km=10.0,
             timestamp_ms=1000,
         )
         c2 = AssociationCandidate(
-            node_a_id="C", node_b_id="D",
-            det_a_idx=0, det_b_idx=0,
-            delay_a=35.0, delay_b=36.0,
-            doppler_a=5.0, doppler_b=6.0,
-            snr_a=12.0, snr_b=11.0,
-            grid_delay_a=35.1, grid_delay_b=36.1,
-            grid_lat=34.20, grid_lon=-84.90, grid_alt_km=10.0,  # ~34 km away
+            node_a_id="C",
+            node_b_id="D",
+            det_a_idx=0,
+            det_b_idx=0,
+            delay_a=35.0,
+            delay_b=36.0,
+            doppler_a=5.0,
+            doppler_b=6.0,
+            snr_a=12.0,
+            snr_b=11.0,
+            grid_delay_a=35.1,
+            grid_delay_b=36.1,
+            grid_lat=34.20,
+            grid_lon=-84.90,
+            grid_alt_km=10.0,  # ~34 km away
             timestamp_ms=1000,
         )
 

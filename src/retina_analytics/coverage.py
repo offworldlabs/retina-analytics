@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 @dataclass
 class CoverageMapEntry:
     """A single ADS-B-validated detection position."""
+
     lat: float
     lon: float
     alt_km: float
@@ -22,21 +23,25 @@ class CoverageMapEntry:
 class HistoricalCoverageMap:
     """Accumulates ADS-B-validated detection positions over time to build
     a factual coverage map for each node."""
+
     node_id: str
     entries: list[CoverageMapEntry] = field(default_factory=list)
     max_entries: int = 10000
     _grid: dict[tuple[int, int], dict] = field(default_factory=dict)
     _grid_resolution_deg: float = 0.01  # ~1.1 km
 
-    def add_detection(self, lat: float, lon: float, alt_km: float,
-                      snr: float, delay_error: float):
+    def add_detection(self, lat: float, lon: float, alt_km: float, snr: float, delay_error: float):
         entry = CoverageMapEntry(
-            lat=lat, lon=lon, alt_km=alt_km,
-            timestamp=time.time(), snr=snr, delay_error=delay_error,
+            lat=lat,
+            lon=lon,
+            alt_km=alt_km,
+            timestamp=time.time(),
+            snr=snr,
+            delay_error=delay_error,
         )
         self.entries.append(entry)
         if len(self.entries) > self.max_entries:
-            self.entries = self.entries[-self.max_entries:]
+            self.entries = self.entries[-self.max_entries :]
 
         grid_key = (
             round(lat / self._grid_resolution_deg),
@@ -45,9 +50,12 @@ class HistoricalCoverageMap:
         cell = self._grid.get(grid_key)
         if cell is None:
             self._grid[grid_key] = {
-                "lat": lat, "lon": lon,
-                "count": 1, "avg_snr": snr,
-                "first_seen": time.time(), "last_seen": time.time(),
+                "lat": lat,
+                "lon": lon,
+                "count": 1,
+                "avg_snr": snr,
+                "first_seen": time.time(),
+                "last_seen": time.time(),
             }
         else:
             cell["count"] += 1
@@ -98,7 +106,7 @@ class HistoricalCoverageMap:
         gaps = [(bearings[i + 1] - bearings[i]) for i in range(len(bearings) - 1)]
         gaps.append(360 - bearings[-1] + bearings[0])
         max_gap_idx = gaps.index(max(gaps))
-        rotated = bearings[max_gap_idx + 1:] + bearings[:max_gap_idx + 1]
+        rotated = bearings[max_gap_idx + 1 :] + bearings[: max_gap_idx + 1]
         if not rotated:
             return None
         spread = (rotated[-1] - rotated[0]) % 360
@@ -118,14 +126,17 @@ class HistoricalCoverageMap:
         data = {
             "node_id": self.node_id,
             "entries": [
-                {"lat": e.lat, "lon": e.lon, "alt_km": e.alt_km,
-                 "timestamp": e.timestamp, "snr": e.snr,
-                 "delay_error": e.delay_error}
+                {
+                    "lat": e.lat,
+                    "lon": e.lon,
+                    "alt_km": e.alt_km,
+                    "timestamp": e.timestamp,
+                    "snr": e.snr,
+                    "delay_error": e.delay_error,
+                }
                 for e in self.entries
             ],
-            "grid": {
-                f"{k[0]},{k[1]}": v for k, v in self._grid.items()
-            },
+            "grid": {f"{k[0]},{k[1]}": v for k, v in self._grid.items()},
         }
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
@@ -138,11 +149,16 @@ class HistoricalCoverageMap:
             data = json.load(f)
         cmap = cls(node_id=data["node_id"])
         for e in data.get("entries", []):
-            cmap.entries.append(CoverageMapEntry(
-                lat=e["lat"], lon=e["lon"], alt_km=e["alt_km"],
-                timestamp=e["timestamp"], snr=e["snr"],
-                delay_error=e["delay_error"],
-            ))
+            cmap.entries.append(
+                CoverageMapEntry(
+                    lat=e["lat"],
+                    lon=e["lon"],
+                    alt_km=e["alt_km"],
+                    timestamp=e["timestamp"],
+                    snr=e["snr"],
+                    delay_error=e["delay_error"],
+                )
+            )
         for k_str, v in data.get("grid", {}).items():
             parts = k_str.split(",")
             cmap._grid[(int(parts[0]), int(parts[1]))] = v

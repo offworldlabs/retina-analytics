@@ -27,18 +27,17 @@ import os
 
 from retina_analytics.constants import YAGI_MAX_RANGE_KM
 
-N_BINS = 72          # 5 ° per bin  (360 / 5 = 72)
+N_BINS = 72  # 5 ° per bin  (360 / 5 = 72)
 _DEG_PER_BIN = 360.0 / N_BINS
-_MAX_PER_BIN = 200   # cap per-bin history to prevent unbounded RAM growth
-MIN_POINTS = 20      # minimum calibration points before emitting a polygon
+_MAX_PER_BIN = 200  # cap per-bin history to prevent unbounded RAM growth
+MIN_POINTS = 20  # minimum calibration points before emitting a polygon
 
 
 def _bin_for_bearing(bearing_deg: float) -> int:
     return int(bearing_deg / _DEG_PER_BIN) % N_BINS
 
 
-def _bearing_and_range(rx_lat: float, rx_lon: float,
-                       lat: float, lon: float) -> tuple[float, float]:
+def _bearing_and_range(rx_lat: float, rx_lon: float, lat: float, lon: float) -> tuple[float, float]:
     """Return (bearing °, range_km) from RX to target."""
     dlat = lat - rx_lat
     cos_lat = math.cos(math.radians(rx_lat))
@@ -58,9 +57,7 @@ def _p85(values: list[float]) -> float:
 class EmpiricalCoverageState:
     """Accumulates calibration points and derives a smoothed detection polygon."""
 
-    def __init__(self, rx_lat: float, rx_lon: float,
-                 max_range_km: float | None = None,
-                 range_clamp_mult: float = 2.0):
+    def __init__(self, rx_lat: float, rx_lon: float, max_range_km: float | None = None, range_clamp_mult: float = 2.0):
         self.rx_lat = rx_lat
         self.rx_lon = rx_lon
         # Detections beyond range_clamp_mult × max_range_km are rejected as
@@ -98,10 +95,13 @@ class EmpiricalCoverageState:
 
     # ── Polygon generation ────────────────────────────────────────────────────
 
-    def to_polygon(self, min_points: int = MIN_POINTS,
-                   beam_azimuth_deg: float | None = None,
-                   beam_width_deg: float | None = None,
-                   max_range_km: float | None = None) -> list[list[float]] | None:
+    def to_polygon(
+        self,
+        min_points: int = MIN_POINTS,
+        beam_azimuth_deg: float | None = None,
+        beam_width_deg: float | None = None,
+        max_range_km: float | None = None,
+    ) -> list[list[float]] | None:
         """Return a closed polygon [[lat, lon], …] or None if insufficient data.
 
         When *beam_azimuth_deg* and *beam_width_deg* are provided the polygon
@@ -116,6 +116,7 @@ class EmpiricalCoverageState:
         # --- Determine which bins fall inside the beam sector -----------------
         if beam_azimuth_deg is not None and beam_width_deg is not None:
             half = beam_width_deg / 2.0
+
             def _in_beam(bin_idx: int) -> bool:
                 centre = bin_idx * _DEG_PER_BIN
                 diff = (centre - beam_azimuth_deg + 180.0) % 360.0 - 180.0
@@ -202,9 +203,7 @@ class EmpiricalCoverageState:
         # the beam straddles north, because the in-beam bins wrap 71→0.
         in_beam_bins = [i for i in range(N_BINS) if _in_beam(i)]
         if beam_azimuth_deg is not None and beam_width_deg is not None:
-            in_beam_bins.sort(
-                key=lambda i: ((i * _DEG_PER_BIN - beam_azimuth_deg + 180.0) % 360.0) - 180.0
-            )
+            in_beam_bins.sort(key=lambda i: ((i * _DEG_PER_BIN - beam_azimuth_deg + 180.0) % 360.0) - 180.0)
         for i in in_beam_bins:
             r_km = smoothed[i]
             if r_km < 0.1:
@@ -233,8 +232,7 @@ class EmpiricalCoverageState:
 
     @classmethod
     def from_dict(cls, d: dict) -> "EmpiricalCoverageState":
-        obj = cls(rx_lat=d["rx_lat"], rx_lon=d["rx_lon"],
-                  max_range_km=d.get("max_range_km"))
+        obj = cls(rx_lat=d["rx_lat"], rx_lon=d["rx_lon"], max_range_km=d.get("max_range_km"))
         for i, b in enumerate(d.get("bins", [])):
             if i < N_BINS:
                 obj._bins[i] = list(b)

@@ -27,25 +27,46 @@ class TestTrustScore:
 
     def test_good_sample_gives_1(self):
         ts = TrustScoreState(node_id="test-node")
-        ts.add_sample(AdsReportEntry(
-            timestamp_ms=1000, predicted_delay=10.0, predicted_doppler=50.0,
-            measured_delay=10.5, measured_doppler=51.0,
-            adsb_hex="abc123", adsb_lat=33.9, adsb_lon=-84.6,
-        ))
+        ts.add_sample(
+            AdsReportEntry(
+                timestamp_ms=1000,
+                predicted_delay=10.0,
+                predicted_doppler=50.0,
+                measured_delay=10.5,
+                measured_doppler=51.0,
+                adsb_hex="abc123",
+                adsb_lat=33.9,
+                adsb_lon=-84.6,
+            )
+        )
         assert ts.score == 1.0
 
     def test_bad_sample_lowers_score(self):
         ts = TrustScoreState(node_id="test-node")
-        ts.add_sample(AdsReportEntry(
-            timestamp_ms=1000, predicted_delay=10.0, predicted_doppler=50.0,
-            measured_delay=10.5, measured_doppler=51.0,
-            adsb_hex="abc123", adsb_lat=33.9, adsb_lon=-84.6,
-        ))
-        ts.add_sample(AdsReportEntry(
-            timestamp_ms=2000, predicted_delay=10.0, predicted_doppler=50.0,
-            measured_delay=20.0, measured_doppler=100.0,
-            adsb_hex="abc124", adsb_lat=33.9, adsb_lon=-84.6,
-        ))
+        ts.add_sample(
+            AdsReportEntry(
+                timestamp_ms=1000,
+                predicted_delay=10.0,
+                predicted_doppler=50.0,
+                measured_delay=10.5,
+                measured_doppler=51.0,
+                adsb_hex="abc123",
+                adsb_lat=33.9,
+                adsb_lon=-84.6,
+            )
+        )
+        ts.add_sample(
+            AdsReportEntry(
+                timestamp_ms=2000,
+                predicted_delay=10.0,
+                predicted_doppler=50.0,
+                measured_delay=20.0,
+                measured_doppler=100.0,
+                adsb_hex="abc124",
+                adsb_lat=33.9,
+                adsb_lon=-84.6,
+            )
+        )
         assert ts.score == 0.5
 
 
@@ -120,8 +141,7 @@ class TestHistoricalCoverageMap:
     def test_add_detections(self):
         cov = HistoricalCoverageMap(node_id="test-cov")
         for i in range(30):
-            cov.add_detection(33.9 + i * 0.01, -84.6 + i * 0.005,
-                              alt_km=8.0, snr=15.0, delay_error=0.5)
+            cov.add_detection(33.9 + i * 0.01, -84.6 + i * 0.005, alt_km=8.0, snr=15.0, delay_error=0.5)
         assert len(cov.entries) == 30
         assert cov.n_grid_cells > 0
         assert cov.coverage_area_km2 > 0
@@ -129,8 +149,7 @@ class TestHistoricalCoverageMap:
     def test_beam_width_estimate(self):
         cov = HistoricalCoverageMap(node_id="test-cov")
         for i in range(30):
-            cov.add_detection(33.9 + i * 0.01, -84.6 + i * 0.005,
-                              alt_km=8.0, snr=15.0, delay_error=0.5)
+            cov.add_detection(33.9 + i * 0.01, -84.6 + i * 0.005, alt_km=8.0, snr=15.0, delay_error=0.5)
         bw = cov.estimate_beam_width()
         assert bw is not None
         assert bw <= 180.0
@@ -138,8 +157,7 @@ class TestHistoricalCoverageMap:
     def test_coverage_grid(self):
         cov = HistoricalCoverageMap(node_id="test-cov")
         for i in range(30):
-            cov.add_detection(33.9 + i * 0.01, -84.6 + i * 0.005,
-                              alt_km=8.0, snr=15.0, delay_error=0.5)
+            cov.add_detection(33.9 + i * 0.01, -84.6 + i * 0.005, alt_km=8.0, snr=15.0, delay_error=0.5)
         grid = cov.get_coverage_grid()
         assert isinstance(grid, list)
         assert all("count" in c for c in grid)
@@ -147,8 +165,7 @@ class TestHistoricalCoverageMap:
     def test_summary(self):
         cov = HistoricalCoverageMap(node_id="test-cov")
         for i in range(5):
-            cov.add_detection(33.9 + i * 0.01, -84.6 + i * 0.005,
-                              alt_km=8.0, snr=15.0, delay_error=0.5)
+            cov.add_detection(33.9 + i * 0.01, -84.6 + i * 0.005, alt_km=8.0, snr=15.0, delay_error=0.5)
         s = cov.summary()
         assert s["node_id"] == "test-cov"
         assert "grid_cells" in s
@@ -161,16 +178,26 @@ class TestNodeAnalyticsManager:
     @pytest.fixture()
     def mgr(self):
         m = NodeAnalyticsManager()
-        m.register_node("node-A", {
-            "rx_lat": 33.939, "rx_lon": -84.651,
-            "tx_lat": 33.756, "tx_lon": -84.331,
-            "fc_hz": 195e6,
-        })
-        m.register_node("node-B", {
-            "rx_lat": 34.0, "rx_lon": -84.5,
-            "tx_lat": 33.8, "tx_lon": -84.2,
-            "fc_hz": 195e6,
-        })
+        m.register_node(
+            "node-A",
+            {
+                "rx_lat": 33.939,
+                "rx_lon": -84.651,
+                "tx_lat": 33.756,
+                "tx_lon": -84.331,
+                "fc_hz": 195e6,
+            },
+        )
+        m.register_node(
+            "node-B",
+            {
+                "rx_lat": 34.0,
+                "rx_lon": -84.5,
+                "tx_lat": 33.8,
+                "tx_lon": -84.2,
+                "fc_hz": 195e6,
+            },
+        )
         return m
 
     def test_reputation_registered(self, mgr):
@@ -183,17 +210,30 @@ class TestNodeAnalyticsManager:
         assert not mgr.is_node_blocked("node-A")
 
     def test_record_frame_accepted(self, mgr):
-        accepted = mgr.record_detection_frame("node-A", {
-            "delay": [15.0, 20.0], "doppler": [50.0, -30.0], "snr": [12.0, 8.0],
-        })
+        accepted = mgr.record_detection_frame(
+            "node-A",
+            {
+                "delay": [15.0, 20.0],
+                "doppler": [50.0, -30.0],
+                "snr": [12.0, 8.0],
+            },
+        )
         assert accepted is True
 
     def test_adsb_populates_coverage(self, mgr):
-        mgr.record_adsb_correlation("node-A", AdsReportEntry(
-            timestamp_ms=1000, predicted_delay=15.0, predicted_doppler=50.0,
-            measured_delay=15.2, measured_doppler=50.5,
-            adsb_hex="abc123", adsb_lat=34.0, adsb_lon=-84.5,
-        ))
+        mgr.record_adsb_correlation(
+            "node-A",
+            AdsReportEntry(
+                timestamp_ms=1000,
+                predicted_delay=15.0,
+                predicted_doppler=50.0,
+                measured_delay=15.2,
+                measured_doppler=50.5,
+                adsb_hex="abc123",
+                adsb_lat=34.0,
+                adsb_lon=-84.5,
+            ),
+        )
         assert len(mgr.coverage_maps["node-A"].entries) == 1
 
     def test_summary_fields(self, mgr):
@@ -212,9 +252,14 @@ class TestNodeAnalyticsManager:
         mgr.reputations["node-A"].blocked = True
         mgr.reputations["node-A"].block_reason = "test"
         assert mgr.is_node_blocked("node-A")
-        rejected = mgr.record_detection_frame("node-A", {
-            "delay": [10.0], "doppler": [20.0], "snr": [5.0],
-        })
+        rejected = mgr.record_detection_frame(
+            "node-A",
+            {
+                "delay": [10.0],
+                "doppler": [20.0],
+                "snr": [5.0],
+            },
+        )
         assert rejected is False
 
     def test_admin_unblock(self, mgr):
@@ -256,10 +301,12 @@ class TestCoverageSuggestion:
     @pytest.fixture()
     def areas(self):
         return [
-            DetectionAreaState(node_id="cs-A", rx_lat=33.939, rx_lon=-84.651,
-                               beam_azimuth_deg=135, beam_width_deg=41, max_range_km=50),
-            DetectionAreaState(node_id="cs-B", rx_lat=34.05, rx_lon=-84.4,
-                               beam_azimuth_deg=210, beam_width_deg=41, max_range_km=50),
+            DetectionAreaState(
+                node_id="cs-A", rx_lat=33.939, rx_lon=-84.651, beam_azimuth_deg=135, beam_width_deg=41, max_range_km=50
+            ),
+            DetectionAreaState(
+                node_id="cs-B", rx_lat=34.05, rx_lon=-84.4, beam_azimuth_deg=210, beam_width_deg=41, max_range_km=50
+            ),
         ]
 
     def test_default_returns_list(self, areas):
@@ -268,23 +315,35 @@ class TestCoverageSuggestion:
 
     def test_strategy_1_with_trust(self, areas):
         ts_a = TrustScoreState(node_id="cs-A")
-        ts_a.add_sample(AdsReportEntry(
-            timestamp_ms=1000, predicted_delay=10.0, predicted_doppler=50.0,
-            measured_delay=10.2, measured_doppler=50.5,
-            adsb_hex="x", adsb_lat=34.0, adsb_lon=-84.5,
-        ))
+        ts_a.add_sample(
+            AdsReportEntry(
+                timestamp_ms=1000,
+                predicted_delay=10.0,
+                predicted_doppler=50.0,
+                measured_delay=10.2,
+                measured_doppler=50.5,
+                adsb_hex="x",
+                adsb_lat=34.0,
+                adsb_lon=-84.5,
+            )
+        )
         ts_b = TrustScoreState(node_id="cs-B")
-        ts_b.add_sample(AdsReportEntry(
-            timestamp_ms=1000, predicted_delay=10.0, predicted_doppler=50.0,
-            measured_delay=10.1, measured_doppler=50.2,
-            adsb_hex="y", adsb_lat=34.0, adsb_lon=-84.5,
-        ))
-        result = coverage_suggestion(areas, 34.0, -84.5,
-                                     trust_scores={"cs-A": ts_a, "cs-B": ts_b})
+        ts_b.add_sample(
+            AdsReportEntry(
+                timestamp_ms=1000,
+                predicted_delay=10.0,
+                predicted_doppler=50.0,
+                measured_delay=10.1,
+                measured_doppler=50.2,
+                adsb_hex="y",
+                adsb_lat=34.0,
+                adsb_lon=-84.5,
+            )
+        )
+        result = coverage_suggestion(areas, 34.0, -84.5, trust_scores={"cs-A": ts_a, "cs-B": ts_b})
         assert isinstance(result, list)
 
     def test_strategy_2_with_solver_rms(self, areas):
         rms = [5.0, 4.8, 4.7, 4.65, 4.62, 4.60, 4.59, 4.58, 4.575, 4.572]
-        result = coverage_suggestion(areas, 34.0, -84.5,
-                                     solver_rms_history=rms)
+        result = coverage_suggestion(areas, 34.0, -84.5, solver_rms_history=rms)
         assert isinstance(result, list)

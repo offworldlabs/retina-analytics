@@ -47,11 +47,13 @@ def _in_beam_bin_count(beam_azimuth_deg: float, beam_width_deg: float) -> int:
     return count
 
 
-def _state_with_beam_calibration(beam_azimuth_deg: float,
-                                  beam_width_deg: float = BEAM_WIDTH_DEG,
-                                  range_km: float = 30.0,
-                                  n_points: int = MIN_POINTS + 10,
-                                  max_range_km: float | None = None) -> EmpiricalCoverageState:
+def _state_with_beam_calibration(
+    beam_azimuth_deg: float,
+    beam_width_deg: float = BEAM_WIDTH_DEG,
+    range_km: float = 30.0,
+    n_points: int = MIN_POINTS + 10,
+    max_range_km: float | None = None,
+) -> EmpiricalCoverageState:
     cov = EmpiricalCoverageState(RX_LAT, RX_LON, max_range_km=max_range_km)
     half = beam_width_deg / 2.0
     for i in range(n_points):
@@ -111,8 +113,7 @@ class TestRangeClampAndOutlierReject:
         for _ in range(25):
             cov.add_point(*_offset_point(30.0, 30.0))
         cov.add_point(*_offset_point(35.0, 3000.0))
-        poly = cov.to_polygon(beam_azimuth_deg=30.0, beam_width_deg=BEAM_WIDTH_DEG,
-                              max_range_km=50.0)
+        poly = cov.to_polygon(beam_azimuth_deg=30.0, beam_width_deg=BEAM_WIDTH_DEG, max_range_km=50.0)
         assert poly is not None
         clamp = 50.0 * cov.range_clamp_mult
         for lat, lon in poly[1:-1]:
@@ -121,8 +122,7 @@ class TestRangeClampAndOutlierReject:
 
     def test_clamp_does_not_distort_normal_ranges(self):
         cov = _state_with_beam_calibration(30.0, range_km=30.0, max_range_km=50.0)
-        poly = cov.to_polygon(beam_azimuth_deg=30.0, beam_width_deg=BEAM_WIDTH_DEG,
-                              max_range_km=50.0)
+        poly = cov.to_polygon(beam_azimuth_deg=30.0, beam_width_deg=BEAM_WIDTH_DEG, max_range_km=50.0)
         assert poly is not None
         for lat, lon in poly[1:-1]:
             _, range_km = _bearing_and_range(RX_LAT, RX_LON, lat, lon)

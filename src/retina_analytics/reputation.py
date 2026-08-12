@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 @dataclass
 class NodeReputation:
     """Tracks reputation and handles bad actor detection/blocking for a node."""
+
     node_id: str
     reputation: float = 1.0
     blocked: bool = False
@@ -21,14 +22,16 @@ class NodeReputation:
 
     def apply_penalty(self, amount: float, reason: str):
         self.reputation = max(0.0, self.reputation - amount)
-        self.penalties.append({
-            "time": time.time(),
-            "amount": amount,
-            "reason": reason,
-            "reputation_after": self.reputation,
-        })
+        self.penalties.append(
+            {
+                "time": time.time(),
+                "amount": amount,
+                "reason": reason,
+                "reputation_after": self.reputation,
+            }
+        )
         if len(self.penalties) > self.max_penalties:
-            self.penalties = self.penalties[-self.max_penalties:]
+            self.penalties = self.penalties[-self.max_penalties :]
         if self.reputation < self.reputation_block_threshold and not self.blocked:
             self.blocked = True
             self.block_reason = f"Reputation {self.reputation:.2f} below threshold"

@@ -13,7 +13,7 @@ from retina_analytics.metrics import NodeMetrics
 from retina_analytics.reputation import NodeReputation
 from retina_analytics.trust import AdsReportEntry, TrustScoreState
 
-_RX_RELOCATE_THRESHOLD_KM = 0.05   # 50 m — above real GPS/reporting jitter
+_RX_RELOCATE_THRESHOLD_KM = 0.05  # 50 m — above real GPS/reporting jitter
 
 
 class NodeAnalyticsManager:
@@ -82,7 +82,8 @@ class NodeAnalyticsManager:
         moved = ec is not None and haversine_km(ec.rx_lat, ec.rx_lon, rx_lat, rx_lon) > _RX_RELOCATE_THRESHOLD_KM
         if ec is None or moved:
             self.empirical_coverages[node_id] = EmpiricalCoverageState(
-                rx_lat=rx_lat, rx_lon=rx_lon,
+                rx_lat=rx_lat,
+                rx_lon=rx_lon,
                 max_range_km=cfg_max_range,
             )
             # Remove stale on-disk file from previous location; save_coverage_maps
@@ -124,8 +125,11 @@ class NodeAnalyticsManager:
         delay_err = abs(entry.predicted_delay - entry.measured_delay)
         if node_id in self.coverage_maps:
             self.coverage_maps[node_id].add_detection(
-                lat=entry.adsb_lat, lon=entry.adsb_lon, alt_km=0.0,
-                snr=0.0, delay_error=delay_err,
+                lat=entry.adsb_lat,
+                lon=entry.adsb_lon,
+                alt_km=0.0,
+                snr=0.0,
+                delay_error=delay_err,
             )
 
     def record_heartbeat(self, node_id: str):
@@ -145,24 +149,19 @@ class NodeAnalyticsManager:
 
         node_ids = sorted(self.reputations.keys())
         for i, a_id in enumerate(node_ids):
-            for b_id in node_ids[i + 1:]:
+            for b_id in node_ids[i + 1 :]:
                 area_a = self.detection_areas.get(a_id)
                 area_b = self.detection_areas.get(b_id)
                 if area_a and area_b and area_a.n_detections > 0 and area_b.n_detections > 0:
-                    dist = haversine_km(area_a.rx_lat, area_a.rx_lon,
-                                        area_b.rx_lat, area_b.rx_lon)
+                    dist = haversine_km(area_a.rx_lat, area_a.rx_lon, area_b.rx_lat, area_b.rx_lon)
                     if dist > area_a.max_range_km + area_b.max_range_km:
                         continue
                     overlap = compute_delay_bin_overlap(area_a, area_b)
                     ts_a = self.trust_scores.get(a_id)
                     ts_b = self.trust_scores.get(b_id)
                     if ts_a and ts_b:
-                        self.reputations[a_id].evaluate_neighbour_consistency(
-                            overlap["overlap_ratio"], ts_b.score
-                        )
-                        self.reputations[b_id].evaluate_neighbour_consistency(
-                            overlap["overlap_ratio"], ts_a.score
-                        )
+                        self.reputations[a_id].evaluate_neighbour_consistency(overlap["overlap_ratio"], ts_b.score)
+                        self.reputations[b_id].evaluate_neighbour_consistency(overlap["overlap_ratio"], ts_a.score)
 
     def unblock_node(self, node_id: str):
         rep = self.reputations.get(node_id)
@@ -205,8 +204,7 @@ class NodeAnalyticsManager:
             now = time.monotonic()
             if self._summaries_cache is not None and now - self._summaries_cache_ts < self._ANALYSIS_CACHE_TTL:
                 return self._summaries_cache
-            all_nodes = (set(self.trust_scores) | set(self.detection_areas)
-                         | set(self.metrics) | set(self.reputations))
+            all_nodes = set(self.trust_scores) | set(self.detection_areas) | set(self.metrics) | set(self.reputations)
             result = {nid: self.get_node_summary(nid) for nid in sorted(all_nodes)}
             self._summaries_cache = result
             self._summaries_cache_ts = now
@@ -227,34 +225,35 @@ class NodeAnalyticsManager:
             # Only compute pair overlaps for nodes within range of each other
             for i, a_id in enumerate(node_ids):
                 area_a = self.detection_areas[a_id]
-                for b_id in node_ids[i + 1:]:
+                for b_id in node_ids[i + 1 :]:
                     area_b = self.detection_areas[b_id]
-                    dist = haversine_km(area_a.rx_lat, area_a.rx_lon,
-                                        area_b.rx_lat, area_b.rx_lon)
+                    dist = haversine_km(area_a.rx_lat, area_a.rx_lon, area_b.rx_lat, area_b.rx_lon)
                     if dist > area_a.max_range_km + area_b.max_range_km:
                         continue
                     overlap = compute_delay_bin_overlap(area_a, area_b)
                     if overlap["overlap_ratio"] > 0:
-                        pair_overlaps.append({
-                            "node_a": a_id,
-                            "node_b": b_id,
-                            **overlap,
-                        })
+                        pair_overlaps.append(
+                            {
+                                "node_a": a_id,
+                                "node_b": b_id,
+                                **overlap,
+                            }
+                        )
 
             if self.detection_areas:
                 areas = list(self.detection_areas.values())
                 avg_lat = sum(a.rx_lat for a in areas) / len(areas)
                 avg_lon = sum(a.rx_lon for a in areas) / len(areas)
                 suggestions = coverage_suggestion(
-                    areas, avg_lat, avg_lon,
+                    areas,
+                    avg_lat,
+                    avg_lon,
                     trust_scores=self.trust_scores,
                 )
             else:
                 suggestions = []
 
-            blocked = [
-                nid for nid, rep in self.reputations.items() if rep.blocked
-            ]
+            blocked = [nid for nid, rep in self.reputations.items() if rep.blocked]
 
             result = {
                 "pair_overlaps": pair_overlaps,
@@ -291,7 +290,7 @@ class NodeAnalyticsManager:
                     path = os.path.join(self._storage_dir, fname)
                     ec = EmpiricalCoverageState.load_from_file(path)
                     # Derive node_id from filename: empirical_<safe_id>.json
-                    node_id = fname[len("empirical_"):-len(".json")]
+                    node_id = fname[len("empirical_") : -len(".json")]
                     self.empirical_coverages[node_id] = ec
                 except Exception:
                     pass

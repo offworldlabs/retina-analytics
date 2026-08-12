@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 @dataclass
 class NodeMetrics:
     """Uptime / SNR / track quality metrics for one node."""
+
     node_id: str
     connected_at: float = 0.0
     last_heartbeat: float = 0.0
@@ -36,7 +37,7 @@ class NodeMetrics:
         if ts is not None:
             self._frame_timestamps.append(ts / 1000.0 if ts > 1e12 else ts)
             if len(self._frame_timestamps) > self._max_frame_ts:
-                self._frame_timestamps = self._frame_timestamps[-self._max_frame_ts:]
+                self._frame_timestamps = self._frame_timestamps[-self._max_frame_ts :]
 
     def record_heartbeat(self):
         self.last_heartbeat = time.time()
@@ -58,8 +59,7 @@ class NodeMetrics:
     @property
     def gap_stats(self) -> dict:
         if len(self._frame_timestamps) < 2:
-            return {"gap_count": 0, "avg_gap_s": 0.0, "max_gap_s": 0.0,
-                    "continuity_ratio": 1.0}
+            return {"gap_count": 0, "avg_gap_s": 0.0, "max_gap_s": 0.0, "continuity_ratio": 1.0}
         ts_sorted = sorted(self._frame_timestamps)
         gaps = []
         total_intervals = 0
