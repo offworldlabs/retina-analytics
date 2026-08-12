@@ -21,8 +21,10 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 
-# Shared ruff standard for offworldlabs Python repos.
-# Keep in sync across repos; see offworldlabs/ops for the canonical copy.
+# Shared ruff standard for offworldlabs Python repos. The keys below are checked
+# against offworldlabs/ops:ruff-shared.toml by the `ruff-config` pre-commit hook
+# — edit them there, not here. target-version is deliberately per-repo and
+# tracks this package's requires-python.
 [tool.ruff]
 line-length = 120
 target-version = "py311"

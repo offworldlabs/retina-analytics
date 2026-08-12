@@ -1,10 +1,14 @@
-# The dead-code gate lives in offworldlabs/ops and is pinned here. Do not
-# vendor it back into this repo. See 86cb417ty.
-#
-# ruff is deliberately still a separate CI step rather than a hook; aligning
-# this repo with claude-shared's ci-python.yml is a separate piece of work.
+# ruff and the dead-code gate both run through pre-commit, so `pre-commit run
+# --all-files` locally reproduces CI exactly. See 86cb43xya.
 repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.2
+    hooks:
+      - id: ruff
+      - id: ruff-format
+
   - repo: https://github.com/offworldlabs/ops
-    rev: dead-code-v1.0
+    rev: hooks-v1.0
     hooks:
       - id: dead-code
+      - id: ruff-config
