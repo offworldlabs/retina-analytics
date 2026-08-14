@@ -15,7 +15,7 @@ from retina_analytics.empirical_coverage import (
     EmpiricalCoverageState,
 )
 from retina_analytics.cross_node import compute_delay_bin_overlap, coverage_suggestion
-from retina_analytics.constants import YAGI_BEAM_WIDTH_DEG, YAGI_MAX_RANGE_KM, haversine_km, resolve_beam_azimuth_deg
+from retina_analytics.constants import YAGI_MAX_RANGE_KM, haversine_km, resolve_beam_azimuth_deg, resolve_beam_width_deg
 
 _RX_RELOCATE_THRESHOLD_KM = 0.05   # 50 m — above real GPS/reporting jitter
 
@@ -87,7 +87,7 @@ class NodeAnalyticsManager:
             tx_lon=tx_lon,
             fc_hz=config.get("fc_hz", config.get("FC", 195e6)),
             beam_azimuth_deg=beam_az,
-            beam_width_deg=config.get("beam_width_deg", YAGI_BEAM_WIDTH_DEG),
+            beam_width_deg=resolve_beam_width_deg(config),
             max_range_km=config.get("max_range_km", YAGI_MAX_RANGE_KM),
             max_bistatic_range_km=config.get("max_bistatic_range_km"),
         )

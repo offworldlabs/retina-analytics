@@ -48,6 +48,7 @@ from retina_analytics.constants import (
     haversine_km as _haversine_km,
     km_per_deg_lon,
     resolve_beam_azimuth_deg,
+    resolve_beam_width_deg,
 )
 from retina_analytics.empirical_coverage import OBSERVED_LIMIT_MARGIN
 
@@ -704,7 +705,7 @@ class InterNodeAssociator:
             tx_lon=config.get("tx_lon", 0),
             tx_alt_km=tx_alt_km,
             fc_hz=config.get("fc_hz", config.get("FC", 195e6)),
-            beam_width_deg=config.get("beam_width_deg", 41),
+            beam_width_deg=resolve_beam_width_deg(config),
             max_range_km=config.get("max_range_km", 50),
             max_bistatic_range_km=config.get("max_bistatic_range_km"),
             coverage_limit=(self.coverage_provider(node_id)
