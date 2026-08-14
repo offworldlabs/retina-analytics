@@ -187,3 +187,28 @@ def resolve_beam_azimuth_deg(config, rx_lat, rx_lon, tx_lat, tx_lon):
     if explicit_az is not None:
         return explicit_az
     return (bearing_deg(rx_lat, rx_lon, tx_lat, tx_lon) + 90.0) % 360.0
+
+
+def resolve_beam_width_deg(config):
+    """Resolve a node's beam width (deg), defaulting to the nominal Yagi spec.
+
+    ``beam_width_deg`` is nullable on the node wire contract, and the config dict
+    is built field by field from the node row, so an unset width arrives *present
+    and None* rather than absent.  ``dict.get`` with a default therefore never
+    fires, and the None reaches the half-width divisions in ``_point_in_beam``
+    and ``point_in_detection_area`` as a TypeError.  A null resolves to
+    YAGI_BEAM_WIDTH_DEG because every node in the fleet carries the same Yagi:
+    the width is a documented hardware spec that retina-gui simply never asks the
+    owner for, not a value invented to paper over the gap.
+
+    ``config`` is node-supplied, so the parse is guarded the same way as
+    resolve_beam_azimuth_deg and falls back to the nominal on bad input.
+    """
+    width = config.get("beam_width_deg")
+    try:
+        width = float(width) if width is not None else None
+    except (TypeError, ValueError):
+        width = None
+    if width is not None and not math.isfinite(width):
+        width = None
+    return width if width is not None else YAGI_BEAM_WIDTH_DEG
