@@ -518,6 +518,31 @@ def _merge_epochs(hist_a: list, node_a_id: str, hist_b: list, node_b_id: str) ->
     return epochs
 
 
+def _coord(config: dict, key: str) -> float:
+    """A latitude/longitude from a config, absent or explicitly null reading 0.0.
+
+    `config.get(key, 0)` is not enough: a v1 registration may carry the key with
+    a null value, and None then reaches the geodesy as a float.
+    """
+    return float(config.get(key) or 0.0)
+
+
+def _has_receiver_position(config: dict) -> bool:
+    """Whether this config says where the receiver actually is.
+
+    Absent coordinates default to (0, 0), a point in the Gulf of Guinea that no
+    node occupies.  Every node registered without a position therefore lands on
+    one footprint and overlaps every other completely — a pairing that is both
+    fictitious and, being total, the densest and most expensive grid the pair
+    can produce.  A fleet registered that way makes the neighbour graph
+    complete, which the multinode solver sees as one enormous candidate.
+
+    Only the exact (0, 0) pair reads as absent.  The equator and the prime
+    meridian are each perfectly good coordinates on their own.
+    """
+    return not (_coord(config, "rx_lat") == 0.0 and _coord(config, "rx_lon") == 0.0)
+
+
 # ── InterNodeAssociator ──────────────────────────────────────────────────────
 
 class InterNodeAssociator:
@@ -691,17 +716,21 @@ class InterNodeAssociator:
 
         Reconnecting nodes skip the expensive O(n²) overlap recomputation
         as long as their geometry (RX/TX position) hasn't changed.
+
+        A node whose config carries no receiver position is registered but takes
+        no part in overlap — see _has_receiver_position.
         """
-        rx_alt_km = config.get("rx_alt_ft", 0) * 0.3048 / 1000.0
-        tx_alt_km = config.get("tx_alt_ft", 0) * 0.3048 / 1000.0
+        positioned = _has_receiver_position(config)
+        rx_alt_km = (config.get("rx_alt_ft") or 0) * 0.3048 / 1000.0
+        tx_alt_km = (config.get("tx_alt_ft") or 0) * 0.3048 / 1000.0
 
         geo = NodeGeometry(
             node_id=node_id,
-            rx_lat=config.get("rx_lat", 0),
-            rx_lon=config.get("rx_lon", 0),
+            rx_lat=_coord(config, "rx_lat"),
+            rx_lon=_coord(config, "rx_lon"),
             rx_alt_km=rx_alt_km,
-            tx_lat=config.get("tx_lat", 0),
-            tx_lon=config.get("tx_lon", 0),
+            tx_lat=_coord(config, "tx_lat"),
+            tx_lon=_coord(config, "tx_lon"),
             tx_alt_km=tx_alt_km,
             fc_hz=config.get("fc_hz", config.get("FC", 195e6)),
             beam_width_deg=config.get("beam_width_deg", 41),
@@ -740,10 +769,20 @@ class InterNodeAssociator:
                 # Same geometry — overlap zones are still valid; skip O(n²) recompute.
                 return
 
+            if not positioned:
+                # Nothing to pair against, and nothing that was paired stays
+                # valid: a node that re-registers without its position has lost
+                # the geometry its zones were built from.
+                self._drop_zones_for(node_id)
+                self.node_geometries[node_id] = geo
+                return
+
             # Pre-compute overlap zones with existing nodes (serialised to avoid
             # RuntimeError: dictionary changed size during iteration when multiple
             # nodes register concurrently from a thread-pool executor).
             for existing_id, existing_geo in list(self.node_geometries.items()):
+                if not self._is_positioned(existing_id):
+                    continue
                 pair_key = tuple(sorted([node_id, existing_id]))
                 zone = compute_overlap_zone(
                     geo if pair_key[0] == node_id else existing_geo,
@@ -779,6 +818,23 @@ class InterNodeAssociator:
             ):
                 setattr(self, name, 0)
 
+    def _is_positioned(self, node_id: str) -> bool:
+        """Whether a registered node has a receiver position to pair against."""
+        return _has_receiver_position(self.node_configs.get(node_id, {}))
+
+    def _drop_zones_for(self, node_id: str) -> int:
+        """Remove every overlap zone and adjacency entry naming this node.
+
+        Caller holds _register_lock.  Unlike unregister_node the node itself
+        stays registered; only its pairings go.
+        """
+        stale_pairs = [k for k in self.overlap_zones if node_id in k]
+        for key in stale_pairs:
+            del self.overlap_zones[key]
+        for other in self._neighbors.pop(node_id, set()):
+            self._neighbors.get(other, set()).discard(node_id)
+        return len(stale_pairs)
+
     def unregister_node(self, node_id: str) -> int:
         """Drop a node and every overlap zone it participates in.
 
@@ -800,13 +856,7 @@ class InterNodeAssociator:
             self._last_assoc.pop(node_id, None)
             self._neighbor_cursor.pop(node_id, None)
 
-            stale_pairs = [k for k in self.overlap_zones if node_id in k]
-            for key in stale_pairs:
-                del self.overlap_zones[key]
-
-            for other in self._neighbors.pop(node_id, set()):
-                self._neighbors.get(other, set()).discard(node_id)
-        return len(stale_pairs)
+            return self._drop_zones_for(node_id)
 
     def rebuild_zones_for(self, node_id: str) -> int:
         """Recompute this node's overlap grids against its current coverage.
@@ -822,12 +872,16 @@ class InterNodeAssociator:
         geo = self.node_geometries.get(node_id)
         if geo is None:
             return 0
+        # An unpositioned node has no zones to rebuild, and rebuilding would put
+        # back exactly the dense grids registration declined to compute.
+        if not self._is_positioned(node_id):
+            return 0
         if self.coverage_provider is not None:
             geo.coverage_limit = self.coverage_provider(node_id)
         rebuilt = 0
         with self._register_lock:
             for other_id, other_geo in list(self.node_geometries.items()):
-                if other_id == node_id:
+                if other_id == node_id or not self._is_positioned(other_id):
                     continue
                 pair_key = tuple(sorted([node_id, other_id]))
                 a, b = ((geo, other_geo) if pair_key[0] == node_id
