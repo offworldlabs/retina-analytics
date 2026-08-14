@@ -17,11 +17,11 @@ from retina_analytics.empirical_coverage import (
 )
 from retina_analytics.cross_node import compute_delay_bin_overlap, coverage_suggestion
 from retina_analytics.constants import (
-    YAGI_BEAM_WIDTH_DEG,
     YAGI_MAX_RANGE_KM,
     bearing_deg,
     haversine_km,
     resolve_beam_azimuth_deg,
+    resolve_beam_width_deg,
 )
 
 _RX_RELOCATE_THRESHOLD_KM = 0.05   # 50 m — above real GPS/reporting jitter
@@ -46,10 +46,16 @@ def _resolve_fov_prior(config: dict, rx_lat: float, rx_lon: float,
     """
     if config.get("beam_azimuth_deg") is not None:
         az = resolve_beam_azimuth_deg(config, rx_lat, rx_lon, tx_lat, tx_lon)
-        return az, config.get("beam_width_deg", YAGI_BEAM_WIDTH_DEG)
+        return az, resolve_beam_width_deg(config)
     if tx_lat and tx_lon:
         az = (bearing_deg(rx_lat, rx_lon, tx_lat, tx_lon) + 90.0) % 360.0
-        return az, config.get("beam_width_deg", YAGI_BEAM_WIDTH_DEG)
+        return az, resolve_beam_width_deg(config)
+    # A null width here is *not* the node-supplied null the two branches above
+    # resolve: with no aim and no TX the prior is omni, and the width is None
+    # because there is no wedge for it to describe.  _in_theoretical_wedge reads
+    # the pair together (a None azimuth admits every bin), so resolving this
+    # width to the nominal would only mislabel an omni prior as a 42° one in the
+    # persisted state and the /api/radar/analytics fov block.
     return None, None
 
 
@@ -124,7 +130,7 @@ class NodeAnalyticsManager:
             tx_lon=tx_lon,
             fc_hz=config.get("fc_hz", config.get("FC", 195e6)),
             beam_azimuth_deg=beam_az,
-            beam_width_deg=config.get("beam_width_deg", YAGI_BEAM_WIDTH_DEG),
+            beam_width_deg=resolve_beam_width_deg(config),
             max_range_km=config.get("max_range_km", YAGI_MAX_RANGE_KM),
             max_bistatic_range_km=config.get("max_bistatic_range_km"),
         )
