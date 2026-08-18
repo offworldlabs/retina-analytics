@@ -2,9 +2,8 @@
 
 import os
 
+from retina_analytics.constants import KM_PER_DEG_LAT, bearing_deg
 from retina_analytics.manager import NodeAnalyticsManager
-from retina_analytics.constants import bearing_deg
-from retina_analytics.constants import KM_PER_DEG_LAT
 
 _RX_LAT, _RX_LON = 32.90, -97.00
 _TX_LAT, _TX_LON = 32.78, -96.80
@@ -36,9 +35,8 @@ def test_placeholder_zero_azimuth_is_honored_as_explicit_aim():
     # would be aimed due north — this asserts the honored-explicit behavior so the
     # regression surfaces here rather than silently.
     from retina_analytics.constants import resolve_beam_azimuth_deg
-    az = resolve_beam_azimuth_deg(
-        {"beam_azimuth_deg": 0.0}, _RX_LAT, _RX_LON, _TX_LAT, _TX_LON
-    )
+
+    az = resolve_beam_azimuth_deg({"beam_azimuth_deg": 0.0}, _RX_LAT, _RX_LON, _TX_LAT, _TX_LON)
     assert az == 0.0  # honored as an explicit aim, NOT broadside
 
 
@@ -176,8 +174,8 @@ def test_older_calibration_schema_rebuilds_coverage():
         ec.add_point(_RX_LAT + 0.05 + i * 1e-4, _RX_LON + 0.05)
     assert ec.n_points == 30
 
-    ec.schema = CALIBRATION_SCHEMA - 1     # as if loaded from an older file
-    m.register_node("N", dict(_CFG))       # same RX, same range rule
+    ec.schema = CALIBRATION_SCHEMA - 1  # as if loaded from an older file
+    m.register_node("N", dict(_CFG))  # same RX, same range rule
 
     assert m.empirical_coverages["N"].n_points == 0
     assert m.empirical_coverages["N"].schema == CALIBRATION_SCHEMA
@@ -208,6 +206,7 @@ def test_schema_survives_a_save_load_round_trip(tmp_path):
     assert EmpiricalCoverageState.load_from_file(path).schema == CALIBRATION_SCHEMA
 
     import json
+
     with open(path) as f:
         d = json.load(f)
     d.pop("schema")

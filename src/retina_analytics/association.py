@@ -43,17 +43,20 @@ from retina_analytics.constants import (
     C_KM_US,
     KM_PER_DEG_LAT,
     R_EARTH,
-    bearing_deg as _bearing_deg,
     bistatic_max_radius_km,
-    haversine_km as _haversine_km,
     km_per_deg_lon,
     resolve_beam_azimuth_deg,
     resolve_beam_width_deg,
 )
+from retina_analytics.constants import (
+    bearing_deg as _bearing_deg,
+)
+from retina_analytics.constants import (
+    haversine_km as _haversine_km,
+)
 from retina_analytics.empirical_coverage import OBSERVED_LIMIT_MARGIN
 
 # ── Constants ────────────────────────────────────────────────────────────────
-
 
 
 # ── Geometry helpers ─────────────────────────────────────────────────────────
@@ -62,6 +65,7 @@ from retina_analytics.empirical_coverage import OBSERVED_LIMIT_MARGIN
 # byte-identical copies.  What remains here is genuinely local: an ENU frame
 # (the grid search works in metres from a reference, not in degrees) and the
 # delay/bisector maths that operates inside it.
+
 
 def _lla_to_enu(lat, lon, alt_km, ref_lat, ref_lon, ref_alt_km):
     dlat = math.radians(lat - ref_lat)
@@ -130,10 +134,7 @@ def _bisector(target_enu, tx_enu, rx_enu):
     """Return b = u_tx + u_rx at the target, in the same ENU frame."""
     d_tx = _norm([target_enu[i] - tx_enu[i] for i in range(3)]) or 1e-9
     d_rx = _norm([target_enu[i] - rx_enu[i] for i in range(3)]) or 1e-9
-    return tuple(
-        (tx_enu[i] - target_enu[i]) / d_tx + (rx_enu[i] - target_enu[i]) / d_rx
-        for i in range(3)
-    )
+    return tuple((tx_enu[i] - target_enu[i]) / d_tx + (rx_enu[i] - target_enu[i]) / d_rx for i in range(3))
 
 
 def implied_horizontal_velocity(m_a, b_a, m_b, b_b):
@@ -171,9 +172,11 @@ def implied_horizontal_speed(m_a, b_a, m_b, b_b):
 
 # ── Node Pair Configuration ─────────────────────────────────────────────────
 
+
 @dataclass
 class NodeGeometry:
     """Geometry of a single radar node."""
+
     node_id: str
     rx_lat: float
     rx_lon: float
@@ -210,6 +213,7 @@ class NodeGeometry:
 @dataclass
 class OverlapZone:
     """Pre-computed overlap zone between a pair of nodes."""
+
     node_a_id: str
     node_b_id: str
     # Grid points in the overlap region (lat, lon, alt_km)
@@ -225,7 +229,7 @@ class OverlapZone:
     fc_a_hz: float = 195e6
     fc_b_hz: float = 195e6
     # Association gate parameters
-    delay_gate_us: float = 5.0     # max delay mismatch between prediction and measurement
+    delay_gate_us: float = 5.0  # max delay mismatch between prediction and measurement
     doppler_gate_hz: float = 30.0  # retained for the wire format / overlap summary
 
     def __post_init__(self):
@@ -240,6 +244,7 @@ class OverlapZone:
             self._np_pred_a = np.array([dp[0] for dp in self.delay_pairs], dtype=np.float32)
             self._np_pred_b = np.array([dp[1] for dp in self.delay_pairs], dtype=np.float32)
 
+
 @dataclass
 class TrackPairCandidate:
     """Two single-node tracks judged to be the same target.
@@ -253,6 +258,7 @@ class TrackPairCandidate:
     against the same 6 unknowns.  chi2_per_dof is the result of asking whether
     one constant-velocity trajectory explains all of them.
     """
+
     timestamp_ms: int
     node_a_id: str
     node_b_id: str
@@ -285,6 +291,7 @@ class TrackPairCandidate:
 
 
 # ── Pre-computation ──────────────────────────────────────────────────────────
+
 
 def _compute_node_enu(geo: NodeGeometry, ref_lat: float, ref_lon: float, ref_alt_km: float):
     """Compute RX and TX ENU positions relative to a common reference."""
@@ -331,11 +338,14 @@ def _point_in_beam(lat, lon, geo: NodeGeometry) -> bool:
     return True
 
 
-def compute_overlap_zone(geo_a: NodeGeometry, geo_b: NodeGeometry,
-                         grid_step_km: float = 3.0,
-                         altitudes_km: tuple[float, ...] = (1.5, 3.0, 5.0, 7.0, 9.0, 11.0),
-                         delay_gate_us: float = 5.0,
-                         doppler_gate_hz: float = 30.0) -> OverlapZone:
+def compute_overlap_zone(
+    geo_a: NodeGeometry,
+    geo_b: NodeGeometry,
+    grid_step_km: float = 3.0,
+    altitudes_km: tuple[float, ...] = (1.5, 3.0, 5.0, 7.0, 9.0, 11.0),
+    delay_gate_us: float = 5.0,
+    doppler_gate_hz: float = 30.0,
+) -> OverlapZone:
     """Pre-compute the overlap zone between two nodes.
 
     Creates a grid of test points within both nodes' detection cones
@@ -406,11 +416,9 @@ def compute_overlap_zone(geo_a: NodeGeometry, geo_b: NodeGeometry,
                 # cross-aircraft pairings are cheapest to form.  Toward a distant
                 # tower it runs the other way, a 43 km baseline genuinely
                 # reaching 73 km.
-                if (geo_a.max_bistatic_range_km is not None
-                        and delay_a * C_KM_US > geo_a.max_bistatic_range_km):
+                if geo_a.max_bistatic_range_km is not None and delay_a * C_KM_US > geo_a.max_bistatic_range_km:
                     continue
-                if (geo_b.max_bistatic_range_km is not None
-                        and delay_b * C_KM_US > geo_b.max_bistatic_range_km):
+                if geo_b.max_bistatic_range_km is not None and delay_b * C_KM_US > geo_b.max_bistatic_range_km:
                     continue
 
                 # Only keep physically meaningful delays
@@ -425,10 +433,12 @@ def compute_overlap_zone(geo_a: NodeGeometry, geo_b: NodeGeometry,
                 # the two nodes observe the velocity along.  Precomputed here
                 # because the grid is fixed at registration and the runtime
                 # test then costs a couple of dot products.
-                bisector_pairs.append((
-                    _bisector(target_enu, tx_a_enu, rx_a_enu),
-                    _bisector(target_enu, tx_b_enu, rx_b_enu),
-                ))
+                bisector_pairs.append(
+                    (
+                        _bisector(target_enu, tx_a_enu, rx_a_enu),
+                        _bisector(target_enu, tx_b_enu, rx_b_enu),
+                    )
+                )
 
     return OverlapZone(
         node_a_id=geo_a.node_id,
@@ -471,8 +481,8 @@ def _batch_grid_match(zone: OverlapZone, delays_a: list, delays_b: list) -> dict
     db = np.asarray(delays_b, dtype=np.float32)
     gate = np.float32(zone.delay_gate_us)
 
-    gate_a = np.abs(da[:, None] - pred_a) < gate      # (Ta, G)
-    gate_b = np.abs(pred_b[:, None] - db) < gate      # (G, Tb)
+    gate_a = np.abs(da[:, None] - pred_a) < gate  # (Ta, G)
+    gate_b = np.abs(pred_b[:, None] - db) < gate  # (G, Tb)
     # float32 so numpy takes the SGEMM path; uint8 has no BLAS kernel.
     match = gate_a.astype(np.float32) @ gate_b.astype(np.float32)
 
@@ -482,8 +492,7 @@ def _batch_grid_match(zone: OverlapZone, delays_a: list, delays_b: list) -> dict
         valid = np.nonzero(gate_a[i_a] & gate_b[:, i_b])[0]
         if valid.size == 0:
             continue
-        res = (np.abs(pred_a[valid] - da[i_a])
-               + np.abs(pred_b[valid] - db[i_b]))
+        res = np.abs(pred_a[valid] - da[i_a]) + np.abs(pred_b[valid] - db[i_b])
         out[(i_a, i_b)] = int(valid[np.argmin(res)])
     return out
 
@@ -546,6 +555,7 @@ def _has_receiver_position(config: dict) -> bool:
 
 # ── InterNodeAssociator ──────────────────────────────────────────────────────
 
+
 class InterNodeAssociator:
     """Manages overlap zones for all node pairs and runs association at runtime."""
 
@@ -553,12 +563,21 @@ class InterNodeAssociator:
     # = 3.0) so a bare construction exercises the real geometry.  It was 30.0
     # — a grid 10x coarser and ~100x sparser than any deployment, and the
     # merge-distance rationale in detection_association assumes 3.0.
-    def __init__(self, delay_gate_us: float = 5.0, doppler_gate_hz: float = 30.0,
-                 grid_step_km: float = 3.0, assoc_interval_s: float = 30.0,
-                 cv_fit=None, cv_chi2_max: float = 2.0, cv_min_epochs: int = 4,
-                 cv_min_span_s: float = 12.0, cv_exclusive: bool = True,
-                 coverage_provider=None, max_neighbors: int = 50,
-                 max_pairs_per_round: int = 64):
+    def __init__(
+        self,
+        delay_gate_us: float = 5.0,
+        doppler_gate_hz: float = 30.0,
+        grid_step_km: float = 3.0,
+        assoc_interval_s: float = 30.0,
+        cv_fit=None,
+        cv_chi2_max: float = 2.0,
+        cv_min_epochs: int = 4,
+        cv_min_span_s: float = 12.0,
+        cv_exclusive: bool = True,
+        coverage_provider=None,
+        max_neighbors: int = 50,
+        max_pairs_per_round: int = 64,
+    ):
         self.delay_gate_us = delay_gate_us
         self.doppler_gate_hz = doppler_gate_hz
         self.grid_step_km = grid_step_km
@@ -616,12 +635,12 @@ class InterNodeAssociator:
         # polygon that tightens later can be detected and the grids rebuilt.
         # Counters for what the fine test actually did, so its value is
         # observable rather than assumed.
-        self.track_pairs_gated: int = 0       # survived the coarse delay grid
-        self.track_pairs_rejected: int = 0    # ... then failed the chi2 test
+        self.track_pairs_gated: int = 0  # survived the coarse delay grid
+        self.track_pairs_rejected: int = 0  # ... then failed the chi2 test
         self.track_pairs_accepted: int = 0
-        self.track_pairs_unfitted: int = 0    # too few epochs, or the fit failed
+        self.track_pairs_unfitted: int = 0  # too few epochs, or the fit failed
         self.track_pairs_superseded: int = 0  # lost their tracks to a better fit
-        self.track_pairs_deferred: int = 0    # rounds cut short by a budget (once per round)
+        self.track_pairs_deferred: int = 0  # rounds cut short by a budget (once per round)
         # Adjacency index: node_id → set of neighbor node_ids that share a real
         # overlap zone (delay_pairs is non-empty).  Built during registration so
         # submit_frame can iterate O(K) neighbors instead of O(N) all nodes.
@@ -707,7 +726,7 @@ class InterNodeAssociator:
         # frame-skew counters that reported on it moved there with it, having
         # been permanently zero here since the track path took over.
         self._FRAME_SYNC_MAX_AGE_MS: int = 4_000
-        self._register_lock = __import__('threading').Lock()
+        self._register_lock = __import__("threading").Lock()
 
     def register_node(self, node_id: str, config: dict):
         """Register a node and pre-compute overlap zones with all existing nodes.
@@ -737,16 +756,13 @@ class InterNodeAssociator:
             beam_width_deg=resolve_beam_width_deg(config),
             max_range_km=config.get("max_range_km", 50),
             max_bistatic_range_km=config.get("max_bistatic_range_km"),
-            coverage_limit=(self.coverage_provider(node_id)
-                            if self.coverage_provider else None),
+            coverage_limit=(self.coverage_provider(node_id) if self.coverage_provider else None),
         )
 
         # Honour an explicit aim (aimed coverage-ring Yagi); otherwise broadside
         # to the RX→TX baseline. The overlap grid is computed from this azimuth,
         # so it must match the node's true aim. Shared with manager.register_node.
-        geo.beam_azimuth_deg = resolve_beam_azimuth_deg(
-            config, geo.rx_lat, geo.rx_lon, geo.tx_lat, geo.tx_lon
-        )
+        geo.beam_azimuth_deg = resolve_beam_azimuth_deg(config, geo.rx_lat, geo.rx_lon, geo.tx_lat, geo.tx_lon)
 
         with self._register_lock:
             # Recorded before the unchanged-geometry early return: the equality
@@ -813,9 +829,12 @@ class InterNodeAssociator:
             self._last_assoc.clear()
             self._neighbor_cursor.clear()
             for name in (
-                "track_pairs_gated", "track_pairs_rejected",
-                "track_pairs_accepted", "track_pairs_unfitted",
-                "track_pairs_superseded", "track_pairs_deferred",
+                "track_pairs_gated",
+                "track_pairs_rejected",
+                "track_pairs_accepted",
+                "track_pairs_unfitted",
+                "track_pairs_superseded",
+                "track_pairs_deferred",
             ):
                 setattr(self, name, 0)
 
@@ -885,10 +904,10 @@ class InterNodeAssociator:
                 if other_id == node_id or not self._is_positioned(other_id):
                     continue
                 pair_key = tuple(sorted([node_id, other_id]))
-                a, b = ((geo, other_geo) if pair_key[0] == node_id
-                        else (other_geo, geo))
+                a, b = (geo, other_geo) if pair_key[0] == node_id else (other_geo, geo)
                 zone = compute_overlap_zone(
-                    a, b,
+                    a,
+                    b,
                     grid_step_km=self.grid_step_km,
                     delay_gate_us=self.delay_gate_us,
                     doppler_gate_hz=self.doppler_gate_hz,
@@ -906,8 +925,7 @@ class InterNodeAssociator:
                 rebuilt += 1
         return rebuilt
 
-    def submit_tracks(self, node_id: str, tracks: list[dict],
-                      timestamp_ms: int) -> list[TrackPairCandidate]:
+    def submit_tracks(self, node_id: str, tracks: list[dict], timestamp_ms: int) -> list[TrackPairCandidate]:
         """Associate this node's confirmed single-node tracks with its neighbours'.
 
         The detection-level path (now in detection_association.py) pairs one echo
@@ -953,7 +971,7 @@ class InterNodeAssociator:
         # LM fit, and a hardware node sends at 22 fps.  Storing the tracks above
         # is unconditional, so a neighbour triggering its own round still sees
         # this node's latest history.
-        now = __import__('time').monotonic()
+        now = __import__("time").monotonic()
         if now - self._last_assoc.get(node_id, 0.0) < self._ASSOC_MIN_INTERVAL_S:
             return []
         self._last_assoc[node_id] = now
@@ -981,8 +999,7 @@ class InterNodeAssociator:
         # the fit is deferred.  Merging them was the bug: the fit budget was
         # decremented only inside the fit branch, so on the deferred path it
         # never depleted and its cap silently applied per node pair instead.
-        budget = {"fits": self._MAX_FITS_PER_ROUND,
-                  "pairs": self._MAX_PAIRS_PER_ROUND}
+        budget = {"fits": self._MAX_FITS_PER_ROUND, "pairs": self._MAX_PAIRS_PER_ROUND}
         for other_id in visit:
             other_tracks = self._pending_tracks.get(other_id)
             if not other_tracks:
@@ -995,8 +1012,7 @@ class InterNodeAssociator:
                 tracks_a, tracks_b = tracks, other_tracks
             else:
                 tracks_a, tracks_b = other_tracks, tracks
-            emitted = self._pair_tracks(zone, tracks_a, tracks_b, timestamp_ms,
-                                        budget)
+            emitted = self._pair_tracks(zone, tracks_a, tracks_b, timestamp_ms, budget)
             out.extend(emitted)
             budget["pairs"] -= len(emitted)
             if budget["fits"] <= 0 or budget["pairs"] <= 0:
@@ -1005,16 +1021,19 @@ class InterNodeAssociator:
                 # deferred — which is only true because the cursor rotates.
                 # This is the one place work is actually deferred, so it is
                 # the one place the counter increments: once per such round.
-                self._neighbor_cursor[node_id] = (
-                    (start + visit.index(other_id) + 1) % n_total)
+                self._neighbor_cursor[node_id] = (start + visit.index(other_id) + 1) % n_total
                 self.track_pairs_deferred += 1
                 break
         return out
 
-    def _pair_tracks(self, zone: OverlapZone, tracks_a: list[dict],
-                     tracks_b: list[dict], timestamp_ms: int,
-                     budget: dict | None = None
-                     ) -> list[TrackPairCandidate]:
+    def _pair_tracks(
+        self,
+        zone: OverlapZone,
+        tracks_a: list[dict],
+        tracks_b: list[dict],
+        timestamp_ms: int,
+        budget: dict | None = None,
+    ) -> list[TrackPairCandidate]:
         # ── Stage 1: enumerate and score every hypothesis ────────────────────
         # Each surviving (track_a, track_b) is a hypothesis about the world:
         # "these two echo histories are one aircraft."  They are scored here and
@@ -1022,7 +1041,7 @@ class InterNodeAssociator:
         # hypotheses are not independent: one track is one aircraft, so two
         # pairings sharing a track are mutually exclusive.
         fitted: list[TrackPairCandidate] = []
-        held: list[TrackPairCandidate] = []   # too little span to score yet
+        held: list[TrackPairCandidate] = []  # too little span to score yet
 
         # One BLAS contraction for every pairing, rather than a full-grid scan
         # each — see _batch_grid_match.  This runs in the frame worker, so its
@@ -1048,15 +1067,17 @@ class InterNodeAssociator:
         # candidates for a cost nobody incurs — the pair budget is the real one,
         # and it is an order of magnitude larger.
         _b = budget or {}
-        limit = (_b.get("fits", self._MAX_FITS_PER_ROUND)
-                 if self.cv_fit is not None
-                 else _b.get("pairs", self._MAX_PAIRS_PER_ROUND))
+        limit = (
+            _b.get("fits", self._MAX_FITS_PER_ROUND)
+            if self.cv_fit is not None
+            else _b.get("pairs", self._MAX_PAIRS_PER_ROUND)
+        )
         ordered = sorted(
             matches.items(),
-            key=lambda kv: abs(zone._np_pred_a[kv[1]]
-                               - float(usable_a[kv[0][0]]["history"][-1]["delay_us"]))
-            + abs(zone._np_pred_b[kv[1]]
-                  - float(usable_b[kv[0][1]]["history"][-1]["delay_us"])),
+            key=lambda kv: (
+                abs(zone._np_pred_a[kv[1]] - float(usable_a[kv[0][0]]["history"][-1]["delay_us"]))
+                + abs(zone._np_pred_b[kv[1]] - float(usable_b[kv[0][1]]["history"][-1]["delay_us"]))
+            ),
         )[: max(limit, 0)]
 
         for (i_a, i_b), best_g in ordered:
@@ -1074,8 +1095,10 @@ class InterNodeAssociator:
             if zone.bisector_pairs:
                 b_a, b_b = zone.bisector_pairs[best_g]
                 v = implied_horizontal_velocity(
-                    float(last_a["doppler_hz"]) * C_KM_S * 1000.0 / zone.fc_a_hz, b_a,
-                    float(last_b["doppler_hz"]) * C_KM_S * 1000.0 / zone.fc_b_hz, b_b,
+                    float(last_a["doppler_hz"]) * C_KM_S * 1000.0 / zone.fc_a_hz,
+                    b_a,
+                    float(last_b["doppler_hz"]) * C_KM_S * 1000.0 / zone.fc_b_hz,
+                    b_b,
                 )
                 # Seed only — never a rejection here, unlike the detection
                 # path.  The implied-speed test measured 0% power against
@@ -1105,14 +1128,18 @@ class InterNodeAssociator:
             # selection, which is exactly backwards.
             span_a = float(hist_a[-1]["t_s"]) - float(hist_a[0]["t_s"])
             span_b = float(hist_b[-1]["t_s"]) - float(hist_b[0]["t_s"])
-            if (self.cv_fit is not None
-                    and len(epochs) >= self.cv_min_epochs
-                    and min(span_a, span_b) >= self.cv_min_span_s):
+            if (
+                self.cv_fit is not None
+                and len(epochs) >= self.cv_min_epochs
+                and min(span_a, span_b) >= self.cv_min_span_s
+            ):
                 fit = self.cv_fit(
-                    {"initial_guess": {"lat": g_lat, "lon": g_lon, "alt_km": g_alt},
-                     "initial_velocity": vel_seed,
-                     "epochs": epochs,
-                     "timestamp_ms": timestamp_ms},
+                    {
+                        "initial_guess": {"lat": g_lat, "lon": g_lon, "alt_km": g_alt},
+                        "initial_velocity": vel_seed,
+                        "epochs": epochs,
+                        "timestamp_ms": timestamp_ms,
+                    },
                     self.node_configs,
                 )
                 if budget is not None:
@@ -1140,9 +1167,11 @@ class InterNodeAssociator:
                 self.track_pairs_unfitted += 1
                 deferred_epochs = (
                     epochs
-                    if (self.cv_fit is None
+                    if (
+                        self.cv_fit is None
                         and len(epochs) >= self.cv_min_epochs
-                        and min(span_a, span_b) >= self.cv_min_span_s)
+                        and min(span_a, span_b) >= self.cv_min_span_s
+                    )
                     else None
                 )
 
@@ -1158,9 +1187,14 @@ class InterNodeAssociator:
                 doppler_b=float(last_b["doppler_hz"]),
                 snr_a=float(last_a.get("snr", 0.0)),
                 snr_b=float(last_b.get("snr", 0.0)),
-                lat=lat, lon=lon, alt_km=alt_km,
-                vel_east_ms=vel_e, vel_north_ms=vel_n,
-                chi2_per_dof=chi2_per_dof, dof=dof, n_epochs=len(epochs),
+                lat=lat,
+                lon=lon,
+                alt_km=alt_km,
+                vel_east_ms=vel_e,
+                vel_north_ms=vel_n,
+                chi2_per_dof=chi2_per_dof,
+                dof=dof,
+                n_epochs=len(epochs),
                 epochs=deferred_epochs,
             )
             (fitted if chi2_per_dof is not None else held).append(cand)
@@ -1193,8 +1227,7 @@ class InterNodeAssociator:
         if self.cv_exclusive:
             fitted.sort(key=lambda c: c.chi2_per_dof)
         for c in fitted:
-            if self.cv_exclusive and (
-                    c.track_a_id in claimed_a or c.track_b_id in claimed_b):
+            if self.cv_exclusive and (c.track_a_id in claimed_a or c.track_b_id in claimed_b):
                 self.track_pairs_superseded += 1
                 continue
             claimed_a.add(c.track_a_id)
@@ -1208,16 +1241,13 @@ class InterNodeAssociator:
             # A held pairing has no score, so it cannot claim anything — and a
             # track already explained by a scored winner does not get to seed a
             # second target on no evidence.
-            if self.cv_exclusive and (
-                    c.track_a_id in claimed_a or c.track_b_id in claimed_b):
+            if self.cv_exclusive and (c.track_a_id in claimed_a or c.track_b_id in claimed_b):
                 self.track_pairs_superseded += 1
                 continue
             results.append(c)
         return results
 
-    def format_track_pairs_for_solver(
-        self, pairs: list[TrackPairCandidate]
-    ) -> list[dict]:
+    def format_track_pairs_for_solver(self, pairs: list[TrackPairCandidate]) -> list[dict]:
         """Cluster track pairs by fitted position into multinode solver inputs.
 
         Same shape format_candidates_for_solver emits, so the solver worker is
@@ -1242,11 +1272,8 @@ class InterNodeAssociator:
         lons = np.array([p.lon for p in pairs], dtype=np.float64)
         km_per_lat = KM_PER_DEG_LAT
         km_per_lon = km_per_deg_lon(float(np.mean(lats)))
-        dist_sq = (((lats[:, None] - lats) * km_per_lat) ** 2
-                   + ((lons[:, None] - lons) * km_per_lon) ** 2)
-        rows, cols = np.where(
-            (dist_sq < _MERGE_DIST_KM ** 2) & (np.arange(n)[:, None] < np.arange(n))
-        )
+        dist_sq = ((lats[:, None] - lats) * km_per_lat) ** 2 + ((lons[:, None] - lons) * km_per_lon) ** 2
+        rows, cols = np.where((dist_sq < _MERGE_DIST_KM**2) & (np.arange(n)[:, None] < np.arange(n)))
         for i, j in zip(rows.tolist(), cols.tolist()):
             parent[_find(i)] = _find(j)
 
@@ -1263,8 +1290,7 @@ class InterNodeAssociator:
                     (p.node_b_id, p.delay_b, p.doppler_b, p.snr_b),
                 ):
                     if nid not in by_node or s > by_node[nid]["snr"]:
-                        by_node[nid] = {"node_id": nid, "delay_us": d,
-                                        "doppler_hz": f, "snr": s}
+                        by_node[nid] = {"node_id": nid, "delay_us": d, "doppler_hz": f, "snr": s}
 
             fitted = [p for p in group if p.chi2_per_dof is not None]
             # Worst fit in the cluster, not the best: a cluster is published as
@@ -1272,46 +1298,46 @@ class InterNodeAssociator:
             # be laundered by a well-fitted neighbour sharing its position.
             worst_chi2 = max((p.chi2_per_dof for p in fitted), default=None)
 
-            solver_inputs.append({
-                "initial_guess": {
-                    "lat": sum(p.lat for p in group) / len(group),
-                    "lon": sum(p.lon for p in group) / len(group),
-                    "alt_km": sum(p.alt_km for p in group) / len(group),
-                },
-                "initial_velocity": {
-                    "vel_east_ms": sum(p.vel_east_ms for p in group) / len(group),
-                    "vel_north_ms": sum(p.vel_north_ms for p in group) / len(group),
-                },
-                "measurements": list(by_node.values()),
-                "n_nodes": len(by_node),
-                "timestamp_ms": group[0].timestamp_ms,
-                "adsb_hex": None,
-                "chi2_per_dof": worst_chi2,
-                "n_epochs": min(p.n_epochs for p in group),
-                # Present only when the fit has not run yet: the solver worker
-                # runs it there, on its own threads and behind its own queue,
-                # instead of on the frame path.  Taken from the pairing with the
-                # most history, which is the best-conditioned in the cluster.
-                "cv_epochs": max((p.epochs for p in group if p.epochs),
-                                 key=len, default=None),
-                "track_pair_ids": sorted(
-                    {(p.track_a_id, p.track_b_id) for p in group}
-                )[:1],
-                "track_ids": sorted({p.track_a_id for p in group}
-                                    | {p.track_b_id for p in group}),
-            })
+            solver_inputs.append(
+                {
+                    "initial_guess": {
+                        "lat": sum(p.lat for p in group) / len(group),
+                        "lon": sum(p.lon for p in group) / len(group),
+                        "alt_km": sum(p.alt_km for p in group) / len(group),
+                    },
+                    "initial_velocity": {
+                        "vel_east_ms": sum(p.vel_east_ms for p in group) / len(group),
+                        "vel_north_ms": sum(p.vel_north_ms for p in group) / len(group),
+                    },
+                    "measurements": list(by_node.values()),
+                    "n_nodes": len(by_node),
+                    "timestamp_ms": group[0].timestamp_ms,
+                    "adsb_hex": None,
+                    "chi2_per_dof": worst_chi2,
+                    "n_epochs": min(p.n_epochs for p in group),
+                    # Present only when the fit has not run yet: the solver worker
+                    # runs it there, on its own threads and behind its own queue,
+                    # instead of on the frame path.  Taken from the pairing with the
+                    # most history, which is the best-conditioned in the cluster.
+                    "cv_epochs": max((p.epochs for p in group if p.epochs), key=len, default=None),
+                    "track_pair_ids": sorted({(p.track_a_id, p.track_b_id) for p in group})[:1],
+                    "track_ids": sorted({p.track_a_id for p in group} | {p.track_b_id for p in group}),
+                }
+            )
         return solver_inputs
 
     def get_overlap_summary(self) -> list[dict]:
         """Return summary of all overlap zones."""
         summaries = []
         for (a_id, b_id), zone in list(self.overlap_zones.items()):
-            summaries.append({
-                "node_a": a_id,
-                "node_b": b_id,
-                "grid_points": len(zone.grid_points),
-                "delay_gate_us": zone.delay_gate_us,
-                "doppler_gate_hz": zone.doppler_gate_hz,
-                "has_overlap": len(zone.grid_points) > 0,
-            })
+            summaries.append(
+                {
+                    "node_a": a_id,
+                    "node_b": b_id,
+                    "grid_points": len(zone.grid_points),
+                    "delay_gate_us": zone.delay_gate_us,
+                    "doppler_gate_hz": zone.doppler_gate_hz,
+                    "has_overlap": len(zone.grid_points) > 0,
+                }
+            )
         return summaries

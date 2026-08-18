@@ -5,13 +5,12 @@ import math
 import pytest
 
 from retina_analytics.empirical_coverage import (
-    EmpiricalCoverageState,
     MIN_POINTS,
+    EmpiricalCoverageState,
     _bearing_and_range,
     _bin_for_bearing,
     _p85,
 )
-
 
 # ── Helper functions ──────────────────────────────────────────────────────────
 
@@ -22,19 +21,19 @@ class TestBearingAndRange:
     def test_due_north(self):
         bearing, range_km = _bearing_and_range(RX_LAT, RX_LON, RX_LAT + 0.1, RX_LON)
         assert abs(bearing - 0.0) < 1.0  # ~0° bearing
-        assert 10.0 < range_km < 12.0    # ~11.1 km
+        assert 10.0 < range_km < 12.0  # ~11.1 km
 
     def test_due_east(self):
         bearing, range_km = _bearing_and_range(RX_LAT, RX_LON, RX_LAT, RX_LON + 0.12)
-        assert 85.0 < bearing < 95.0     # ~90° bearing
+        assert 85.0 < bearing < 95.0  # ~90° bearing
 
     def test_due_south(self):
         bearing, range_km = _bearing_and_range(RX_LAT, RX_LON, RX_LAT - 0.1, RX_LON)
-        assert 175.0 < bearing < 185.0   # ~180° bearing
+        assert 175.0 < bearing < 185.0  # ~180° bearing
 
     def test_due_west(self):
         bearing, range_km = _bearing_and_range(RX_LAT, RX_LON, RX_LAT, RX_LON - 0.12)
-        assert 265.0 < bearing < 275.0   # ~270° bearing
+        assert 265.0 < bearing < 275.0  # ~270° bearing
 
     def test_same_point_returns_zero_range(self):
         bearing, range_km = _bearing_and_range(RX_LAT, RX_LON, RX_LAT, RX_LON)
@@ -83,6 +82,7 @@ class TestP85:
 
 # ── EmpiricalCoverageState ───────────────────────────────────────────────────
 
+
 class TestCoverageIngestion:
     def test_add_point_and_count(self):
         cov = EmpiricalCoverageState(RX_LAT, RX_LON)
@@ -107,10 +107,10 @@ class TestCoverageIngestion:
     def test_filled_bins_count(self):
         cov = EmpiricalCoverageState(RX_LAT, RX_LON)
         # Add points in 4 directions
-        cov.add_point(RX_LAT + 0.1, RX_LON)           # N (bin ~0)
-        cov.add_point(RX_LAT, RX_LON + 0.12)           # E (bin ~18)
-        cov.add_point(RX_LAT - 0.1, RX_LON)            # S (bin ~36)
-        cov.add_point(RX_LAT, RX_LON - 0.12)           # W (bin ~54)
+        cov.add_point(RX_LAT + 0.1, RX_LON)  # N (bin ~0)
+        cov.add_point(RX_LAT, RX_LON + 0.12)  # E (bin ~18)
+        cov.add_point(RX_LAT - 0.1, RX_LON)  # S (bin ~36)
+        cov.add_point(RX_LAT, RX_LON - 0.12)  # W (bin ~54)
         assert cov.n_filled_bins == 4
 
 
@@ -196,6 +196,7 @@ class TestPolygonGeneration:
 
 
 # ── Serialisation ─────────────────────────────────────────────────────────────
+
 
 class TestCoverageSerialization:
     def test_to_dict_from_dict_round_trip(self):

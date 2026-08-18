@@ -38,13 +38,14 @@ from retina_analytics.constants import KM_PER_DEG_LAT, km_per_deg_lon
 @dataclass
 class AssociationCandidate:
     """A detection pair from two nodes that may be the same target."""
+
     timestamp_ms: int
     node_a_id: str
     node_b_id: str
-    det_a_idx: int      # index in node A's detection array
-    det_b_idx: int      # index in node B's detection array
-    delay_a: float      # measured delay at node A
-    delay_b: float      # measured delay at node B
+    det_a_idx: int  # index in node A's detection array
+    det_b_idx: int  # index in node B's detection array
+    delay_a: float  # measured delay at node A
+    delay_b: float  # measured delay at node B
     doppler_a: float
     doppler_b: float
     snr_a: float
@@ -73,10 +74,7 @@ class AssociationCandidate:
     vel_est_ms: tuple | None = None
 
 
-
-def find_associations(zone: OverlapZone,
-                      frame_a: dict, frame_b: dict,
-                      timestamp_ms: int) -> list[AssociationCandidate]:
+def find_associations(zone: OverlapZone, frame_a: dict, frame_b: dict, timestamp_ms: int) -> list[AssociationCandidate]:
     """Find detection associations between two nodes using pre-computed gates.
 
     Vectorised with numpy: replaces the O(Na × G × Nb) pure-Python triple
@@ -92,12 +90,12 @@ def find_associations(zone: OverlapZone,
     Returns:
         List of AssociationCandidate objects (best grid-point per pair).
     """
-    delays_a   = frame_a.get("delay",   [])
+    delays_a = frame_a.get("delay", [])
     dopplers_a = frame_a.get("doppler", [])
-    snrs_a     = frame_a.get("snr",     [])
-    delays_b   = frame_b.get("delay",   [])
+    snrs_a = frame_a.get("snr", [])
+    delays_b = frame_b.get("delay", [])
     dopplers_b = frame_b.get("doppler", [])
-    snrs_b     = frame_b.get("snr",     [])
+    snrs_b = frame_b.get("snr", [])
 
     if not delays_a or not delays_b or not zone.delay_pairs:
         return []
@@ -108,19 +106,19 @@ def find_associations(zone: OverlapZone,
     pred_b = zone._np_pred_b  # (G,) float32 — expected delay at node B
 
     # ── Convert incoming detections to numpy ─────────────────────────────────
-    da = np.array(delays_a,   dtype=np.float32)  # (Na,)
-    db = np.array(delays_b,   dtype=np.float32)  # (Nb,)
+    da = np.array(delays_a, dtype=np.float32)  # (Na,)
+    db = np.array(delays_b, dtype=np.float32)  # (Nb,)
     fa = np.array(dopplers_a, dtype=np.float32)  # (Na,)
     fb = np.array(dopplers_b, dtype=np.float32)  # (Nb,)
     na, nb = len(da), len(db)
 
-    gate   = np.float32(zone.delay_gate_us)
+    gate = np.float32(zone.delay_gate_us)
 
     # ── Delay gate matrices ───────────────────────────────────────────────────
     # gate_a[i, g] = True  ↔  |delay_a[i] − pred_a[g]| < delay_gate
-    gate_a = np.abs(da[:, None] - pred_a) < gate          # (Na, G) bool
+    gate_a = np.abs(da[:, None] - pred_a) < gate  # (Na, G) bool
     # gate_b[g, j] = True  ↔  |pred_b[g]  − delay_b[j]| < delay_gate
-    gate_b = np.abs(pred_b[:, None] - db) < gate          # (G, Nb) bool
+    gate_b = np.abs(pred_b[:, None] - db) < gate  # (G, Nb) bool
 
     # match[i, j] = number of grid points that simultaneously satisfy
     # gate_a[i,g] AND gate_b[g,j].  Cast to float32 so numpy dispatches
@@ -157,7 +155,7 @@ def find_associations(zone: OverlapZone,
         valid_g = np.nonzero(gate_a[i_a] & gate_b[:, i_b])[0]
         if valid_g.size == 0:
             continue
-        res   = np.abs(pred_a[valid_g] - da[i_a]) + np.abs(pred_b[valid_g] - db[i_b])
+        res = np.abs(pred_a[valid_g] - da[i_a]) + np.abs(pred_b[valid_g] - db[i_b])
         best_g = int(valid_g[np.argmin(res)])
         g_lat, g_lon, g_alt = zone.grid_points[best_g]
 
@@ -173,8 +171,10 @@ def find_associations(zone: OverlapZone,
         if zone.bisector_pairs and (fa[i_a] or fb[i_b]):
             b_a_vec, b_b_vec = zone.bisector_pairs[best_g]
             vel_est = implied_horizontal_velocity(
-                float(fa[i_a]) * C_KM_S * 1000.0 / zone.fc_a_hz, b_a_vec,
-                float(fb[i_b]) * C_KM_S * 1000.0 / zone.fc_b_hz, b_b_vec,
+                float(fa[i_a]) * C_KM_S * 1000.0 / zone.fc_a_hz,
+                b_a_vec,
+                float(fb[i_b]) * C_KM_S * 1000.0 / zone.fc_b_hz,
+                b_b_vec,
             )
             # None means the geometry cannot support the inference — abstain
             # rather than guess.  A finite speed above the bound is a positive
@@ -193,12 +193,8 @@ def find_associations(zone: OverlapZone,
         # When NEITHER frame has an ADS-B list (rare: non-ADS-B aircraft, or
         # clutter-only frames) we let the pairing through — the downstream
         # rms_delay and beam-coverage checks provide the last line of defence.
-        _ae_a = (_adsb_list_a[i_a]
-                 if _adsb_list_a is not None and i_a < len(_adsb_list_a)
-                 else None)
-        _ae_b = (_adsb_list_b[i_b]
-                 if _adsb_list_b is not None and i_b < len(_adsb_list_b)
-                 else None)
+        _ae_a = _adsb_list_a[i_a] if _adsb_list_a is not None and i_a < len(_adsb_list_a) else None
+        _ae_b = _adsb_list_b[i_b] if _adsb_list_b is not None and i_b < len(_adsb_list_b) else None
         if _adsb_list_a is not None or _adsb_list_b is not None:
             # At least one frame has ADS-B capability; require both indices to
             # correspond to genuine aircraft (non-None dict entries).
@@ -263,25 +259,25 @@ def find_associations(zone: OverlapZone,
             _had_adsb_override = True
 
         cand = AssociationCandidate(
-            timestamp_ms  = timestamp_ms,
-            node_a_id     = zone.node_a_id,
-            node_b_id     = zone.node_b_id,
-            det_a_idx     = i_a,
-            det_b_idx     = i_b,
-            delay_a       = float(da[i_a]),
-            delay_b       = float(db[i_b]),
-            doppler_a     = float(fa[i_a]),
-            doppler_b     = float(fb[i_b]),
-            snr_a         = float(sa_arr[i_a]),
-            snr_b         = float(sb_arr[i_b]),
-            grid_delay_a  = float(pred_a[best_g]),
-            grid_delay_b  = float(pred_b[best_g]),
-            grid_lat      = g_lat,
-            grid_lon      = g_lon,
-            grid_alt_km   = g_alt,
-            had_adsb_override = _had_adsb_override,
-            adsb_hex      = _candidate_hex,
-            vel_est_ms    = vel_est,
+            timestamp_ms=timestamp_ms,
+            node_a_id=zone.node_a_id,
+            node_b_id=zone.node_b_id,
+            det_a_idx=i_a,
+            det_b_idx=i_b,
+            delay_a=float(da[i_a]),
+            delay_b=float(db[i_b]),
+            doppler_a=float(fa[i_a]),
+            doppler_b=float(fb[i_b]),
+            snr_a=float(sa_arr[i_a]),
+            snr_b=float(sb_arr[i_b]),
+            grid_delay_a=float(pred_a[best_g]),
+            grid_delay_b=float(pred_b[best_g]),
+            grid_lat=g_lat,
+            grid_lon=g_lon,
+            grid_alt_km=g_alt,
+            had_adsb_override=_had_adsb_override,
+            adsb_hex=_candidate_hex,
+            vel_est_ms=vel_est,
         )
         # np.where yields each (i_a, i_b) exactly once, so no dedupe is
         # needed here — the residual-comparison else-branch this used to
@@ -289,7 +285,6 @@ def find_associations(zone: OverlapZone,
         candidates[(i_a, i_b)] = cand
 
     return list(candidates.values())
-
 
 
 class DetectionAssociator(InterNodeAssociator):
@@ -341,7 +336,7 @@ class DetectionAssociator(InterNodeAssociator):
             return []  # no registered overlap pairs for this node yet
 
         # Rate-limit: only run association at most once per _ASSOC_MIN_INTERVAL_S
-        now = __import__('time').monotonic()
+        now = __import__("time").monotonic()
         if now - self._last_assoc.get(node_id, 0.0) < self._ASSOC_MIN_INTERVAL_S:
             return []
         self._last_assoc[node_id] = now
@@ -399,7 +394,6 @@ class DetectionAssociator(InterNodeAssociator):
 
     # ── Track-level association ──────────────────────────────────────────────
 
-
     def format_candidates_for_solver(self, candidates: list[AssociationCandidate]) -> list[dict]:
         """Format association candidates for the multi-node least-squares solver.
 
@@ -446,12 +440,10 @@ class DetectionAssociator(InterNodeAssociator):
         km_per_lon = km_per_deg_lon(mid_lat)
         dlat_km = (lats[:, None] - lats) * km_per_lat
         dlon_km = (lons[:, None] - lons) * km_per_lon
-        dist_sq = dlat_km ** 2 + dlon_km ** 2
-        merge_sq = _MERGE_DIST_KM ** 2
+        dist_sq = dlat_km**2 + dlon_km**2
+        merge_sq = _MERGE_DIST_KM**2
 
-        row_idx, col_idx = np.where(
-            (dist_sq < merge_sq) & (np.arange(n)[:, None] < np.arange(n))
-        )
+        row_idx, col_idx = np.where((dist_sq < merge_sq) & (np.arange(n)[:, None] < np.arange(n)))
         for i, j in zip(row_idx.tolist(), col_idx.tolist()):
             _union(i, j)
 
@@ -463,18 +455,22 @@ class DetectionAssociator(InterNodeAssociator):
         for group in raw_groups.values():
             measurements = []
             for c in group:
-                measurements.append({
-                    "node_id": c.node_a_id,
-                    "delay_us": c.delay_a,
-                    "doppler_hz": c.doppler_a,
-                    "snr": c.snr_a,
-                })
-                measurements.append({
-                    "node_id": c.node_b_id,
-                    "delay_us": c.delay_b,
-                    "doppler_hz": c.doppler_b,
-                    "snr": c.snr_b,
-                })
+                measurements.append(
+                    {
+                        "node_id": c.node_a_id,
+                        "delay_us": c.delay_a,
+                        "doppler_hz": c.doppler_a,
+                        "snr": c.snr_a,
+                    }
+                )
+                measurements.append(
+                    {
+                        "node_id": c.node_b_id,
+                        "delay_us": c.delay_b,
+                        "doppler_hz": c.doppler_b,
+                        "snr": c.snr_b,
+                    }
+                )
 
             # Deduplicate measurements by node_id (keep highest SNR)
             by_node: dict[str, dict] = {}
@@ -529,18 +525,19 @@ class DetectionAssociator(InterNodeAssociator):
                     "vel_north_ms": sum(v[1] for v in _vels) / len(_vels),
                 }
 
-            solver_inputs.append({
-                "initial_guess": {
-                    "lat": g_lat,
-                    "lon": g_lon,
-                    "alt_km": g_alt_km,
-                },
-                "initial_velocity": _vel_seed,
-                "measurements": list(by_node.values()),
-                "n_nodes": len(by_node),
-                "timestamp_ms": group[0].timestamp_ms,
-                "adsb_hex": _group_hex,
-            })
+            solver_inputs.append(
+                {
+                    "initial_guess": {
+                        "lat": g_lat,
+                        "lon": g_lon,
+                        "alt_km": g_alt_km,
+                    },
+                    "initial_velocity": _vel_seed,
+                    "measurements": list(by_node.values()),
+                    "n_nodes": len(by_node),
+                    "timestamp_ms": group[0].timestamp_ms,
+                    "adsb_hex": _group_hex,
+                }
+            )
 
         return solver_inputs
-

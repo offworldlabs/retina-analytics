@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 @dataclass
 class AdsReportEntry:
     """A single ADS-B correlation sample."""
+
     timestamp_ms: int
     predicted_delay: float
     predicted_doppler: float
@@ -20,6 +21,7 @@ class AdsReportEntry:
 @dataclass
 class TrustScoreState:
     """Running trust score for one node."""
+
     node_id: str
     samples: list[AdsReportEntry] = field(default_factory=list)
     max_samples: int = 500
@@ -30,7 +32,7 @@ class TrustScoreState:
     def add_sample(self, entry: AdsReportEntry):
         self.samples.append(entry)
         if len(self.samples) > self.max_samples:
-            self.samples = self.samples[-self.max_samples:]
+            self.samples = self.samples[-self.max_samples :]
 
     @property
     def score(self) -> float:
@@ -49,19 +51,13 @@ class TrustScoreState:
     def rms_delay_error(self) -> float:
         if not self.samples:
             return 0.0
-        return math.sqrt(
-            sum((s.predicted_delay - s.measured_delay) ** 2 for s in self.samples)
-            / len(self.samples)
-        )
+        return math.sqrt(sum((s.predicted_delay - s.measured_delay) ** 2 for s in self.samples) / len(self.samples))
 
     @property
     def rms_doppler_error(self) -> float:
         if not self.samples:
             return 0.0
-        return math.sqrt(
-            sum((s.predicted_doppler - s.measured_doppler) ** 2 for s in self.samples)
-            / len(self.samples)
-        )
+        return math.sqrt(sum((s.predicted_doppler - s.measured_doppler) ** 2 for s in self.samples) / len(self.samples))
 
     def summary(self) -> dict:
         return {

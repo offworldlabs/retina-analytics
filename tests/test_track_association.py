@@ -24,15 +24,27 @@ _R_EARTH_KM = 6371.0
 # A dual-illuminator site: two nodes, one receiver, two transmitters.  This is
 # the arrangement the n=2 case actually arises in.
 _NODE_A = {
-    "rx_lat": 34.85, "rx_lon": -82.40, "rx_alt_ft": 1000,
-    "tx_lat": 34.9412, "tx_lon": -82.4103, "tx_alt_ft": 2000,
-    "fc_hz": 183e6, "beam_width_deg": 90, "max_range_km": 60,
+    "rx_lat": 34.85,
+    "rx_lon": -82.40,
+    "rx_alt_ft": 1000,
+    "tx_lat": 34.9412,
+    "tx_lon": -82.4103,
+    "tx_alt_ft": 2000,
+    "fc_hz": 183e6,
+    "beam_width_deg": 90,
+    "max_range_km": 60,
     "beam_azimuth_deg": 45.0,
 }
 _NODE_B = {
-    "rx_lat": 34.85, "rx_lon": -82.40, "rx_alt_ft": 1000,
-    "tx_lat": 34.9701, "tx_lon": -81.9484, "tx_alt_ft": 800,
-    "fc_hz": 195e6, "beam_width_deg": 90, "max_range_km": 60,
+    "rx_lat": 34.85,
+    "rx_lon": -82.40,
+    "rx_alt_ft": 1000,
+    "tx_lat": 34.9701,
+    "tx_lon": -81.9484,
+    "tx_alt_ft": 800,
+    "fc_hz": 195e6,
+    "beam_width_deg": 90,
+    "max_range_km": 60,
     "beam_azimuth_deg": 45.0,
 }
 
@@ -46,8 +58,7 @@ def _enu_km(lat, lon, alt_km, ref_lat, ref_lon, ref_alt_km):
 def _measure(cfg, lat, lon, alt_km, ve, vn):
     ref_alt = cfg["rx_alt_ft"] * 0.0003048
     tgt = _enu_km(lat, lon, alt_km, cfg["rx_lat"], cfg["rx_lon"], ref_alt)
-    tx = _enu_km(cfg["tx_lat"], cfg["tx_lon"], cfg["tx_alt_ft"] * 0.0003048,
-                 cfg["rx_lat"], cfg["rx_lon"], ref_alt)
+    tx = _enu_km(cfg["tx_lat"], cfg["tx_lon"], cfg["tx_alt_ft"] * 0.0003048, cfg["rx_lat"], cfg["rx_lon"], ref_alt)
     d_tx = math.dist(tgt, tx)
     d_rx = math.dist(tgt, (0.0, 0.0, 0.0))
     delay_us = (d_tx + d_rx - math.dist(tx, (0.0, 0.0, 0.0))) / 0.299792458
@@ -113,6 +124,7 @@ def _cv_fit():
     """The real fit, imported lazily so the rest of the module runs without it."""
     pytest.importorskip("retina_geolocator")
     from retina_geolocator.multinode_solver import fit_constant_velocity
+
     return fit_constant_velocity
 
 
@@ -124,8 +136,10 @@ class TestMergeEpochs:
         error the frame stagger causes: nodes send on their own cadence, and at
         250 m/s a 2 s misalignment invents 500 m of position error.
         """
-        ha = [{"t_s": 0.0, "delay_us": 10.0, "doppler_hz": 5.0, "snr": 12.0},
-              {"t_s": 2.0, "delay_us": 11.0, "doppler_hz": 6.0, "snr": 12.0}]
+        ha = [
+            {"t_s": 0.0, "delay_us": 10.0, "doppler_hz": 5.0, "snr": 12.0},
+            {"t_s": 2.0, "delay_us": 11.0, "doppler_hz": 6.0, "snr": 12.0},
+        ]
         hb = [{"t_s": 1.0, "delay_us": 20.0, "doppler_hz": -5.0, "snr": 9.0}]
         epochs = _merge_epochs(ha, "a", hb, "b")
 
@@ -144,18 +158,33 @@ class TestSubmitTracks:
     def test_needs_both_sides(self):
         """One node's tracks alone cannot pair with anything."""
         a = _assoc()
-        assert a.submit_tracks("site-a", [
-            {"track_id": "t1", "history": _history(_NODE_A, 34.88, -82.35, 7.0, 180.0, -90.0)},
-        ], 1000) == []
+        assert (
+            a.submit_tracks(
+                "site-a",
+                [
+                    {"track_id": "t1", "history": _history(_NODE_A, 34.88, -82.35, 7.0, 180.0, -90.0)},
+                ],
+                1000,
+            )
+            == []
+        )
 
     def test_pairs_two_tracks(self):
         a = _assoc()
-        a.submit_tracks("site-a", [
-            {"track_id": "a1", "history": _history(_NODE_A, 34.88, -82.35, 7.0, 180.0, -90.0)},
-        ], 1000)
-        pairs = a.submit_tracks("site-b", [
-            {"track_id": "b1", "history": _history(_NODE_B, 34.88, -82.35, 7.0, 180.0, -90.0)},
-        ], 2000)
+        a.submit_tracks(
+            "site-a",
+            [
+                {"track_id": "a1", "history": _history(_NODE_A, 34.88, -82.35, 7.0, 180.0, -90.0)},
+            ],
+            1000,
+        )
+        pairs = a.submit_tracks(
+            "site-b",
+            [
+                {"track_id": "b1", "history": _history(_NODE_B, 34.88, -82.35, 7.0, 180.0, -90.0)},
+            ],
+            2000,
+        )
 
         assert len(pairs) == 1
         assert isinstance(pairs[0], TrackPairCandidate)
@@ -164,9 +193,13 @@ class TestSubmitTracks:
     def test_empty_history_is_skipped(self):
         a = _assoc()
         a.submit_tracks("site-a", [{"track_id": "a1", "history": []}], 1000)
-        pairs = a.submit_tracks("site-b", [
-            {"track_id": "b1", "history": _history(_NODE_B, 34.88, -82.35, 7.0, 180.0, -90.0)},
-        ], 2000)
+        pairs = a.submit_tracks(
+            "site-b",
+            [
+                {"track_id": "b1", "history": _history(_NODE_B, 34.88, -82.35, 7.0, 180.0, -90.0)},
+            ],
+            2000,
+        )
         assert pairs == []
 
     def test_short_history_passes_on_the_coarse_gate(self):
@@ -177,12 +210,20 @@ class TestSubmitTracks:
         Downstream decides whether an unfitted pairing may be published.
         """
         a = _assoc(cv_fit=_cv_fit())
-        a.submit_tracks("site-a", [
-            {"track_id": "a1", "history": _history(_NODE_A, 34.88, -82.35, 7.0, 180.0, -90.0, n=2)},
-        ], 1000)
-        pairs = a.submit_tracks("site-b", [
-            {"track_id": "b1", "history": _history(_NODE_B, 34.88, -82.35, 7.0, 180.0, -90.0, n=2)},
-        ], 2000)
+        a.submit_tracks(
+            "site-a",
+            [
+                {"track_id": "a1", "history": _history(_NODE_A, 34.88, -82.35, 7.0, 180.0, -90.0, n=2)},
+            ],
+            1000,
+        )
+        pairs = a.submit_tracks(
+            "site-b",
+            [
+                {"track_id": "b1", "history": _history(_NODE_B, 34.88, -82.35, 7.0, 180.0, -90.0, n=2)},
+            ],
+            2000,
+        )
 
         assert len(pairs) == 1
         assert pairs[0].chi2_per_dof is None
@@ -252,8 +293,7 @@ class TestConstantVelocityGate:
         a 22 fps node would qualify on 5 epochs spanning 0.2 s, which carries no
         information at all.
         """
-        a, pairs = self._run(*_crossing_pair(n=3, dt=2.0),
-                             cv_min_span_s=2.0, cv_min_epochs=2)
+        a, pairs = self._run(*_crossing_pair(n=3, dt=2.0), cv_min_span_s=2.0, cv_min_epochs=2)
         assert len(pairs) == 1
         assert pairs[0].chi2_per_dof < a.cv_chi2_max
 
@@ -264,10 +304,11 @@ class TestConstantVelocityGate:
         point where the crossed value clears the threshold rather than at the
         first span that yields enough samples.
         """
+
         def crossed_chi2(n, dt):
-            _, pairs = self._run(*_crossing_pair(n=n, dt=dt),
-                                 cv_chi2_max=float("inf"),
-                                 cv_min_span_s=0.0, cv_min_epochs=2)
+            _, pairs = self._run(
+                *_crossing_pair(n=n, dt=dt), cv_chi2_max=float("inf"), cv_min_span_s=0.0, cv_min_epochs=2
+            )
             return pairs[0].chi2_per_dof
 
         short, mid, long = crossed_chi2(3, 2.0), crossed_chi2(6, 2.0), crossed_chi2(11, 2.0)
@@ -300,12 +341,20 @@ class TestConstantVelocityGate:
 class TestFormatTrackPairsForSolver:
     def test_emits_the_shape_the_solver_takes(self):
         a = _assoc(cv_fit=_cv_fit())
-        a.submit_tracks("site-a", [
-            {"track_id": "a1", "history": _history(_NODE_A, 34.88, -82.35, 7.0, 180.0, -90.0)},
-        ], 1000)
-        pairs = a.submit_tracks("site-b", [
-            {"track_id": "b1", "history": _history(_NODE_B, 34.88, -82.35, 7.0, 180.0, -90.0)},
-        ], 2000)
+        a.submit_tracks(
+            "site-a",
+            [
+                {"track_id": "a1", "history": _history(_NODE_A, 34.88, -82.35, 7.0, 180.0, -90.0)},
+            ],
+            1000,
+        )
+        pairs = a.submit_tracks(
+            "site-b",
+            [
+                {"track_id": "b1", "history": _history(_NODE_B, 34.88, -82.35, 7.0, 180.0, -90.0)},
+            ],
+            2000,
+        )
 
         inputs = a.format_track_pairs_for_solver(pairs)
         assert len(inputs) == 1
@@ -322,15 +371,27 @@ class TestFormatTrackPairsForSolver:
         The cluster is published as one target, so its quality is the quality of
         the weakest pairing holding it together.
         """
-        base = dict(timestamp_ms=1000, node_a_id="site-a", node_b_id="site-b",
-                    delay_a=30.0, delay_b=40.0, doppler_a=5.0, doppler_b=-5.0,
-                    snr_a=15.0, snr_b=15.0, lat=34.88, lon=-82.35, alt_km=7.0,
-                    vel_east_ms=180.0, vel_north_ms=-90.0, dof=14, n_epochs=6)
+        base = dict(
+            timestamp_ms=1000,
+            node_a_id="site-a",
+            node_b_id="site-b",
+            delay_a=30.0,
+            delay_b=40.0,
+            doppler_a=5.0,
+            doppler_b=-5.0,
+            snr_a=15.0,
+            snr_b=15.0,
+            lat=34.88,
+            lon=-82.35,
+            alt_km=7.0,
+            vel_east_ms=180.0,
+            vel_north_ms=-90.0,
+            dof=14,
+            n_epochs=6,
+        )
         pairs = [
-            TrackPairCandidate(track_a_id="a1", track_b_id="b1",
-                               chi2_per_dof=0.4, **base),
-            TrackPairCandidate(track_a_id="a2", track_b_id="b2",
-                               chi2_per_dof=9.9, **base),
+            TrackPairCandidate(track_a_id="a1", track_b_id="b1", chi2_per_dof=0.4, **base),
+            TrackPairCandidate(track_a_id="a2", track_b_id="b2", chi2_per_dof=9.9, **base),
         ]
         inputs = InterNodeAssociator().format_track_pairs_for_solver(pairs)
         assert len(inputs) == 1
@@ -343,9 +404,15 @@ class TestFormatTrackPairsForSolver:
 # Third node at the same receiver — a triple-illuminator site — for exercising
 # cross-node-pair sharing, which hypothesis selection must never forbid.
 _NODE_C = {
-    "rx_lat": 34.85, "rx_lon": -82.40, "rx_alt_ft": 1000,
-    "tx_lat": 35.1702, "tx_lon": -82.2905, "tx_alt_ft": 3000,
-    "fc_hz": 201e6, "beam_width_deg": 90, "max_range_km": 60,
+    "rx_lat": 34.85,
+    "rx_lon": -82.40,
+    "rx_alt_ft": 1000,
+    "tx_lat": 35.1702,
+    "tx_lon": -82.2905,
+    "tx_alt_ft": 3000,
+    "fc_hz": 201e6,
+    "beam_width_deg": 90,
+    "max_range_km": 60,
     "beam_azimuth_deg": 45.0,
 }
 
@@ -368,21 +435,21 @@ class TestHypothesisSelection:
         a 12 s span.  Selection does not need the crossed hypothesis to fail
         the bar, only the true one to beat it: ~1e-4 beats 1.4 at any span.
         """
-        hist_p_a = _history(_NODE_A, 34.88, -82.35, 7.0, 180.0, -90.0,
-                            n=3, dt=2.0, anchor="end")
-        hist_p_b = _history(_NODE_B, 34.88, -82.35, 7.0, 180.0, -90.0,
-                            n=3, dt=2.0, anchor="end")
-        hist_q_b = _history(_NODE_B, 34.88, -82.35, 7.0, -150.0, 170.0,
-                            n=3, dt=2.0, anchor="end")
+        hist_p_a = _history(_NODE_A, 34.88, -82.35, 7.0, 180.0, -90.0, n=3, dt=2.0, anchor="end")
+        hist_p_b = _history(_NODE_B, 34.88, -82.35, 7.0, 180.0, -90.0, n=3, dt=2.0, anchor="end")
+        hist_q_b = _history(_NODE_B, 34.88, -82.35, 7.0, -150.0, 170.0, n=3, dt=2.0, anchor="end")
 
         def run(exclusive):
-            a = _assoc(cv_fit=_cv_fit(), cv_min_span_s=2.0, cv_min_epochs=2,
-                       cv_exclusive=exclusive)
+            a = _assoc(cv_fit=_cv_fit(), cv_min_span_s=2.0, cv_min_epochs=2, cv_exclusive=exclusive)
             a.submit_tracks("site-a", [{"track_id": "aP", "history": hist_p_a}], 1000)
-            return a, a.submit_tracks("site-b", [
-                {"track_id": "bP", "history": hist_p_b},
-                {"track_id": "bQ", "history": hist_q_b},
-            ], 2000)
+            return a, a.submit_tracks(
+                "site-b",
+                [
+                    {"track_id": "bP", "history": hist_p_b},
+                    {"track_id": "bQ", "history": hist_q_b},
+                ],
+                2000,
+            )
 
         # Threshold alone passes both hypotheses — the ghost publishes.
         _, both = run(exclusive=False)
@@ -401,19 +468,22 @@ class TestHypothesisSelection:
         unscored one must not inherit them — otherwise rejection would promote
         exactly the pairing the fit ranked lower.
         """
-        crossed_a, crossed_b = _crossing_pair()          # long span → χ² fails
-        short_b = _history(_NODE_B, 34.88, -82.35, 7.0, -150.0, 170.0,
-                           n=2, dt=2.0, anchor="end")    # unscoreable
+        crossed_a, crossed_b = _crossing_pair()  # long span → χ² fails
+        short_b = _history(_NODE_B, 34.88, -82.35, 7.0, -150.0, 170.0, n=2, dt=2.0, anchor="end")  # unscoreable
 
         a = _assoc(cv_fit=_cv_fit())
         a.submit_tracks("site-a", [{"track_id": "a1", "history": crossed_a}], 1000)
-        pairs = a.submit_tracks("site-b", [
-            {"track_id": "b1", "history": crossed_b},
-            {"track_id": "b2", "history": short_b},
-        ], 2000)
+        pairs = a.submit_tracks(
+            "site-b",
+            [
+                {"track_id": "b1", "history": crossed_b},
+                {"track_id": "b2", "history": short_b},
+            ],
+            2000,
+        )
 
         assert pairs == []
-        assert a.track_pairs_rejected == 1    # (a1, b1): fitted, failed, claimed
+        assert a.track_pairs_rejected == 1  # (a1, b1): fitted, failed, claimed
         assert a.track_pairs_superseded >= 1  # (a1, b2): held, blocked by claim
 
     def test_sharing_across_node_pairs_is_allowed(self):
@@ -423,6 +493,7 @@ class TestHypothesisSelection:
         separate — because cross-pair sharing is not a conflict, it is the
         n≥3 structure the solver wants.
         """
+
         def h(cfg):
             return _history(cfg, 34.88, -82.35, 7.0, 180.0, -90.0)
 
@@ -452,8 +523,7 @@ class TestPairingCostIsBounded:
     def _tracks(self, n, node_cfg, prefix):
         # n aircraft strung along one bearing so they all share the zone.
         return [
-            {"track_id": f"{prefix}{i}",
-             "history": _history(node_cfg, 34.88 + i * 0.01, -82.35, 7.0, 180.0, -90.0)}
+            {"track_id": f"{prefix}{i}", "history": _history(node_cfg, 34.88 + i * 0.01, -82.35, 7.0, 180.0, -90.0)}
             for i in range(n)
         ]
 
@@ -465,8 +535,7 @@ class TestPairingCostIsBounded:
 
         a = _assoc()
         a.submit_tracks("site-a", self._tracks(6, _NODE_A, "a"), 1000)
-        with mock.patch.object(assoc_mod, "_batch_grid_match",
-                               wraps=assoc_mod._batch_grid_match) as spy:
+        with mock.patch.object(assoc_mod, "_batch_grid_match", wraps=assoc_mod._batch_grid_match) as spy:
             a.submit_tracks("site-b", self._tracks(6, _NODE_B, "b"), 2000)
         assert spy.call_count == 1, "one contraction per node pair"
 
@@ -486,13 +555,11 @@ class TestPairingCostIsBounded:
         gate = zone.delay_gate_us
         for i, d_a in enumerate(da):
             for j, d_b in enumerate(db):
-                valid = np.nonzero((np.abs(zone._np_pred_a - d_a) < gate)
-                                   & (np.abs(zone._np_pred_b - d_b) < gate))[0]
+                valid = np.nonzero((np.abs(zone._np_pred_a - d_a) < gate) & (np.abs(zone._np_pred_b - d_b) < gate))[0]
                 if valid.size == 0:
                     assert (i, j) not in batched
                     continue
-                res = (np.abs(zone._np_pred_a[valid] - d_a)
-                       + np.abs(zone._np_pred_b[valid] - d_b))
+                res = np.abs(zone._np_pred_a[valid] - d_a) + np.abs(zone._np_pred_b[valid] - d_b)
                 assert batched[(i, j)] == int(valid[np.argmin(res)])
 
     def test_fits_per_round_are_capped(self):
@@ -511,6 +578,7 @@ class TestPairingCostIsBounded:
 
     def test_deferred_pairings_are_not_lost(self):
         """Raising the cap recovers pairings a tight one skipped."""
+
         def run(cap):
             a = _assoc(cv_fit=_cv_fit())
             a._MAX_FITS_PER_ROUND = cap

@@ -25,9 +25,7 @@ _R = 6371.0
 def _point_at(bearing_deg, dist_km, lat0, lon0):
     br = math.radians(bearing_deg)
     lat = lat0 + math.degrees((dist_km * math.cos(br)) / _R)
-    lon = lon0 + math.degrees(
-        (dist_km * math.sin(br)) / (_R * math.cos(math.radians(lat0)))
-    )
+    lon = lon0 + math.degrees((dist_km * math.sin(br)) / (_R * math.cos(math.radians(lat0))))
     return lat, lon
 
 
@@ -36,14 +34,21 @@ _RX_B = _point_at(180.0, 18.0, _CORE_LAT, _CORE_LON)
 
 # No beam_width_deg here: each test supplies its own, null or otherwise.
 _COMMON = dict(
-    rx_alt_ft=500, tx_lat=_TX_LAT, tx_lon=_TX_LON, tx_alt_ft=1600,
-    fc_hz=195e6, max_range_km=60,
+    rx_alt_ft=500,
+    tx_lat=_TX_LAT,
+    tx_lon=_TX_LON,
+    tx_alt_ft=1600,
+    fc_hz=195e6,
+    max_range_km=60,
 )
 
 _MGR_RX_LAT, _MGR_RX_LON = 32.90, -97.00
 _MGR_CFG = dict(
-    rx_lat=_MGR_RX_LAT, rx_lon=_MGR_RX_LON,
-    tx_lat=_TX_LAT, tx_lon=_TX_LON, max_range_km=50,
+    rx_lat=_MGR_RX_LAT,
+    rx_lon=_MGR_RX_LON,
+    tx_lat=_TX_LAT,
+    tx_lon=_TX_LON,
+    max_range_km=50,
 )
 
 
@@ -81,16 +86,26 @@ class TestAssociatorNullWidthRegistration:
         """The regression proper: the second registration runs the pairwise
         overlap grid, which divides by the beam width for every grid point."""
         assoc = InterNodeAssociator(grid_step_km=3.0)
-        assoc.register_node("RA", {
-            **_COMMON, "rx_lat": _RX_A[0], "rx_lon": _RX_A[1],
-            "beam_width_deg": None,
-            "beam_azimuth_deg": _bearing_deg(_RX_A[0], _RX_A[1], _CORE_LAT, _CORE_LON),
-        })
-        assoc.register_node("RB", {
-            **_COMMON, "rx_lat": _RX_B[0], "rx_lon": _RX_B[1],
-            "beam_width_deg": None,
-            "beam_azimuth_deg": _bearing_deg(_RX_B[0], _RX_B[1], _CORE_LAT, _CORE_LON),
-        })
+        assoc.register_node(
+            "RA",
+            {
+                **_COMMON,
+                "rx_lat": _RX_A[0],
+                "rx_lon": _RX_A[1],
+                "beam_width_deg": None,
+                "beam_azimuth_deg": _bearing_deg(_RX_A[0], _RX_A[1], _CORE_LAT, _CORE_LON),
+            },
+        )
+        assoc.register_node(
+            "RB",
+            {
+                **_COMMON,
+                "rx_lat": _RX_B[0],
+                "rx_lon": _RX_B[1],
+                "beam_width_deg": None,
+                "beam_azimuth_deg": _bearing_deg(_RX_B[0], _RX_B[1], _CORE_LAT, _CORE_LON),
+            },
+        )
         assert assoc.node_geometries["RA"].beam_width_deg == YAGI_BEAM_WIDTH_DEG
         assert assoc.node_geometries["RB"].beam_width_deg == YAGI_BEAM_WIDTH_DEG
         # Both are aimed at the shared core, so the zone must be a real overlap
@@ -99,10 +114,15 @@ class TestAssociatorNullWidthRegistration:
 
     def test_explicit_width_still_kept(self):
         assoc = InterNodeAssociator(grid_step_km=10.0)
-        assoc.register_node("X", {
-            **_COMMON, "rx_lat": _RX_A[0], "rx_lon": _RX_A[1],
-            "beam_width_deg": 50,
-        })
+        assoc.register_node(
+            "X",
+            {
+                **_COMMON,
+                "rx_lat": _RX_A[0],
+                "rx_lon": _RX_A[1],
+                "beam_width_deg": 50,
+            },
+        )
         assert assoc.node_geometries["X"].beam_width_deg == 50.0
 
 

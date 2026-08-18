@@ -2,17 +2,16 @@
 
 import math
 
-from retina_analytics.constants import haversine_km, offset_latlon, point_in_beam
+from retina_analytics.constants import offset_latlon, point_in_beam
 from retina_analytics.detection_area import DetectionAreaState
 
 
-def compute_delay_bin_overlap(area_a: DetectionAreaState,
-                              area_b: DetectionAreaState,
-                              bin_width_us: float = 2.0) -> dict:
+def compute_delay_bin_overlap(
+    area_a: DetectionAreaState, area_b: DetectionAreaState, bin_width_us: float = 2.0
+) -> dict:
     """Compare two nodes' detection areas via delay-bin overlap (Jaccard)."""
     if area_a.n_detections == 0 or area_b.n_detections == 0:
-        return {"overlap_ratio": 0.0, "shared_bins": 0,
-                "total_bins_union": 0, "a_only": 0, "b_only": 0}
+        return {"overlap_ratio": 0.0, "shared_bins": 0, "total_bins_union": 0, "a_only": 0, "b_only": 0}
 
     def _bins(lo, hi):
         if lo > hi:
@@ -46,8 +45,10 @@ def _point_in_beam(area: DetectionAreaState, lat: float, lon: float) -> bool:
     # has_tx tests the pair: (0, 0) is the unset sentinel, but `tx_lat or
     # None` alone also nulled genuine transmitters with one zero axis.
     return point_in_beam(
-        lat, lon,
-        rx_lat=area.rx_lat, rx_lon=area.rx_lon,
+        lat,
+        lon,
+        rx_lat=area.rx_lat,
+        rx_lon=area.rx_lon,
         tx_lat=area.tx_lat if area.has_tx else None,
         tx_lon=area.tx_lon if area.has_tx else None,
         beam_azimuth_deg=area.beam_azimuth_deg,
@@ -57,16 +58,17 @@ def _point_in_beam(area: DetectionAreaState, lat: float, lon: float) -> bool:
     )
 
 
-def _count_covering_nodes(areas: list[DetectionAreaState],
-                          lat: float, lon: float) -> int:
+def _count_covering_nodes(areas: list[DetectionAreaState], lat: float, lon: float) -> int:
     return sum(1 for a in areas if _point_in_beam(a, lat, lon))
 
 
-def coverage_suggestion(areas: list[DetectionAreaState],
-                        center_lat: float, center_lon: float,
-                        desired_range_km: float = 80.0,
-                        trust_scores: dict | None = None,
-                        ) -> list[dict]:
+def coverage_suggestion(
+    areas: list[DetectionAreaState],
+    center_lat: float,
+    center_lon: float,
+    desired_range_km: float = 80.0,
+    trust_scores: dict | None = None,
+) -> list[dict]:
     """Suggest where to place additional nodes for better coverage.
 
     A `solver_rms_history` "saturation" strategy used to live here: when a
@@ -79,8 +81,14 @@ def coverage_suggestion(areas: list[DetectionAreaState],
     """
     suggestions = []
     directions = [
-        ("N", 0), ("NE", 45), ("E", 90), ("SE", 135),
-        ("S", 180), ("SW", 225), ("W", 270), ("NW", 315),
+        ("N", 0),
+        ("NE", 45),
+        ("E", 90),
+        ("SE", 135),
+        ("S", 180),
+        ("SW", 225),
+        ("W", 270),
+        ("NW", 315),
     ]
 
     for label, bearing_deg in directions:
@@ -90,7 +98,8 @@ def coverage_suggestion(areas: list[DetectionAreaState],
         # output only, but it was wrong by a factor of 111.
         bearing_rad = math.radians(bearing_deg)
         test_lat, test_lon = offset_latlon(
-            center_lat, center_lon,
+            center_lat,
+            center_lon,
             east_km=desired_range_km * math.sin(bearing_rad),
             north_km=desired_range_km * math.cos(bearing_rad),
         )
@@ -106,24 +115,28 @@ def coverage_suggestion(areas: list[DetectionAreaState],
                         ts = trust_scores.get(a.node_id)
                         if ts and ts.score > best_trust and _point_in_beam(a, test_lat, test_lon):
                             best_trust = ts.score
-                suggestions.append({
+                suggestions.append(
+                    {
+                        "direction": label,
+                        "bearing_deg": bearing_deg,
+                        "test_point": {"lat": round(test_lat, 5), "lon": round(test_lon, 5)},
+                        "gap_km": round(desired_range_km, 1),
+                        "strategy": "densification",
+                        "overlap_count": n_covering,
+                        "nearest_trust": round(best_trust, 3),
+                    }
+                )
+        else:
+            suggestions.append(
+                {
                     "direction": label,
                     "bearing_deg": bearing_deg,
                     "test_point": {"lat": round(test_lat, 5), "lon": round(test_lon, 5)},
                     "gap_km": round(desired_range_km, 1),
-                    "strategy": "densification",
-                    "overlap_count": n_covering,
-                    "nearest_trust": round(best_trust, 3),
-                })
-        else:
-            suggestions.append({
-                "direction": label,
-                "bearing_deg": bearing_deg,
-                "test_point": {"lat": round(test_lat, 5), "lon": round(test_lon, 5)},
-                "gap_km": round(desired_range_km, 1),
-                "strategy": "expansion",
-                "overlap_count": 0,
-            })
+                    "strategy": "expansion",
+                    "overlap_count": 0,
+                }
+            )
 
     suggestions.sort(key=lambda s: (-1 if s["strategy"] == "densification" else 0, -s.get("overlap_count", 0)))
     return suggestions

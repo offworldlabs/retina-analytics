@@ -15,23 +15,25 @@ from retina_analytics.association import (
     _point_in_beam,
     compute_overlap_zone,
 )
-from retina_analytics.constants import bistatic_range_limit_km
+from retina_analytics.constants import KM_PER_DEG_LAT, bistatic_range_limit_km
 from retina_analytics.empirical_coverage import (
+    _MIN_BIN_POINTS_TO_CONSTRAIN,
     OBSERVED_LIMIT_MARGIN,
     EmpiricalCoverageState,
-    _MIN_BIN_POINTS_TO_CONSTRAIN,
 )
-from retina_analytics.constants import KM_PER_DEG_LAT
 
 _RX_LAT, _RX_LON = 34.85, -82.40
-_TX_LAT, _TX_LON = 35.236, -82.40      # 43 km due north
+_TX_LAT, _TX_LON = 35.236, -82.40  # 43 km due north
 _DELTA = 60.0
 
 
 def _state(bistatic=_DELTA, tx=(_TX_LAT, _TX_LON)):
     ec = EmpiricalCoverageState(
-        rx_lat=_RX_LAT, rx_lon=_RX_LON, max_range_km=_DELTA,
-        tx_lat=tx[0] if tx else None, tx_lon=tx[1] if tx else None,
+        rx_lat=_RX_LAT,
+        rx_lon=_RX_LON,
+        max_range_km=_DELTA,
+        tx_lat=tx[0] if tx else None,
+        tx_lon=tx[1] if tx else None,
     )
     ec.max_bistatic_range_km = bistatic
     return ec
@@ -40,9 +42,12 @@ def _state(bistatic=_DELTA, tx=(_TX_LAT, _TX_LON)):
 def _at_bearing(bearing_deg, range_km):
     """A lat/lon that many km from the RX on that bearing (flat approximation)."""
     import math
+
     rad = math.radians(bearing_deg)
-    return (_RX_LAT + range_km * math.cos(rad) / KM_PER_DEG_LAT,
-            _RX_LON + range_km * math.sin(rad) / (KM_PER_DEG_LAT * math.cos(math.radians(_RX_LAT))))
+    return (
+        _RX_LAT + range_km * math.cos(rad) / KM_PER_DEG_LAT,
+        _RX_LON + range_km * math.sin(rad) / (KM_PER_DEG_LAT * math.cos(math.radians(_RX_LAT))),
+    )
 
 
 class TestClampFollowsTheEllipse:
@@ -70,9 +75,10 @@ class TestClampFollowsTheEllipse:
         ec = _state()
         baseline = 43.0
         for psi in (0.0, 90.0, 180.0):
-            bearing = (0.0 + psi) % 360.0   # TX is due north
+            bearing = (0.0 + psi) % 360.0  # TX is due north
             assert ec._reach_at(bearing) == pytest.approx(
-                bistatic_range_limit_km(psi, baseline, _DELTA), abs=0.2,
+                bistatic_range_limit_km(psi, baseline, _DELTA),
+                abs=0.2,
             )
 
     def test_a_node_without_a_bistatic_limit_keeps_the_circle(self):
@@ -117,10 +123,18 @@ class TestObservedLimitAbstains:
 
 def _geo(coverage_limit=None):
     return NodeGeometry(
-        node_id="n", rx_lat=_RX_LAT, rx_lon=_RX_LON, rx_alt_km=0.3,
-        tx_lat=_TX_LAT, tx_lon=_TX_LON, tx_alt_km=0.6, fc_hz=183e6,
-        beam_azimuth_deg=0.0, beam_width_deg=360.0,
-        max_range_km=_DELTA, max_bistatic_range_km=_DELTA,
+        node_id="n",
+        rx_lat=_RX_LAT,
+        rx_lon=_RX_LON,
+        rx_alt_km=0.3,
+        tx_lat=_TX_LAT,
+        tx_lon=_TX_LON,
+        tx_alt_km=0.6,
+        fc_hz=183e6,
+        beam_azimuth_deg=0.0,
+        beam_width_deg=360.0,
+        max_range_km=_DELTA,
+        max_bistatic_range_km=_DELTA,
         coverage_limit=coverage_limit,
     )
 
@@ -130,14 +144,13 @@ class TestPriorOnlyTightens:
         """A node with an empty polygon gates exactly as one with no polygon."""
         ec = _state()
         lat, lon = _at_bearing(90.0, 25.0)
-        assert (_point_in_beam(lat, lon, _geo(ec.observed_limit_km))
-                == _point_in_beam(lat, lon, _geo(None)))
+        assert _point_in_beam(lat, lon, _geo(ec.observed_limit_km)) == _point_in_beam(lat, lon, _geo(None))
 
     def test_observed_coverage_pulls_the_gate_in(self):
         ec = _state()
         for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
             ec.add_point(*_at_bearing(90.0, 12.0))
-        far = _at_bearing(90.0, 40.0)          # inside the ellipse, far past what was seen
+        far = _at_bearing(90.0, 40.0)  # inside the ellipse, far past what was seen
         assert _point_in_beam(*far, _geo(None)) is True
         assert _point_in_beam(*far, _geo(ec.observed_limit_km)) is False
 
@@ -160,7 +173,7 @@ class TestPriorOnlyTightens:
         # Force a generous observed limit by writing the bin directly — add_point
         # would clamp it, which is itself the belt to this braces.
         ec._bins[_bin_for_bearing_of(180.0)] = [200.0] * 40
-        beyond = _at_bearing(180.0, 55.0)      # past the 30 km anti-TX reach
+        beyond = _at_bearing(180.0, 55.0)  # past the 30 km anti-TX reach
         geo = _geo(ec.observed_limit_km)
         geo.beam_width_deg = 360.0
         # Still admitted by the sector+radius test here, because the *range*
@@ -168,15 +181,18 @@ class TestPriorOnlyTightens:
         # that the prior did not widen anything.
         assert _point_in_beam(*beyond, geo) is True
         zone = compute_overlap_zone(
-            geo, _geo(ec.observed_limit_km), grid_step_km=3.0, altitudes_km=(7.0,),
+            geo,
+            _geo(ec.observed_limit_km),
+            grid_step_km=3.0,
+            altitudes_km=(7.0,),
         )
         c_km_us = 0.299792458
-        assert all(d * c_km_us <= _DELTA + 1e-9
-                   for d, _ in zone.delay_pairs)
+        assert all(d * c_km_us <= _DELTA + 1e-9 for d, _ in zone.delay_pairs)
 
 
 def _bin_for_bearing_of(bearing):
     from retina_analytics.empirical_coverage import _bin_for_bearing
+
     return _bin_for_bearing(bearing)
 
 
@@ -194,10 +210,19 @@ class TestRebuildOnTightening:
             ec = states.get(node_id)
             return ec.observed_limit_km if ec else None
 
-        cfg_a = {"rx_lat": _RX_LAT, "rx_lon": _RX_LON, "rx_alt_ft": 1000,
-                 "tx_lat": _TX_LAT, "tx_lon": _TX_LON, "tx_alt_ft": 2000,
-                 "fc_hz": 183e6, "beam_width_deg": 360, "max_range_km": _DELTA,
-                 "max_bistatic_range_km": _DELTA, "beam_azimuth_deg": 0.0}
+        cfg_a = {
+            "rx_lat": _RX_LAT,
+            "rx_lon": _RX_LON,
+            "rx_alt_ft": 1000,
+            "tx_lat": _TX_LAT,
+            "tx_lon": _TX_LON,
+            "tx_alt_ft": 2000,
+            "fc_hz": 183e6,
+            "beam_width_deg": 360,
+            "max_range_km": _DELTA,
+            "max_bistatic_range_km": _DELTA,
+            "beam_azimuth_deg": 0.0,
+        }
         cfg_b = dict(cfg_a, rx_lon=-82.31, fc_hz=195e6)
 
         a = InterNodeAssociator(grid_step_km=3.0, coverage_provider=provider)
@@ -227,10 +252,19 @@ class TestRebuildOnTightening:
             ec = states.get(node_id)
             return ec.observed_limit_km if ec else None
 
-        cfg_a = {"rx_lat": _RX_LAT, "rx_lon": _RX_LON, "rx_alt_ft": 1000,
-                 "tx_lat": _TX_LAT, "tx_lon": _TX_LON, "tx_alt_ft": 2000,
-                 "fc_hz": 183e6, "beam_width_deg": 360, "max_range_km": _DELTA,
-                 "max_bistatic_range_km": _DELTA, "beam_azimuth_deg": 0.0}
+        cfg_a = {
+            "rx_lat": _RX_LAT,
+            "rx_lon": _RX_LON,
+            "rx_alt_ft": 1000,
+            "tx_lat": _TX_LAT,
+            "tx_lon": _TX_LON,
+            "tx_alt_ft": 2000,
+            "fc_hz": 183e6,
+            "beam_width_deg": 360,
+            "max_range_km": _DELTA,
+            "max_bistatic_range_km": _DELTA,
+            "beam_azimuth_deg": 0.0,
+        }
         cfg_b = dict(cfg_a, rx_lon=-82.31, fc_hz=195e6)
 
         a = InterNodeAssociator(grid_step_km=3.0, coverage_provider=provider)

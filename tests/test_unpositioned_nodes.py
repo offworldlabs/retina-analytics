@@ -16,16 +16,28 @@ import pytest
 from retina_analytics.association import InterNodeAssociator
 
 POSITIONED_A = {
-    "rx_lat": 33.939, "rx_lon": -84.651, "rx_alt_ft": 950,
-    "tx_lat": 33.756, "tx_lon": -84.331, "tx_alt_ft": 1600,
-    "fc_hz": 195e6, "beam_width_deg": 41, "max_range_km": 50,
+    "rx_lat": 33.939,
+    "rx_lon": -84.651,
+    "rx_alt_ft": 950,
+    "tx_lat": 33.756,
+    "tx_lon": -84.331,
+    "tx_alt_ft": 1600,
+    "fc_hz": 195e6,
+    "beam_width_deg": 41,
+    "max_range_km": 50,
 }
 # Close enough to A to genuinely share sky, so the positioned-pair assertions
 # are testing the guard rather than a geographic miss.
 POSITIONED_B = {
-    "rx_lat": 34.05, "rx_lon": -84.4, "rx_alt_ft": 980,
-    "tx_lat": 33.85, "tx_lon": -84.15, "tx_alt_ft": 1600,
-    "fc_hz": 195e6, "beam_width_deg": 41, "max_range_km": 50,
+    "rx_lat": 34.05,
+    "rx_lon": -84.4,
+    "rx_alt_ft": 980,
+    "tx_lat": 33.85,
+    "tx_lon": -84.15,
+    "tx_alt_ft": 1600,
+    "fc_hz": 195e6,
+    "beam_width_deg": 41,
+    "max_range_km": 50,
 }
 # What routes/radar.py sends for a node first seen over POST /api/radar/detections.
 BARE = {"node_id": "whatever"}

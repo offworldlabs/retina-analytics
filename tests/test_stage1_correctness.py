@@ -27,9 +27,10 @@ class TestCoverageAreaUsesCosLat:
         assert m.coverage_area_km2 == expected
         # The old (lat_side)**2 answer was 1/cos(lat) too big — ~22% at 34.85°.
         old = lat_side**2
-        assert old / m.coverage_area_km2 == (
-            1.0 / math.cos(math.radians(34.85))
-        ) or abs(old / m.coverage_area_km2 - 1 / math.cos(math.radians(34.85))) < 1e-9
+        assert (
+            old / m.coverage_area_km2 == (1.0 / math.cos(math.radians(34.85)))
+            or abs(old / m.coverage_area_km2 - 1 / math.cos(math.radians(34.85))) < 1e-9
+        )
 
     def test_area_sums_per_cell(self):
         m = HistoricalCoverageMap(node_id="n1")
@@ -48,9 +49,13 @@ class TestCoverageAreaUsesCosLat:
 class TestFootprintRadius:
     def _area(self, bistatic=None, tx=(34.9, -82.2)):
         return DetectionAreaState(
-            node_id="a", rx_lat=34.85, rx_lon=-82.4,
-            tx_lat=tx[0], tx_lon=tx[1],
-            max_range_km=60.0, max_bistatic_range_km=bistatic,
+            node_id="a",
+            rx_lat=34.85,
+            rx_lon=-82.4,
+            tx_lat=tx[0],
+            tx_lon=tx[1],
+            max_range_km=60.0,
+            max_bistatic_range_km=bistatic,
         )
 
     def test_monostatic_node_keeps_max_range(self):
@@ -60,6 +65,7 @@ class TestFootprintRadius:
     def test_bistatic_node_reaches_delta_over_two_plus_baseline(self):
         area = self._area(bistatic=60.0)
         from retina_analytics.constants import haversine_km
+
         baseline = haversine_km(34.85, -82.4, 34.9, -82.2)
         assert area.footprint_radius_km() == 60.0 / 2.0 + baseline
         # Strictly beyond the monostatic circle — the old pre-filter pruned
@@ -89,9 +95,10 @@ class TestReputationPenalisesOnsetNotPasses:
     def test_condition_clearing_and_returning_penalises_again(self):
         rep = NodeReputation(node_id="n1")
         import time as _t
-        rep.evaluate_heartbeat(1.0)          # onset
-        rep.evaluate_heartbeat(_t.time())    # fresh again — clears
-        rep.evaluate_heartbeat(1.0)          # second onset
+
+        rep.evaluate_heartbeat(1.0)  # onset
+        rep.evaluate_heartbeat(_t.time())  # fresh again — clears
+        rep.evaluate_heartbeat(1.0)  # second onset
         assert abs(rep.reputation - 0.8) < 1e-9
 
     def test_unblocked_node_is_not_instantly_reblocked_by_a_persisting_condition(self):
@@ -131,8 +138,7 @@ class TestReputationPenalisesOnsetNotPasses:
 
 class TestEmpiricalRoundTrip:
     def test_range_clamp_mult_survives_serialisation(self):
-        ec = EmpiricalCoverageState(rx_lat=34.85, rx_lon=-82.4,
-                                    max_range_km=60.0, range_clamp_mult=1.25)
+        ec = EmpiricalCoverageState(rx_lat=34.85, rx_lon=-82.4, max_range_km=60.0, range_clamp_mult=1.25)
         restored = EmpiricalCoverageState.from_dict(ec.to_dict())
         assert restored.range_clamp_mult == 1.25
 
@@ -171,22 +177,20 @@ class TestCoverageGridIsBounded:
     def test_grid_evicts_least_recently_seen(self):
         m = HistoricalCoverageMap(node_id="n1", max_grid_cells=100)
         for i in range(150):
-            m.add_detection(lat=30.0 + i * 0.02, lon=-82.0, alt_km=10,
-                            snr=10, delay_error=0.1)
+            m.add_detection(lat=30.0 + i * 0.02, lon=-82.0, alt_km=10, snr=10, delay_error=0.1)
         assert m.n_grid_cells <= 100
 
     def test_load_reapplies_caps(self, tmp_path):
         m = HistoricalCoverageMap(node_id="n1")
         for i in range(50):
-            m.add_detection(lat=30.0 + i * 0.02, lon=-82.0, alt_km=10,
-                            snr=10, delay_error=0.1)
+            m.add_detection(lat=30.0 + i * 0.02, lon=-82.0, alt_km=10, snr=10, delay_error=0.1)
         p = str(tmp_path / "cov.json")
         m.save_to_file(p)
         restored = HistoricalCoverageMap.load_from_file(p)
         restored.max_entries = 10
         restored.max_grid_cells = 10
         # Simulate an oversized legacy file by re-running the load-time caps.
-        restored.entries = restored.entries[-restored.max_entries:]
+        restored.entries = restored.entries[-restored.max_entries :]
         while len(restored._grid) > restored.max_grid_cells:
             restored._evict_oldest_cells()
         assert len(restored.entries) <= 10
@@ -196,11 +200,13 @@ class TestCoverageGridIsBounded:
 class TestReconnectKeepsMetrics:
     def test_metrics_survive_reregistration(self):
         from retina_analytics.manager import NodeAnalyticsManager
+
         mgr = NodeAnalyticsManager()
         cfg = {"rx_lat": 34.8, "rx_lon": -82.4, "tx_lat": 34.9, "tx_lon": -82.2}
         mgr.register_node("n1", cfg)
-        mgr.record_detection_frame("n1", {"delay": [1.0, 2.0], "doppler": [0, 0],
-                                          "snr": [12.0, 14.0], "timestamp": 1000})
+        mgr.record_detection_frame(
+            "n1", {"delay": [1.0, 2.0], "doppler": [0, 0], "snr": [12.0, 14.0], "timestamp": 1000}
+        )
         assert mgr.metrics["n1"].total_frames == 1
         first_connect = mgr.metrics["n1"].connected_at
         mgr.register_node("n1", cfg)  # reconnect

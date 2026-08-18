@@ -23,7 +23,7 @@ from retina_analytics.constants import (
     bistatic_range_limit_km,
 )
 
-_DELTA = 60.0   # the fleet's differential-range limit, km
+_DELTA = 60.0  # the fleet's differential-range limit, km
 
 
 class TestBistaticRangeLimit:
@@ -67,14 +67,11 @@ class TestBistaticRangeLimit:
         baseline = 37.0
         for psi in (0.0, 20.0, 60.0, 110.0, 179.0):
             r = bistatic_range_limit_km(psi, baseline, _DELTA)
-            r_tx = math.sqrt(r ** 2 + baseline ** 2
-                             - 2 * r * baseline * math.cos(math.radians(psi)))
+            r_tx = math.sqrt(r**2 + baseline**2 - 2 * r * baseline * math.cos(math.radians(psi)))
             assert (r + r_tx - baseline) == pytest.approx(_DELTA, abs=1e-6)
 
     def test_max_radius_is_the_toward_tx_extreme(self):
-        assert bistatic_max_radius_km(43.0, _DELTA) == pytest.approx(
-            bistatic_range_limit_km(0.0, 43.0, _DELTA)
-        )
+        assert bistatic_max_radius_km(43.0, _DELTA) == pytest.approx(bistatic_range_limit_km(0.0, 43.0, _DELTA))
 
 
 # A transmitter 43 km due north of the receiver — Spartanburg's baseline from
@@ -84,16 +81,21 @@ _TX_FAR = 35.236
 _TX_NEAR = 35.10
 
 
-def _geo(node_id="n", bistatic=None, tx_lat=_TX_NEAR, rx_lon=-82.40,
-         beam_width_deg=360.0, beam_azimuth_deg=0.0):
+def _geo(node_id="n", bistatic=None, tx_lat=_TX_NEAR, rx_lon=-82.40, beam_width_deg=360.0, beam_azimuth_deg=0.0):
     """A node at 34.85N with its transmitter due north."""
     return NodeGeometry(
         node_id=node_id,
-        rx_lat=34.85, rx_lon=rx_lon, rx_alt_km=0.3,
-        tx_lat=tx_lat, tx_lon=-82.40, tx_alt_km=0.6,
-        fc_hz=183e6, beam_azimuth_deg=beam_azimuth_deg,
+        rx_lat=34.85,
+        rx_lon=rx_lon,
+        rx_alt_km=0.3,
+        tx_lat=tx_lat,
+        tx_lon=-82.40,
+        tx_alt_km=0.6,
+        fc_hz=183e6,
+        beam_azimuth_deg=beam_azimuth_deg,
         beam_width_deg=beam_width_deg,
-        max_range_km=_DELTA, max_bistatic_range_km=bistatic,
+        max_range_km=_DELTA,
+        max_bistatic_range_km=bistatic,
     )
 
 
@@ -103,9 +105,7 @@ class TestFootprintRadius:
 
     def test_radius_is_the_toward_tx_extreme(self):
         geo = _geo(bistatic=_DELTA, tx_lat=_TX_NEAR)
-        assert geo.footprint_radius_km == pytest.approx(
-            _DELTA / 2 + geo.baseline_km, abs=0.01
-        )
+        assert geo.footprint_radius_km == pytest.approx(_DELTA / 2 + geo.baseline_km, abs=0.01)
 
     def test_a_distant_tower_reaches_past_the_differential_limit(self):
         """The bounding radius must exceed Δ, or the far lobe is never enumerated."""
@@ -122,8 +122,7 @@ class TestOverlapGridRespectsTheEllipse:
         # Two receivers ~8 km apart sharing a transmitter, so the range rule is
         # the only thing that differs between the two arms.
         a = _geo("a", bistatic, tx_lat, beam_width_deg=beam_width_deg)
-        b = _geo("b", bistatic, tx_lat, rx_lon=-82.31,
-                 beam_width_deg=beam_width_deg)
+        b = _geo("b", bistatic, tx_lat, rx_lon=-82.31, beam_width_deg=beam_width_deg)
         return compute_overlap_zone(a, b, grid_step_km=3.0, altitudes_km=(7.0,))
 
     def test_omnidirectional_coverage_roughly_halves(self):

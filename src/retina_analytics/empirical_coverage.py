@@ -33,10 +33,10 @@ from retina_analytics.constants import (
     offset_latlon,
 )
 
-N_BINS = 72          # 5 ° per bin  (360 / 5 = 72)
+N_BINS = 72  # 5 ° per bin  (360 / 5 = 72)
 _DEG_PER_BIN = 360.0 / N_BINS
-_MAX_PER_BIN = 200   # cap per-bin history to prevent unbounded RAM growth
-MIN_POINTS = 20      # minimum calibration points before emitting a polygon
+_MAX_PER_BIN = 200  # cap per-bin history to prevent unbounded RAM growth
+MIN_POINTS = 20  # minimum calibration points before emitting a polygon
 
 # Calibration points a bin needs before its P85 is allowed to *constrain*
 # association rather than merely be drawn.  Below this the bin is one or two
@@ -70,8 +70,7 @@ def _bin_for_bearing(bearing_deg: float) -> int:
     return int(bearing_deg / _DEG_PER_BIN) % N_BINS
 
 
-def _bearing_and_range(rx_lat: float, rx_lon: float,
-                       lat: float, lon: float) -> tuple[float, float]:
+def _bearing_and_range(rx_lat: float, rx_lon: float, lat: float, lon: float) -> tuple[float, float]:
     """Return (bearing °, range_km) from RX to target.
 
     Spherical, matching the rest of the system.  This was flat-earth while the
@@ -92,8 +91,7 @@ def _bearing_and_range(rx_lat: float, rx_lon: float,
     anything) to correct an error that then averages through a P85, a 3-bin
     rolling mean and a 1.25x margin.
     """
-    return (bearing_deg(rx_lat, rx_lon, lat, lon),
-            haversine_km(rx_lat, rx_lon, lat, lon))
+    return (bearing_deg(rx_lat, rx_lon, lat, lon), haversine_km(rx_lat, rx_lon, lat, lon))
 
 
 def _p85(values: list[float]) -> float:
@@ -106,10 +104,15 @@ def _p85(values: list[float]) -> float:
 class EmpiricalCoverageState:
     """Accumulates calibration points and derives a smoothed detection polygon."""
 
-    def __init__(self, rx_lat: float, rx_lon: float,
-                 max_range_km: float | None = None,
-                 range_clamp_mult: float = 2.0,
-                 tx_lat: float | None = None, tx_lon: float | None = None):
+    def __init__(
+        self,
+        rx_lat: float,
+        rx_lon: float,
+        max_range_km: float | None = None,
+        range_clamp_mult: float = 2.0,
+        tx_lat: float | None = None,
+        tx_lon: float | None = None,
+    ):
         self.rx_lat = rx_lat
         self.rx_lon = rx_lon
         # Transmitter position, so the clamp can follow the ellipse the node is
@@ -144,10 +147,8 @@ class EmpiricalCoverageState:
         The bistatic ellipse when the node declares a differential limit and its
         transmitter is known; otherwise the legacy circle.
         """
-        if (self.max_bistatic_range_km is not None
-                and self.tx_lat is not None and self.tx_lon is not None):
-            baseline = haversine_km(self.rx_lat, self.rx_lon,
-                                    self.tx_lat, self.tx_lon)
+        if self.max_bistatic_range_km is not None and self.tx_lat is not None and self.tx_lon is not None:
+            baseline = haversine_km(self.rx_lat, self.rx_lon, self.tx_lat, self.tx_lon)
             to_tx = bearing_deg(self.rx_lat, self.rx_lon, self.tx_lat, self.tx_lon)
             psi = abs((bearing_deg_ - to_tx + 180.0) % 360.0 - 180.0)
             return bistatic_range_limit_km(psi, baseline, self.max_bistatic_range_km)
@@ -177,10 +178,13 @@ class EmpiricalCoverageState:
 
     # ── Polygon generation ────────────────────────────────────────────────────
 
-    def to_polygon(self, min_points: int = MIN_POINTS,
-                   beam_azimuth_deg: float | None = None,
-                   beam_width_deg: float | None = None,
-                   max_range_km: float | None = None) -> list[list[float]] | None:
+    def to_polygon(
+        self,
+        min_points: int = MIN_POINTS,
+        beam_azimuth_deg: float | None = None,
+        beam_width_deg: float | None = None,
+        max_range_km: float | None = None,
+    ) -> list[list[float]] | None:
         """Return a closed polygon [[lat, lon], …] or None if insufficient data.
 
         When *beam_azimuth_deg* and *beam_width_deg* are provided the polygon
@@ -195,6 +199,7 @@ class EmpiricalCoverageState:
         # --- Determine which bins fall inside the beam sector -----------------
         if beam_azimuth_deg is not None and beam_width_deg is not None:
             half = beam_width_deg / 2.0
+
             def _in_beam(bin_idx: int) -> bool:
                 centre = bin_idx * _DEG_PER_BIN
                 diff = (centre - beam_azimuth_deg + 180.0) % 360.0 - 180.0
@@ -215,8 +220,7 @@ class EmpiricalCoverageState:
                 ranges.append(0.0)
                 continue
             bearing_i = i * _DEG_PER_BIN
-            clamp = (max_range_km if max_range_km is not None
-                     else self._reach_at(bearing_i))
+            clamp = max_range_km if max_range_km is not None else self._reach_at(bearing_i)
             r = _p85(b) if b else 0.0
             ranges.append(min(r, clamp * self.range_clamp_mult))
 
@@ -284,9 +288,7 @@ class EmpiricalCoverageState:
         # the beam straddles north, because the in-beam bins wrap 71→0.
         in_beam_bins = [i for i in range(N_BINS) if _in_beam(i)]
         if beam_azimuth_deg is not None and beam_width_deg is not None:
-            in_beam_bins.sort(
-                key=lambda i: ((i * _DEG_PER_BIN - beam_azimuth_deg + 180.0) % 360.0) - 180.0
-            )
+            in_beam_bins.sort(key=lambda i: ((i * _DEG_PER_BIN - beam_azimuth_deg + 180.0) % 360.0) - 180.0)
         for i in in_beam_bins:
             r_km = smoothed[i]
             if r_km < 0.1:
@@ -297,7 +299,8 @@ class EmpiricalCoverageState:
             # mismatch with a new one, between a bin and the vertex drawn for it.
             bearing_rad = math.radians(i * _DEG_PER_BIN)
             lat, lon = offset_latlon(
-                self.rx_lat, self.rx_lon,
+                self.rx_lat,
+                self.rx_lon,
                 east_km=r_km * math.sin(bearing_rad),
                 north_km=r_km * math.cos(bearing_rad),
             )
@@ -364,8 +367,7 @@ class EmpiricalCoverageState:
         out = []
         for i in range(N_BINS):
             b = self._bins[i]
-            out.append(round(_p85(b), 1)
-                       if len(b) >= _MIN_BIN_POINTS_TO_CONSTRAIN else None)
+            out.append(round(_p85(b), 1) if len(b) >= _MIN_BIN_POINTS_TO_CONSTRAIN else None)
         return tuple(out)
 
     # ── Serialisation ─────────────────────────────────────────────────────────
@@ -385,9 +387,13 @@ class EmpiricalCoverageState:
 
     @classmethod
     def from_dict(cls, d: dict) -> "EmpiricalCoverageState":
-        obj = cls(rx_lat=d["rx_lat"], rx_lon=d["rx_lon"],
-                  max_range_km=d.get("max_range_km"),
-                  tx_lat=d.get("tx_lat"), tx_lon=d.get("tx_lon"))
+        obj = cls(
+            rx_lat=d["rx_lat"],
+            rx_lon=d["rx_lon"],
+            max_range_km=d.get("max_range_km"),
+            tx_lat=d.get("tx_lat"),
+            tx_lon=d.get("tx_lon"),
+        )
         obj.max_bistatic_range_km = d.get("max_bistatic_range_km")
         # Round-trip the clamp: dropping it silently reset a customised
         # multiplier to the 2.0 default on every restart.
@@ -409,5 +415,5 @@ class EmpiricalCoverageState:
 
     @classmethod
     def load_from_file(cls, path: str) -> "EmpiricalCoverageState":
-        with open(path, "r") as f:
+        with open(path) as f:
             return cls.from_dict(json.load(f))

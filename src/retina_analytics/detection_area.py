@@ -17,6 +17,7 @@ from retina_analytics.constants import (
 class DetectionAreaState:
     """Characterises the geographic detection footprint of one node from
     observed delay/Doppler bounds."""
+
     node_id: str
     # Node geometry (set once at registration)
     rx_lat: float = 0.0
