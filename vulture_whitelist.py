@@ -33,6 +33,14 @@ _.coverage_limit_for
 _.coverage_digest
 # Called from backend/services/frame_processor.py.
 _.record_node_tracks
+# Status counter read via getattr(_a, "anchored_inputs_emitted", 0) in
+# backend/routes/analytics.py, and directly in backend/routes/test.py.
+_.anchored_inputs_emitted
+# Called from backend/services/tasks/solver.py and
+# backend/services/tasks/analytics_refresh.py.
+_.learned_fov_for
+# Called from backend/services/tasks/analytics_refresh.py.
+_.record_negative_event
 # Imported and re-exported by backend/services/geo.py.
 M_PER_DEG_LAT
 
