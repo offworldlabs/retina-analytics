@@ -15,7 +15,7 @@ KM_PER_DEG_LAT = R_EARTH * math.pi / 180.0  # 111.1949…
 M_PER_DEG_LAT = KM_PER_DEG_LAT * 1000.0
 
 # Yagi antenna spec
-YAGI_BEAM_WIDTH_DEG = 41.0  # typical 40-42° half-power beamwidth
+YAGI_BEAM_WIDTH_DEG = 42.0  # half-power beamwidth of the fleet Yagis
 YAGI_MAX_RANGE_KM = 50.0
 
 

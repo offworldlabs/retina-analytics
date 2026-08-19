@@ -72,7 +72,7 @@ class TestTrustScore:
 
 class TestYagiConstants:
     def test_beam_width(self):
-        assert YAGI_BEAM_WIDTH_DEG == 41.0
+        assert YAGI_BEAM_WIDTH_DEG == 42.0
 
     def test_max_range(self):
         assert YAGI_MAX_RANGE_KM == 50.0
@@ -81,7 +81,7 @@ class TestYagiConstants:
 class TestDetectionArea:
     def test_defaults(self):
         da = DetectionAreaState(node_id="test-da")
-        assert da.beam_width_deg == 41.0
+        assert da.beam_width_deg == 42.0
         assert da.max_range_km == 50.0
 
     def test_update(self):

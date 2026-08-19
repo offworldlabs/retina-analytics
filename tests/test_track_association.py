@@ -364,6 +364,8 @@ class TestFormatTrackPairsForSolver:
         assert set(s_in["initial_guess"]) == {"lat", "lon", "alt_km"}
         assert s_in["chi2_per_dof"] is not None
         assert s_in["track_ids"] == ["a1", "b1"]
+        assert s_in["track_ids_by_node"] == {"site-a": ["a1"], "site-b": ["b1"]}
+        assert set().union(*s_in["track_ids_by_node"].values()) == set(s_in["track_ids"])
 
     def test_cluster_reports_its_worst_fit(self):
         """A poor pairing must not be laundered by a good one beside it.

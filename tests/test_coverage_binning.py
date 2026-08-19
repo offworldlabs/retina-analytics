@@ -88,8 +88,34 @@ class TestPersistedStateIsNotDiscarded:
         new points are filed correctly and old ones age out at _MAX_PER_BIN.
         A bump would discard every node's polygon, which is days of cooperative
         traffic each, to correct an error that then averages through a P85, a
-        3-bin rolling mean and a 1.25x margin."""
-        assert CALIBRATION_SCHEMA == 2
+        3-bin rolling mean and a 1.25x margin.
+
+        Schema 3 (the learned-FOV round) is exactly the kind of deliberate
+        bump this test exists to make explicit: priors, per-bin positive
+        timestamps and negative events changed what a persisted state MEANS,
+        so silently reinterpreting v2 files was the wrong option and the
+        one-time discard was accepted on purpose.
+
+        Schema 4 (the detection-backed calibration round): v3 positives were
+        track-fed — coasting emits and published-solve attribution — so a v3
+        polygon is shaped partly by ghost feedback and departure paths.  The
+        recorders changed what a positive MEANS; the accumulated state
+        cannot be repaired in place, only relearned.
+
+        Schema 5: v4 still trusted track identity — a track swapped onto an
+        untagged target kept recording the departed aircraft's position.
+        Positives now require the newest associated detection to carry the
+        track's own ADS-B tag.
+
+        Schema 6: v5 had no per-bin positive timestamps, so an out-of-wedge
+        bin's opening rule could only ever count positives, never check how
+        long they spanned — and v5's recorder stamped the live ADS-B fix for
+        up to 5 s after the node's last real detection ("exit smear"),
+        which a raw count cannot tell apart from a real, sustained pattern.
+        Both are fixed going forward (bin_pos_ts + a span requirement); a v5
+        polygon carries neither the field nor clean evidence, so it is
+        rebuilt, not migrated."""
+        assert CALIBRATION_SCHEMA == 6
 
     def test_persisted_bins_carry_no_positions_to_rebin(self):
         s = _state()
