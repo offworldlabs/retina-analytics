@@ -27,8 +27,7 @@ RX_LAT, RX_LON = 34.85, -82.40
 
 
 def _state(**kw):
-    s = EmpiricalCoverageState(rx_lat=RX_LAT, rx_lon=RX_LON,
-                               max_range_km=kw.pop("max_range_km", 60.0), **kw)
+    s = EmpiricalCoverageState(rx_lat=RX_LAT, rx_lon=RX_LON, max_range_km=kw.pop("max_range_km", 60.0), **kw)
     return s
 
 
@@ -47,13 +46,13 @@ class TestBinningIsSpherical:
         crosses a 5 deg boundary for a couple of percent of points."""
         s = _state()
         for brg in range(0, 360, 3):
-            tgt = offset_latlon(RX_LAT, RX_LON,
-                                east_km=30 * math.sin(math.radians(brg)),
-                                north_km=30 * math.cos(math.radians(brg)))
+            tgt = offset_latlon(
+                RX_LAT, RX_LON, east_km=30 * math.sin(math.radians(brg)), north_km=30 * math.cos(math.radians(brg))
+            )
             filed, _ = _bearing_and_range(RX_LAT, RX_LON, *tgt)
             queried = bearing_deg(RX_LAT, RX_LON, *tgt)
             assert _bin_for_bearing(filed) == _bin_for_bearing(queried)
-        assert s.n_points == 0   # nothing recorded; this is a pure-geometry check
+        assert s.n_points == 0  # nothing recorded; this is a pure-geometry check
 
 
 class TestPolygonRoundTrip:
@@ -64,9 +63,9 @@ class TestPolygonRoundTrip:
         s = _state()
         for brg in range(0, 360, 5):
             for _ in range(25):
-                tgt = offset_latlon(RX_LAT, RX_LON,
-                                    east_km=25 * math.sin(math.radians(brg)),
-                                    north_km=25 * math.cos(math.radians(brg)))
+                tgt = offset_latlon(
+                    RX_LAT, RX_LON, east_km=25 * math.sin(math.radians(brg)), north_km=25 * math.cos(math.radians(brg))
+                )
                 s.add_point(*tgt)
 
         poly = s.to_polygon()
@@ -137,17 +136,15 @@ class TestPersistedStateIsNotDiscarded:
 
 class TestClampNoLongerMixesModels:
     def _elliptical_state(self):
-        s = EmpiricalCoverageState(rx_lat=RX_LAT, rx_lon=RX_LON,
-                                   max_range_km=60.0,
-                                   tx_lat=34.90, tx_lon=-82.30)
+        s = EmpiricalCoverageState(rx_lat=RX_LAT, rx_lon=RX_LON, max_range_km=60.0, tx_lat=34.90, tx_lon=-82.30)
         s.max_bistatic_range_km = 60.0
         return s
 
     @staticmethod
     def _at(bearing, km):
-        return offset_latlon(RX_LAT, RX_LON,
-                             east_km=km * math.sin(math.radians(bearing)),
-                             north_km=km * math.cos(math.radians(bearing)))
+        return offset_latlon(
+            RX_LAT, RX_LON, east_km=km * math.sin(math.radians(bearing)), north_km=km * math.cos(math.radians(bearing))
+        )
 
     def test_the_clamp_angle_is_computed_in_one_model(self):
         """add_point handed _reach_at a flat bearing while _reach_at derived the
@@ -171,5 +168,4 @@ class TestClampNoLongerMixesModels:
         away = (toward + 180.0) % 360.0
         assert s._reach_at(toward) > s._reach_at(away)
         # r(0) = delta/2 + baseline, and the baseline here is ~10 km.
-        assert s._reach_at(toward) == pytest.approx(
-            30.0 + haversine_km(RX_LAT, RX_LON, 34.90, -82.30), abs=0.01)
+        assert s._reach_at(toward) == pytest.approx(30.0 + haversine_km(RX_LAT, RX_LON, 34.90, -82.30), abs=0.01)

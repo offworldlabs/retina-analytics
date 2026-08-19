@@ -28,23 +28,41 @@ _R_EARTH_KM = 6371.0
 # Same dual-illuminator site as test_track_association.py: one receiver, two
 # transmitters — the arrangement the n=2 case actually arises in.
 _NODE_A = {
-    "rx_lat": 34.85, "rx_lon": -82.40, "rx_alt_ft": 1000,
-    "tx_lat": 34.9412, "tx_lon": -82.4103, "tx_alt_ft": 2000,
-    "fc_hz": 183e6, "beam_width_deg": 90, "max_range_km": 60,
+    "rx_lat": 34.85,
+    "rx_lon": -82.40,
+    "rx_alt_ft": 1000,
+    "tx_lat": 34.9412,
+    "tx_lon": -82.4103,
+    "tx_alt_ft": 2000,
+    "fc_hz": 183e6,
+    "beam_width_deg": 90,
+    "max_range_km": 60,
     "beam_azimuth_deg": 45.0,
 }
 _NODE_B = {
-    "rx_lat": 34.85, "rx_lon": -82.40, "rx_alt_ft": 1000,
-    "tx_lat": 34.9701, "tx_lon": -81.9484, "tx_alt_ft": 800,
-    "fc_hz": 195e6, "beam_width_deg": 90, "max_range_km": 60,
+    "rx_lat": 34.85,
+    "rx_lon": -82.40,
+    "rx_alt_ft": 1000,
+    "tx_lat": 34.9701,
+    "tx_lon": -81.9484,
+    "tx_alt_ft": 800,
+    "fc_hz": 195e6,
+    "beam_width_deg": 90,
+    "max_range_km": 60,
     "beam_azimuth_deg": 45.0,
 }
 # Third node at the same receiver — needed only for the trigger-must-match
 # test, which is structurally a 3-node scenario.
 _NODE_C = {
-    "rx_lat": 34.85, "rx_lon": -82.40, "rx_alt_ft": 1000,
-    "tx_lat": 35.1702, "tx_lon": -82.2905, "tx_alt_ft": 3000,
-    "fc_hz": 201e6, "beam_width_deg": 90, "max_range_km": 60,
+    "rx_lat": 34.85,
+    "rx_lon": -82.40,
+    "rx_alt_ft": 1000,
+    "tx_lat": 35.1702,
+    "tx_lon": -82.2905,
+    "tx_alt_ft": 3000,
+    "fc_hz": 201e6,
+    "beam_width_deg": 90,
+    "max_range_km": 60,
     "beam_azimuth_deg": 45.0,
 }
 
@@ -58,8 +76,7 @@ def _enu_km(lat, lon, alt_km, ref_lat, ref_lon, ref_alt_km):
 def _measure(cfg, lat, lon, alt_km, ve, vn):
     ref_alt = cfg["rx_alt_ft"] * 0.0003048
     tgt = _enu_km(lat, lon, alt_km, cfg["rx_lat"], cfg["rx_lon"], ref_alt)
-    tx = _enu_km(cfg["tx_lat"], cfg["tx_lon"], cfg["tx_alt_ft"] * 0.0003048,
-                 cfg["rx_lat"], cfg["rx_lon"], ref_alt)
+    tx = _enu_km(cfg["tx_lat"], cfg["tx_lon"], cfg["tx_alt_ft"] * 0.0003048, cfg["rx_lat"], cfg["rx_lon"], ref_alt)
     d_tx = math.dist(tgt, tx)
     d_rx = math.dist(tgt, (0.0, 0.0, 0.0))
     delay_us = (d_tx + d_rx - math.dist(tx, (0.0, 0.0, 0.0))) / 0.299792458
@@ -110,21 +127,36 @@ _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM = 34.88, -82.35, 7.0
 _TRUE_VE, _TRUE_VN = 180.0, -90.0
 
 
-def _global(key, *, lat=_TRUE_LAT, lon=_TRUE_LON, alt_km=_TRUE_ALT_KM,
-           ve=_TRUE_VE, vn=_TRUE_VN, ts_s=_LAST_T_S, n_nodes=0,
-           solve_count=2, vel_up=0.0) -> dict:
+def _global(
+    key,
+    *,
+    lat=_TRUE_LAT,
+    lon=_TRUE_LON,
+    alt_km=_TRUE_ALT_KM,
+    ve=_TRUE_VE,
+    vn=_TRUE_VN,
+    ts_s=_LAST_T_S,
+    n_nodes=0,
+    solve_count=2,
+    vel_up=0.0,
+) -> dict:
     """A provider-contract global track dict, defaulting to the true state."""
     return {
-        "key": key, "lat": lat, "lon": lon, "alt_m": alt_km * 1000.0,
-        "vel_east": ve, "vel_north": vn, "vel_up": vel_up,
-        "timestamp_ms": ts_s * 1000.0, "n_nodes": n_nodes,
+        "key": key,
+        "lat": lat,
+        "lon": lon,
+        "alt_m": alt_km * 1000.0,
+        "vel_east": ve,
+        "vel_north": vn,
+        "vel_up": vel_up,
+        "timestamp_ms": ts_s * 1000.0,
+        "n_nodes": n_nodes,
         "solve_count": solve_count,
     }
 
 
 def _true_hist(cfg):
-    return _history(cfg, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM, _TRUE_VE, _TRUE_VN,
-                    anchor="end")
+    return _history(cfg, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM, _TRUE_VE, _TRUE_VN, anchor="end")
 
 
 class TestPredictObservation:
@@ -135,20 +167,16 @@ class TestPredictObservation:
         a = _assoc()
         geo = a.node_geometries["site-a"]
         for ve, vn in [(180.0, -90.0), (-150.0, 170.0), (0.0, 0.0)]:
-            exp_delay, exp_doppler = _measure(_NODE_A, _TRUE_LAT, _TRUE_LON,
-                                              _TRUE_ALT_KM, ve, vn)
-            delay, doppler = predict_observation(
-                geo, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM, ve, vn)
+            exp_delay, exp_doppler = _measure(_NODE_A, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM, ve, vn)
+            delay, doppler = predict_observation(geo, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM, ve, vn)
             assert delay == pytest.approx(exp_delay, abs=1e-6)
             assert doppler == pytest.approx(exp_doppler, abs=1e-6)
 
     def test_positive_is_closing_negative_is_receding(self):
         a = _assoc()
         geo = a.node_geometries["site-a"]
-        _, closing = predict_observation(geo, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM,
-                                         180.0, -90.0)
-        _, receding = predict_observation(geo, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM,
-                                          -180.0, 90.0)
+        _, closing = predict_observation(geo, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM, 180.0, -90.0)
+        _, receding = predict_observation(geo, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM, -180.0, 90.0)
         assert closing == pytest.approx(-receding, abs=1e-6)
 
 
@@ -156,13 +184,10 @@ class TestClaimMatching:
     def test_true_state_global_claims_its_tracklet_at_both_nodes(self):
         g = _global("mn-dark-1")
         a = _make_assoc("active", lambda: [g])
-        a.submit_tracks_round(
-            "site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
-        round_ = a.submit_tracks_round(
-            "site-b", [{"track_id": "b1", "history": _true_hist(_NODE_B)}], 2000)
+        a.submit_tracks_round("site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
+        round_ = a.submit_tracks_round("site-b", [{"track_id": "b1", "history": _true_hist(_NODE_B)}], 2000)
 
-        won_nodes = {c["node_id"] for c in round_.claims
-                     if c["anchor_key"] == "mn-dark-1" and c["won"]}
+        won_nodes = {c["node_id"] for c in round_.claims if c["anchor_key"] == "mn-dark-1" and c["won"]}
         assert won_nodes == {"site-a", "site-b"}
         assert len(round_.anchored_inputs) == 1
         assert round_.anchored_inputs[0]["anchor_key"] == "mn-dark-1"
@@ -173,10 +198,8 @@ class TestClaimMatching:
         far_lat = _TRUE_LAT + 15.0 / KM_PER_DEG_LAT
         g = _global("mn-dark-far", lat=far_lat)
         a = _make_assoc("active", lambda: [g])
-        a.submit_tracks_round(
-            "site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
-        round_ = a.submit_tracks_round(
-            "site-b", [{"track_id": "b1", "history": _true_hist(_NODE_B)}], 2000)
+        a.submit_tracks_round("site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
+        round_ = a.submit_tracks_round("site-b", [{"track_id": "b1", "history": _true_hist(_NODE_B)}], 2000)
 
         assert round_.claims == []
         assert round_.anchored_inputs == []
@@ -188,14 +211,11 @@ class TestClaimMatching:
         reject that the bottom-up path cannot at n=2."""
         g = _global("mn-dark-1")  # true velocity: 180, -90
         a = _make_assoc("active", lambda: [g])
-        hist_wrong_vel = _history(_NODE_A, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM,
-                                  -150.0, 170.0, anchor="end")
-        round_a = a.submit_tracks_round(
-            "site-a", [{"track_id": "a1", "history": hist_wrong_vel}], 1000)
+        hist_wrong_vel = _history(_NODE_A, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM, -150.0, 170.0, anchor="end")
+        round_a = a.submit_tracks_round("site-a", [{"track_id": "a1", "history": hist_wrong_vel}], 1000)
         assert round_a.claims == []  # gated out before becoming a candidate
 
-        round_b = a.submit_tracks_round(
-            "site-b", [{"track_id": "b1", "history": _true_hist(_NODE_B)}], 2000)
+        round_b = a.submit_tracks_round("site-b", [{"track_id": "b1", "history": _true_hist(_NODE_B)}], 2000)
         a_claims = [c for c in round_b.claims if c["node_id"] == "site-a"]
         assert a_claims == []
         # Only one node matched (site-b) — never anchors.
@@ -208,8 +228,7 @@ class TestClaimMatching:
         g_exact = _global("mn-dark-exact")
         g_dup = _global("mn-dark-dup")
         a = _make_assoc("active", lambda: [g_exact, g_dup])
-        round_ = a.submit_tracks_round(
-            "site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
+        round_ = a.submit_tracks_round("site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
 
         a_claims = [c for c in round_.claims if c["node_id"] == "site-a"]
         assert {c["anchor_key"] for c in a_claims} == {"mn-dark-exact", "mn-dark-dup"}
@@ -223,22 +242,19 @@ class TestEligibility:
     def test_low_n_nodes_and_solve_count_one_never_claims(self):
         g = _global("mn-dark-1", n_nodes=2, solve_count=1)
         a = _make_assoc("active", lambda: [g])
-        round_ = a.submit_tracks_round(
-            "site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
+        round_ = a.submit_tracks_round("site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
         assert round_.claims == []
 
     def test_solve_count_two_is_enough_even_at_n_nodes_zero(self):
         g = _global("mn-dark-1", n_nodes=0, solve_count=2)
         a = _make_assoc("active", lambda: [g])
-        round_ = a.submit_tracks_round(
-            "site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
+        round_ = a.submit_tracks_round("site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
         assert any(c["won"] for c in round_.claims)
 
     def test_n_nodes_three_is_enough_even_at_solve_count_zero(self):
         g = _global("mn-dark-1", n_nodes=3, solve_count=0)
         a = _make_assoc("active", lambda: [g])
-        round_ = a.submit_tracks_round(
-            "site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
+        round_ = a.submit_tracks_round("site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
         assert any(c["won"] for c in round_.claims)
 
     def test_dr_age_beyond_the_cap_is_not_claimed(self):
@@ -247,8 +263,7 @@ class TestEligibility:
         withheld regardless of how good the position match would be."""
         g = _global("mn-dark-1", ts_s=_LAST_T_S - (CLAIM_MAX_DR_AGE_S + 1.0))
         a = _make_assoc("active", lambda: [g])
-        round_ = a.submit_tracks_round(
-            "site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
+        round_ = a.submit_tracks_round("site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
         assert round_.claims == []
 
 
@@ -257,16 +272,12 @@ class TestShadowMode:
         g = _global("mn-dark-1")
 
         off = _make_assoc("off", lambda: [g])
-        off.submit_tracks_round(
-            "site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
-        off_round = off.submit_tracks_round(
-            "site-b", [{"track_id": "b1", "history": _true_hist(_NODE_B)}], 2000)
+        off.submit_tracks_round("site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
+        off_round = off.submit_tracks_round("site-b", [{"track_id": "b1", "history": _true_hist(_NODE_B)}], 2000)
 
         shadow = _make_assoc("shadow", lambda: [g])
-        shadow.submit_tracks_round(
-            "site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
-        shadow_round = shadow.submit_tracks_round(
-            "site-b", [{"track_id": "b1", "history": _true_hist(_NODE_B)}], 2000)
+        shadow.submit_tracks_round("site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
+        shadow_round = shadow.submit_tracks_round("site-b", [{"track_id": "b1", "history": _true_hist(_NODE_B)}], 2000)
 
         # Computed and counted ...
         assert shadow.claim_rounds > 0
@@ -276,10 +287,8 @@ class TestShadowMode:
         # ... but provably inert downstream.
         assert shadow_round.anchored_inputs == []
         assert len(shadow_round.pairs) == len(off_round.pairs) == 1
-        assert ({p.track_a_id for p in shadow_round.pairs}
-                == {p.track_a_id for p in off_round.pairs})
-        assert ({p.track_b_id for p in shadow_round.pairs}
-                == {p.track_b_id for p in off_round.pairs})
+        assert {p.track_a_id for p in shadow_round.pairs} == {p.track_a_id for p in off_round.pairs}
+        assert {p.track_b_id for p in shadow_round.pairs} == {p.track_b_id for p in off_round.pairs}
 
 
 class TestActiveMode:
@@ -314,26 +323,20 @@ class TestActiveMode:
         triggered by site-c, which does not — no anchored input, even
         though 2 (non-triggering) nodes matched."""
         g = _global("mn-dark-1")
-        a = InterNodeAssociator(grid_step_km=3.0, claim_mode="active",
-                                global_track_provider=lambda: [g])
+        a = InterNodeAssociator(grid_step_km=3.0, claim_mode="active", global_track_provider=lambda: [g])
         a.register_node("site-a", _NODE_A)
         a.register_node("site-b", _NODE_B)
         a.register_node("site-c", _NODE_C)
-        a.submit_tracks_round(
-            "site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
-        a.submit_tracks_round(
-            "site-b", [{"track_id": "b1", "history": _true_hist(_NODE_B)}], 1500)
+        a.submit_tracks_round("site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
+        a.submit_tracks_round("site-b", [{"track_id": "b1", "history": _true_hist(_NODE_B)}], 1500)
 
         # site-c's own tracklet is a different target entirely, ~111 km
         # away — it will never gate against this global.
-        hist_c_other = _history(_NODE_C, _TRUE_LAT + 1.0, _TRUE_LON,
-                                _TRUE_ALT_KM, _TRUE_VE, _TRUE_VN, anchor="end")
-        round_ = a.submit_tracks_round(
-            "site-c", [{"track_id": "c1", "history": hist_c_other}], 2000)
+        hist_c_other = _history(_NODE_C, _TRUE_LAT + 1.0, _TRUE_LON, _TRUE_ALT_KM, _TRUE_VE, _TRUE_VN, anchor="end")
+        round_ = a.submit_tracks_round("site-c", [{"track_id": "c1", "history": hist_c_other}], 2000)
 
         assert round_.anchored_inputs == []
-        matched = {c["node_id"] for c in round_.claims
-                  if c["anchor_key"] == "mn-dark-1" and c["won"]}
+        matched = {c["node_id"] for c in round_.claims if c["anchor_key"] == "mn-dark-1" and c["won"]}
         assert matched == {"site-a", "site-b"}
 
 
@@ -341,23 +344,24 @@ class TestResetAndWrapper:
     def test_reset_for_tests_clears_the_new_counters(self):
         g = _global("mn-dark-1")
         a = _make_assoc("active", lambda: [g])
-        a.submit_tracks_round(
-            "site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
-        a.submit_tracks_round(
-            "site-b", [{"track_id": "b1", "history": _true_hist(_NODE_B)}], 2000)
+        a.submit_tracks_round("site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
+        a.submit_tracks_round("site-b", [{"track_id": "b1", "history": _true_hist(_NODE_B)}], 2000)
         assert a.claim_rounds > 0
         assert a.claims_matched > 0
 
         a._reset_for_tests()
-        for name in ("claim_rounds", "claims_matched", "claim_conflicts",
-                     "anchored_inputs_emitted", "tracklets_excluded"):
+        for name in (
+            "claim_rounds",
+            "claims_matched",
+            "claim_conflicts",
+            "anchored_inputs_emitted",
+            "tracklets_excluded",
+        ):
             assert getattr(a, name) == 0
 
     def test_submit_tracks_wrapper_returns_a_plain_list(self):
         a = _assoc()
-        a.submit_tracks(
-            "site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
-        pairs = a.submit_tracks(
-            "site-b", [{"track_id": "b1", "history": _true_hist(_NODE_B)}], 2000)
+        a.submit_tracks("site-a", [{"track_id": "a1", "history": _true_hist(_NODE_A)}], 1000)
+        pairs = a.submit_tracks("site-b", [{"track_id": "b1", "history": _true_hist(_NODE_B)}], 2000)
         assert type(pairs) is list
         assert len(pairs) == 1

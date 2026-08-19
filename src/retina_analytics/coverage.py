@@ -4,7 +4,6 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Optional
 
 from retina_analytics.constants import KM_PER_DEG_LAT, bearing_deg, km_per_deg_lon
 
@@ -12,6 +11,7 @@ from retina_analytics.constants import KM_PER_DEG_LAT, bearing_deg, km_per_deg_l
 @dataclass
 class CoverageMapEntry:
     """A single ADS-B-validated detection position."""
+
     lat: float
     lon: float
     alt_km: float
@@ -24,6 +24,7 @@ class CoverageMapEntry:
 class HistoricalCoverageMap:
     """Accumulates ADS-B-validated detection positions over time to build
     a factual coverage map for each node."""
+
     node_id: str
     entries: list[CoverageMapEntry] = field(default_factory=list)
     max_entries: int = 10000
@@ -35,15 +36,18 @@ class HistoricalCoverageMap:
     # beyond that the least-recently-seen cells are evicted.
     max_grid_cells: int = 20000
 
-    def add_detection(self, lat: float, lon: float, alt_km: float,
-                      snr: float, delay_error: float):
+    def add_detection(self, lat: float, lon: float, alt_km: float, snr: float, delay_error: float):
         entry = CoverageMapEntry(
-            lat=lat, lon=lon, alt_km=alt_km,
-            timestamp=time.time(), snr=snr, delay_error=delay_error,
+            lat=lat,
+            lon=lon,
+            alt_km=alt_km,
+            timestamp=time.time(),
+            snr=snr,
+            delay_error=delay_error,
         )
         self.entries.append(entry)
         if len(self.entries) > self.max_entries:
-            self.entries = self.entries[-self.max_entries:]
+            self.entries = self.entries[-self.max_entries :]
 
         grid_key = (
             round(lat / self._grid_resolution_deg),
@@ -54,9 +58,12 @@ class HistoricalCoverageMap:
             if len(self._grid) >= self.max_grid_cells:
                 self._evict_oldest_cells()
             self._grid[grid_key] = {
-                "lat": lat, "lon": lon,
-                "count": 1, "avg_snr": snr,
-                "first_seen": time.time(), "last_seen": time.time(),
+                "lat": lat,
+                "lon": lon,
+                "count": 1,
+                "avg_snr": snr,
+                "first_seen": time.time(),
+                "last_seen": time.time(),
             }
         else:
             cell["count"] += 1
@@ -66,9 +73,7 @@ class HistoricalCoverageMap:
     def _evict_oldest_cells(self) -> None:
         """Drop the least-recently-seen 10% of cells to make room."""
         n_drop = max(1, len(self._grid) // 10)
-        for key, _ in sorted(
-            self._grid.items(), key=lambda kv: kv[1].get("last_seen", 0.0)
-        )[:n_drop]:
+        for key, _ in sorted(self._grid.items(), key=lambda kv: kv[1].get("last_seen", 0.0))[:n_drop]:
             del self._grid[key]
 
     @property
@@ -78,8 +83,7 @@ class HistoricalCoverageMap:
         # every area by 1/cos(lat) — 22% at the Greenville latitude.
         lat_side_km = self._grid_resolution_deg * KM_PER_DEG_LAT
         return sum(
-            lat_side_km * self._grid_resolution_deg * km_per_deg_lon(cell["lat"])
-            for cell in self._grid.values()
+            lat_side_km * self._grid_resolution_deg * km_per_deg_lon(cell["lat"]) for cell in self._grid.values()
         )
 
     @property
@@ -99,7 +103,7 @@ class HistoricalCoverageMap:
             for cell in self._grid.values()
         ]
 
-    def estimate_beam_width(self) -> Optional[float]:
+    def estimate_beam_width(self) -> float | None:
         if len(self.entries) < 20:
             return None
         lats = [e.lat for e in self.entries]
@@ -109,15 +113,14 @@ class HistoricalCoverageMap:
         mid = len(lats_sorted) // 2
         center_lat = lats_sorted[mid]
         center_lon = lons_sorted[mid]
-        bearings = [bearing_deg(center_lat, center_lon, e.lat, e.lon)
-                    for e in self.entries]
+        bearings = [bearing_deg(center_lat, center_lon, e.lat, e.lon) for e in self.entries]
         if not bearings:
             return None
         bearings.sort()
         gaps = [(bearings[i + 1] - bearings[i]) for i in range(len(bearings) - 1)]
         gaps.append(360 - bearings[-1] + bearings[0])
         max_gap_idx = gaps.index(max(gaps))
-        rotated = bearings[max_gap_idx + 1:] + bearings[:max_gap_idx + 1]
+        rotated = bearings[max_gap_idx + 1 :] + bearings[: max_gap_idx + 1]
         if not rotated:
             return None
         spread = (rotated[-1] - rotated[0]) % 360
@@ -138,14 +141,17 @@ class HistoricalCoverageMap:
         data = {
             "node_id": self.node_id,
             "entries": [
-                {"lat": e.lat, "lon": e.lon, "alt_km": e.alt_km,
-                 "timestamp": e.timestamp, "snr": e.snr,
-                 "delay_error": e.delay_error}
+                {
+                    "lat": e.lat,
+                    "lon": e.lon,
+                    "alt_km": e.alt_km,
+                    "timestamp": e.timestamp,
+                    "snr": e.snr,
+                    "delay_error": e.delay_error,
+                }
                 for e in self.entries
             ],
-            "grid": {
-                f"{k[0]},{k[1]}": v for k, v in self._grid.items()
-            },
+            "grid": {f"{k[0]},{k[1]}": v for k, v in self._grid.items()},
         }
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
@@ -154,19 +160,24 @@ class HistoricalCoverageMap:
 
     @classmethod
     def load_from_file(cls, path: str) -> "HistoricalCoverageMap":
-        with open(path, "r") as f:
+        with open(path) as f:
             data = json.load(f)
         cmap = cls(node_id=data["node_id"])
         for e in data.get("entries", []):
-            cmap.entries.append(CoverageMapEntry(
-                lat=e["lat"], lon=e["lon"], alt_km=e["alt_km"],
-                timestamp=e["timestamp"], snr=e["snr"],
-                delay_error=e["delay_error"],
-            ))
+            cmap.entries.append(
+                CoverageMapEntry(
+                    lat=e["lat"],
+                    lon=e["lon"],
+                    alt_km=e["alt_km"],
+                    timestamp=e["timestamp"],
+                    snr=e["snr"],
+                    delay_error=e["delay_error"],
+                )
+            )
         # Re-apply the caps: a file written before they existed (or under
         # larger ones) must not resurrect unbounded state.
         if len(cmap.entries) > cmap.max_entries:
-            cmap.entries = cmap.entries[-cmap.max_entries:]
+            cmap.entries = cmap.entries[-cmap.max_entries :]
         for k_str, v in data.get("grid", {}).items():
             parts = k_str.split(",")
             cmap._grid[(int(parts[0]), int(parts[1]))] = v

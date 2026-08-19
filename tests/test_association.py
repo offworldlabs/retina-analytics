@@ -1,10 +1,14 @@
 """Tests for inter-node association logic."""
 
 import math
-from retina_analytics.association import (
-    NodeGeometry, compute_overlap_zone, InterNodeAssociator, _bistatic_delay_at, _lla_to_enu,
-)
 
+from retina_analytics.association import (
+    InterNodeAssociator,
+    NodeGeometry,
+    _bistatic_delay_at,
+    _lla_to_enu,
+    compute_overlap_zone,
+)
 
 # ── Overlap zone & bistatic delay ────────────────────────────────────────────
 
@@ -12,14 +16,28 @@ from retina_analytics.association import (
 class TestOverlapZone:
     def test_overlap_zone_ids(self):
         geo_a = NodeGeometry(
-            node_id="assoc-A", rx_lat=33.939, rx_lon=-84.651, rx_alt_km=0.29,
-            tx_lat=33.756, tx_lon=-84.331, tx_alt_km=0.49,
-            beam_azimuth_deg=135, beam_width_deg=41, max_range_km=50,
+            node_id="assoc-A",
+            rx_lat=33.939,
+            rx_lon=-84.651,
+            rx_alt_km=0.29,
+            tx_lat=33.756,
+            tx_lon=-84.331,
+            tx_alt_km=0.49,
+            beam_azimuth_deg=135,
+            beam_width_deg=41,
+            max_range_km=50,
         )
         geo_b = NodeGeometry(
-            node_id="assoc-B", rx_lat=34.05, rx_lon=-84.4, rx_alt_km=0.3,
-            tx_lat=33.85, tx_lon=-84.15, tx_alt_km=0.5,
-            beam_azimuth_deg=210, beam_width_deg=41, max_range_km=50,
+            node_id="assoc-B",
+            rx_lat=34.05,
+            rx_lon=-84.4,
+            rx_alt_km=0.3,
+            tx_lat=33.85,
+            tx_lon=-84.15,
+            tx_alt_km=0.5,
+            beam_azimuth_deg=210,
+            beam_width_deg=41,
+            max_range_km=50,
         )
         zone = compute_overlap_zone(geo_a, geo_b, grid_step_km=5.0)
         assert zone.node_a_id == "assoc-A"
@@ -40,16 +58,34 @@ class TestOverlapZone:
 class TestInterNodeAssociator:
     def _make_assoc(self):
         assoc = InterNodeAssociator(grid_step_km=5.0)
-        assoc.register_node("assoc-A", {
-            "rx_lat": 33.939, "rx_lon": -84.651, "rx_alt_ft": 950,
-            "tx_lat": 33.756, "tx_lon": -84.331, "tx_alt_ft": 1600,
-            "fc_hz": 195e6, "beam_width_deg": 41, "max_range_km": 50,
-        })
-        assoc.register_node("assoc-B", {
-            "rx_lat": 34.05, "rx_lon": -84.4, "rx_alt_ft": 980,
-            "tx_lat": 33.85, "tx_lon": -84.15, "tx_alt_ft": 1600,
-            "fc_hz": 195e6, "beam_width_deg": 41, "max_range_km": 50,
-        })
+        assoc.register_node(
+            "assoc-A",
+            {
+                "rx_lat": 33.939,
+                "rx_lon": -84.651,
+                "rx_alt_ft": 950,
+                "tx_lat": 33.756,
+                "tx_lon": -84.331,
+                "tx_alt_ft": 1600,
+                "fc_hz": 195e6,
+                "beam_width_deg": 41,
+                "max_range_km": 50,
+            },
+        )
+        assoc.register_node(
+            "assoc-B",
+            {
+                "rx_lat": 34.05,
+                "rx_lon": -84.4,
+                "rx_alt_ft": 980,
+                "tx_lat": 33.85,
+                "tx_lon": -84.15,
+                "tx_alt_ft": 1600,
+                "fc_hz": 195e6,
+                "beam_width_deg": 41,
+                "max_range_km": 50,
+            },
+        )
         return assoc
 
     def test_register_two_nodes(self):
@@ -67,9 +103,15 @@ class TestInterNodeAssociator:
 
 
 _SCALING_CFG = {
-    "rx_lat": 33.939, "rx_lon": -84.651, "rx_alt_ft": 950,
-    "tx_lat": 33.756, "tx_lon": -84.331, "tx_alt_ft": 1600,
-    "fc_hz": 195e6, "beam_width_deg": 41, "max_range_km": 50,
+    "rx_lat": 33.939,
+    "rx_lon": -84.651,
+    "rx_alt_ft": 950,
+    "tx_lat": 33.756,
+    "tx_lon": -84.331,
+    "tx_alt_ft": 1600,
+    "fc_hz": 195e6,
+    "beam_width_deg": 41,
+    "max_range_km": 50,
 }
 
 
@@ -127,12 +169,14 @@ _FC_VHF, _FC_UHF = 183e6, 599e6
 
 def _lam(fc):
     from retina_analytics.association import C_KM_S
+
     return C_KM_S * 1000.0 / fc
 
 
 def _doppler_hz(v_ms, tgt, tx, rx, fc):
     """Forward model: f_d = (1/lambda) * v . (u_tx + u_rx)."""
     from retina_analytics.association import _bisector
+
     b = _bisector(tgt, tx, rx)
     return sum(v_ms[i] * b[i] for i in range(3)) / _lam(fc)
 
@@ -154,6 +198,7 @@ class TestDopplerIsAVelocityProjection:
 
     def test_projection_identity_holds(self):
         from retina_analytics.association import _bisector
+
         v = (180.0, 120.0, 0.0)
         for tx, fc in ((self.TX1, _FC_VHF), (self.TX2, _FC_UHF)):
             f = _doppler_hz(v, self.TGT, tx, self.RX, fc)
@@ -169,18 +214,22 @@ class TestDopplerIsAVelocityProjection:
 
     def test_velocity_is_recovered_from_the_two_projections(self):
         from retina_analytics.association import _bisector, implied_horizontal_speed
+
         v = (180.0, 120.0, 0.0)
         f1 = _doppler_hz(v, self.TGT, self.TX1, self.RX, _FC_VHF)
         f2 = _doppler_hz(v, self.TGT, self.TX2, self.RX, _FC_UHF)
         got = implied_horizontal_speed(
-            f1 * _lam(_FC_VHF), _bisector(self.TGT, self.TX1, self.RX),
-            f2 * _lam(_FC_UHF), _bisector(self.TGT, self.TX2, self.RX),
+            f1 * _lam(_FC_VHF),
+            _bisector(self.TGT, self.TX1, self.RX),
+            f2 * _lam(_FC_UHF),
+            _bisector(self.TGT, self.TX2, self.RX),
         )
         assert abs(got - math.hypot(v[0], v[1])) < 0.5
 
     def test_impossible_pairing_is_rejected(self):
         """Two projections implying a speed no aircraft can fly."""
         from retina_analytics.association import _bisector, implied_horizontal_speed
+
         b1 = _bisector(self.TGT, self.TX1, self.RX)
         b2 = _bisector(self.TGT, self.TX2, self.RX)
         # Opposed projections along near-orthogonal axes force a huge |v|.
@@ -190,12 +239,14 @@ class TestDopplerIsAVelocityProjection:
     def test_abstains_on_parallel_axes(self):
         """Same axis twice cannot determine a horizontal velocity."""
         from retina_analytics.association import _bisector, implied_horizontal_speed
+
         b1 = _bisector(self.TGT, self.TX1, self.RX)
         assert implied_horizontal_speed(50.0, b1, 50.0, b1) is None
 
     def test_abstains_when_the_bisector_collapses(self):
         """On the baseline |b| -> 0 and Doppler carries no velocity information."""
         from retina_analytics.association import _bisector, implied_horizontal_speed
+
         b2 = _bisector(self.TGT, self.TX2, self.RX)
         assert implied_horizontal_speed(50.0, (0.01, 0.0, 0.0), 50.0, b2) is None
 
@@ -204,6 +255,7 @@ class TestDopplerIsAVelocityProjection:
         import random
 
         from retina_analytics.association import _bisector, implied_horizontal_speed
+
         rng = random.Random(11)
         judged = rejected = 0
         for _ in range(2000):
@@ -213,8 +265,10 @@ class TestDopplerIsAVelocityProjection:
             f1 = _doppler_hz(v, tgt, self.TX1, self.RX, _FC_VHF)
             f2 = _doppler_hz(v, tgt, self.TX2, self.RX, _FC_UHF)
             got = implied_horizontal_speed(
-                f1 * _lam(_FC_VHF), _bisector(tgt, self.TX1, self.RX),
-                f2 * _lam(_FC_UHF), _bisector(tgt, self.TX2, self.RX),
+                f1 * _lam(_FC_VHF),
+                _bisector(tgt, self.TX1, self.RX),
+                f2 * _lam(_FC_UHF),
+                _bisector(tgt, self.TX2, self.RX),
             )
             if got is None:
                 continue
@@ -222,4 +276,4 @@ class TestDopplerIsAVelocityProjection:
             if got > 340.0:
                 rejected += 1
         assert judged > 1500
-        assert rejected / judged < 0.02, f"false-rejection rate {rejected/judged:.3f}"
+        assert rejected / judged < 0.02, f"false-rejection rate {rejected / judged:.3f}"

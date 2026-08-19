@@ -28,15 +28,27 @@ from retina_analytics.constants import KM_PER_DEG_LAT
 # Same dual-illuminator site as test_track_claiming.py: one receiver, two
 # transmitters — the arrangement the n=2 case actually arises in.
 _NODE_A = {
-    "rx_lat": 34.85, "rx_lon": -82.40, "rx_alt_ft": 1000,
-    "tx_lat": 34.9412, "tx_lon": -82.4103, "tx_alt_ft": 2000,
-    "fc_hz": 183e6, "beam_width_deg": 90, "max_range_km": 60,
+    "rx_lat": 34.85,
+    "rx_lon": -82.40,
+    "rx_alt_ft": 1000,
+    "tx_lat": 34.9412,
+    "tx_lon": -82.4103,
+    "tx_alt_ft": 2000,
+    "fc_hz": 183e6,
+    "beam_width_deg": 90,
+    "max_range_km": 60,
     "beam_azimuth_deg": 45.0,
 }
 _NODE_B = {
-    "rx_lat": 34.85, "rx_lon": -82.40, "rx_alt_ft": 1000,
-    "tx_lat": 34.9701, "tx_lon": -81.9484, "tx_alt_ft": 800,
-    "fc_hz": 195e6, "beam_width_deg": 90, "max_range_km": 60,
+    "rx_lat": 34.85,
+    "rx_lon": -82.40,
+    "rx_alt_ft": 1000,
+    "tx_lat": 34.9701,
+    "tx_lon": -81.9484,
+    "tx_alt_ft": 800,
+    "fc_hz": 195e6,
+    "beam_width_deg": 90,
+    "max_range_km": 60,
     "beam_azimuth_deg": 45.0,
 }
 
@@ -53,8 +65,7 @@ def _enu_km(lat, lon, alt_km, ref_lat, ref_lon, ref_alt_km):
 def _measure(cfg, lat, lon, alt_km, ve, vn):
     ref_alt = cfg["rx_alt_ft"] * 0.0003048
     tgt = _enu_km(lat, lon, alt_km, cfg["rx_lat"], cfg["rx_lon"], ref_alt)
-    tx = _enu_km(cfg["tx_lat"], cfg["tx_lon"], cfg["tx_alt_ft"] * 0.0003048,
-                 cfg["rx_lat"], cfg["rx_lon"], ref_alt)
+    tx = _enu_km(cfg["tx_lat"], cfg["tx_lon"], cfg["tx_alt_ft"] * 0.0003048, cfg["rx_lat"], cfg["rx_lon"], ref_alt)
     d_tx = math.dist(tgt, tx)
     d_rx = math.dist(tgt, (0.0, 0.0, 0.0))
     delay_us = (d_tx + d_rx - math.dist(tx, (0.0, 0.0, 0.0))) / 0.299792458
@@ -105,20 +116,27 @@ _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM = 34.88, -82.35, 7.0
 _TRUE_VE, _TRUE_VN = 180.0, -90.0
 
 
-def _adsb_state(hexn, *, lat=_TRUE_LAT, lon=_TRUE_LON, alt_km=_TRUE_ALT_KM,
-                ve=_TRUE_VE, vn=_TRUE_VN, ts_s=_LAST_T_S) -> dict:
+def _adsb_state(
+    hexn, *, lat=_TRUE_LAT, lon=_TRUE_LON, alt_km=_TRUE_ALT_KM, ve=_TRUE_VE, vn=_TRUE_VN, ts_s=_LAST_T_S
+) -> dict:
     """A provider-contract ADS-B state dict, defaulting to the true state."""
     return {
-        "hex": hexn, "lat": lat, "lon": lon, "alt_m": alt_km * 1000.0,
-        "vel_east": ve, "vel_north": vn, "timestamp_ms": ts_s * 1000.0,
-        "alt_baro": alt_km * 3280.84, "gs": math.hypot(ve, vn) / 0.514444,
-        "track": math.degrees(math.atan2(ve, vn)) % 360.0, "flight": "TEST123",
+        "hex": hexn,
+        "lat": lat,
+        "lon": lon,
+        "alt_m": alt_km * 1000.0,
+        "vel_east": ve,
+        "vel_north": vn,
+        "timestamp_ms": ts_s * 1000.0,
+        "alt_baro": alt_km * 3280.84,
+        "gs": math.hypot(ve, vn) / 0.514444,
+        "track": math.degrees(math.atan2(ve, vn)) % 360.0,
+        "flight": "TEST123",
     }
 
 
 def _true_hist(cfg):
-    return _history(cfg, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM, _TRUE_VE, _TRUE_VN,
-                    anchor="end")
+    return _history(cfg, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM, _TRUE_VE, _TRUE_VN, anchor="end")
 
 
 def _view(track_id, cfg, hexn=None):
@@ -200,7 +218,7 @@ class TestAdsbSeedActive:
     def test_single_node_tagged_hex_excludes_but_emits_no_input(self):
         st = _adsb_state("abc123")
         a = _make_seed_assoc("active", lambda: {"abc123": st})
-        tracks_a = [_view("a1", _NODE_A)]           # untagged
+        tracks_a = [_view("a1", _NODE_A)]  # untagged
         tracks_b = [_view("b1", _NODE_B, "abc123")]  # only this one tagged
         a._pending_tracks["site-a"] = tracks_a
         round_ = a.submit_tracks_round("site-b", tracks_b, 2000)
@@ -220,8 +238,7 @@ class TestAdsbSeedActive:
         # Same final position (anchor="end" fixes it regardless of
         # velocity), but a 1% velocity mismatch versus the ADS-B state —
         # verifies (well inside the doppler gate) with a nonzero score.
-        bad_hist = _history(_NODE_A, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM,
-                            _TRUE_VE * 1.01, _TRUE_VN * 1.01, anchor="end")
+        bad_hist = _history(_NODE_A, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM, _TRUE_VE * 1.01, _TRUE_VN * 1.01, anchor="end")
         tracks_a = [
             {"track_id": "a1-good", "history": good_hist, "adsb_hex": "abc123"},
             {"track_id": "a1-bad", "history": bad_hist, "adsb_hex": "abc123"},
@@ -257,10 +274,8 @@ class TestAdsbSeedShadowAndOff:
         assert shadow.adsb_tracklets_excluded == 0
         assert shadow_round.adsb_inputs == []
         assert len(shadow_round.pairs) == len(off_round.pairs) == 1
-        assert ({p.track_a_id for p in shadow_round.pairs}
-                == {p.track_a_id for p in off_round.pairs})
-        assert ({p.track_b_id for p in shadow_round.pairs}
-                == {p.track_b_id for p in off_round.pairs})
+        assert {p.track_a_id for p in shadow_round.pairs} == {p.track_a_id for p in off_round.pairs}
+        assert {p.track_b_id for p in shadow_round.pairs} == {p.track_b_id for p in off_round.pairs}
 
     def test_off_mode_all_counters_stay_zero(self):
         st = _adsb_state("abc123")
@@ -270,9 +285,14 @@ class TestAdsbSeedShadowAndOff:
         a._pending_tracks["site-a"] = tracks_a
         round_ = a.submit_tracks_round("site-b", tracks_b, 2000)
 
-        for name in ("adsb_seed_rounds", "adsb_tracklets_tagged",
-                     "adsb_seed_no_state", "adsb_seed_gate_rejects",
-                     "adsb_tracklets_excluded", "adsb_inputs_emitted"):
+        for name in (
+            "adsb_seed_rounds",
+            "adsb_tracklets_tagged",
+            "adsb_seed_no_state",
+            "adsb_seed_gate_rejects",
+            "adsb_tracklets_excluded",
+            "adsb_inputs_emitted",
+        ):
             assert getattr(a, name) == 0
         assert round_.adsb_inputs == []
         assert len(round_.pairs) == 1
@@ -282,14 +302,21 @@ class TestAdsbSeedClaimInteraction:
     def test_active_seed_blocks_a_dark_global_from_claiming_the_tagged_tracklet(self):
         st = _adsb_state("abc123")
         g = {
-            "key": "mn-dark-1", "lat": _TRUE_LAT, "lon": _TRUE_LON,
-            "alt_m": _TRUE_ALT_KM * 1000.0, "vel_east": _TRUE_VE,
-            "vel_north": _TRUE_VN, "timestamp_ms": _LAST_T_S * 1000.0,
-            "n_nodes": 0, "solve_count": 2,
+            "key": "mn-dark-1",
+            "lat": _TRUE_LAT,
+            "lon": _TRUE_LON,
+            "alt_m": _TRUE_ALT_KM * 1000.0,
+            "vel_east": _TRUE_VE,
+            "vel_north": _TRUE_VN,
+            "timestamp_ms": _LAST_T_S * 1000.0,
+            "n_nodes": 0,
+            "solve_count": 2,
         }
         a = _assoc(
-            adsb_seed_mode="active", adsb_provider=lambda: {"abc123": st},
-            claim_mode="active", global_track_provider=lambda: [g],
+            adsb_seed_mode="active",
+            adsb_provider=lambda: {"abc123": st},
+            claim_mode="active",
+            global_track_provider=lambda: [g],
         )
         tracks_a = [_view("a1", _NODE_A, "abc123")]
         tracks_b = [_view("b1", _NODE_B, "abc123")]
@@ -311,14 +338,16 @@ class TestAssociateDetectionsToAdsb:
     def test_index_alignment_plane_then_clutter(self):
         a = _assoc()
         geo = a.node_geometries["site-a"]
-        d_true, f_true = predict_observation(
-            geo, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM, _TRUE_VE, _TRUE_VN)
+        d_true, f_true = predict_observation(geo, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM, _TRUE_VE, _TRUE_VN)
         st = _adsb_state("abc123")
         frame_ts_ms = int(_LAST_T_S * 1000)
 
         out = associate_detections_to_adsb(
-            geo, [d_true, d_true + 500.0], [f_true, f_true + 500.0],
-            {"abc123": st}, frame_ts_ms,
+            geo,
+            [d_true, d_true + 500.0],
+            [f_true, f_true + 500.0],
+            {"abc123": st},
+            frame_ts_ms,
         )
         assert out is not None
         assert out[0]["hex"] == "abc123"
@@ -328,16 +357,18 @@ class TestAssociateDetectionsToAdsb:
         a = _assoc()
         geo = a.node_geometries["site-a"]
         lat2 = _TRUE_LAT + 0.05  # ~5.5 km north — a distinct target
-        d1, f1 = predict_observation(
-            geo, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM, _TRUE_VE, _TRUE_VN)
-        d2, f2 = predict_observation(
-            geo, lat2, _TRUE_LON, _TRUE_ALT_KM, _TRUE_VE, _TRUE_VN)
+        d1, f1 = predict_observation(geo, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM, _TRUE_VE, _TRUE_VN)
+        d2, f2 = predict_observation(geo, lat2, _TRUE_LON, _TRUE_ALT_KM, _TRUE_VE, _TRUE_VN)
         st1 = _adsb_state("plane1")
         st2 = _adsb_state("plane2", lat=lat2)
         frame_ts_ms = int(_LAST_T_S * 1000)
 
         out = associate_detections_to_adsb(
-            geo, [d1, d2], [f1, f2], {"plane1": st1, "plane2": st2}, frame_ts_ms,
+            geo,
+            [d1, d2],
+            [f1, f2],
+            {"plane1": st1, "plane2": st2},
+            frame_ts_ms,
         )
         assert out is not None
         assert out[0]["hex"] == "plane1"
@@ -350,20 +381,27 @@ class TestAssociateDetectionsToAdsb:
         frame_ts_ms = int(_LAST_T_S * 1000)
 
         out = associate_detections_to_adsb(
-            geo, [50.0], [10.0], {"abc123": st}, frame_ts_ms,
+            geo,
+            [50.0],
+            [10.0],
+            {"abc123": st},
+            frame_ts_ms,
         )
         assert out is None
 
     def test_attached_entry_carries_reported_fields(self):
         a = _assoc()
         geo = a.node_geometries["site-a"]
-        d_true, f_true = predict_observation(
-            geo, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM, _TRUE_VE, _TRUE_VN)
+        d_true, f_true = predict_observation(geo, _TRUE_LAT, _TRUE_LON, _TRUE_ALT_KM, _TRUE_VE, _TRUE_VN)
         st = _adsb_state("abc123")
         frame_ts_ms = int(_LAST_T_S * 1000)
 
         out = associate_detections_to_adsb(
-            geo, [d_true], [f_true], {"abc123": st}, frame_ts_ms,
+            geo,
+            [d_true],
+            [f_true],
+            {"abc123": st},
+            frame_ts_ms,
         )
         assert out[0]["lat"] == st["lat"]
         assert out[0]["lon"] == st["lon"]
@@ -385,7 +423,12 @@ class TestAdsbSeedReset:
         assert a.adsb_tracklets_tagged > 0
 
         a._reset_for_tests()
-        for name in ("adsb_seed_rounds", "adsb_tracklets_tagged",
-                     "adsb_seed_no_state", "adsb_seed_gate_rejects",
-                     "adsb_tracklets_excluded", "adsb_inputs_emitted"):
+        for name in (
+            "adsb_seed_rounds",
+            "adsb_tracklets_tagged",
+            "adsb_seed_no_state",
+            "adsb_seed_gate_rejects",
+            "adsb_tracklets_excluded",
+            "adsb_inputs_emitted",
+        ):
             assert getattr(a, name) == 0

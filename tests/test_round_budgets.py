@@ -20,8 +20,12 @@ def _cfg(i):
         "rx_lat": 34.85 + (i % 5) * 0.05,
         "rx_lon": -82.40 + (i // 5) * 0.05,
         "rx_alt_ft": 900,
-        "tx_lat": 34.90, "tx_lon": -82.30, "tx_alt_ft": 1600,
-        "fc_hz": 195e6, "beam_width_deg": 360, "max_range_km": 80,
+        "tx_lat": 34.90,
+        "tx_lon": -82.30,
+        "tx_alt_ft": 1600,
+        "fc_hz": 195e6,
+        "beam_width_deg": 360,
+        "max_range_km": 80,
     }
 
 
@@ -29,10 +33,7 @@ def _tracks(prefix, n, delay=30.0):
     return [
         {
             "track_id": f"{prefix}-{k}",
-            "history": [
-                {"t_s": t, "delay_us": delay + k, "doppler_hz": 10.0, "snr": 12.0}
-                for t in range(0, 20, 2)
-            ],
+            "history": [{"t_s": t, "delay_us": delay + k, "doppler_hz": 10.0, "snr": 12.0} for t in range(0, 20, 2)],
         }
         for k in range(n)
     ]
@@ -54,8 +55,7 @@ def _tracks_on_grid(assoc, a_id, b_id, n):
             {
                 "track_id": f"{prefix}-{k}",
                 "history": [
-                    {"t_s": t, "delay_us": float(picks[k][idx]),
-                     "doppler_hz": 10.0, "snr": 12.0}
+                    {"t_s": t, "delay_us": float(picks[k][idx]), "doppler_hz": 10.0, "snr": 12.0}
                     for t in range(0, 20, 2)
                 ],
             }
@@ -68,8 +68,10 @@ def _tracks_on_grid(assoc, a_id, b_id, n):
 
 def _fleet(n_nodes, max_neighbors=50, max_pairs_per_round=64):
     a = InterNodeAssociator(
-        grid_step_km=25.0, assoc_interval_s=0.0,
-        max_neighbors=max_neighbors, max_pairs_per_round=max_pairs_per_round,
+        grid_step_km=25.0,
+        assoc_interval_s=0.0,
+        max_neighbors=max_neighbors,
+        max_pairs_per_round=max_pairs_per_round,
     )
     for i in range(n_nodes):
         a.register_node(f"n{i}", _cfg(i))
@@ -117,8 +119,7 @@ class TestNeighbourCap:
         for _ in range(neighbours * 2):
             a.submit_tracks("n0", a._pending_tracks["n0"], 1000)
 
-        assert len(seen - {"n0"}) == neighbours, (
-            f"only {len(seen) - 1} of {neighbours} neighbours ever visited")
+        assert len(seen - {"n0"}) == neighbours, f"only {len(seen) - 1} of {neighbours} neighbours ever visited"
 
     def test_a_small_fleet_is_unaffected(self):
         a = _fleet(4, max_neighbors=50)
@@ -141,8 +142,8 @@ class TestPairBudget:
         out = a.submit_tracks("n0", a._pending_tracks["n0"], 1000)
 
         assert len(out) > a._MAX_FITS_PER_ROUND, (
-            f"only {len(out)} pairings emitted; the fit budget is still capping "
-            "a path that runs no fit")
+            f"only {len(out)} pairings emitted; the fit budget is still capping a path that runs no fit"
+        )
 
     def test_the_pair_budget_still_bounds_the_round(self):
         """Unbounded would convert a frame-path bound into a solver-queue
@@ -162,13 +163,24 @@ class TestPairBudget:
 
         def fake_fit(fit_input, node_cfgs):
             calls["n"] += 1
-            return {"success": True, "chi2_per_dof": 0.5, "dof": 10,
-                    "lat": 34.9, "lon": -82.35, "alt_m": 8000.0,
-                    "vel_east": 100.0, "vel_north": 0.0, "n_epochs": 10}
+            return {
+                "success": True,
+                "chi2_per_dof": 0.5,
+                "dof": 10,
+                "lat": 34.9,
+                "lon": -82.35,
+                "alt_m": 8000.0,
+                "vel_east": 100.0,
+                "vel_north": 0.0,
+                "n_epochs": 10,
+            }
 
         a = InterNodeAssociator(
-            grid_step_km=25.0, assoc_interval_s=0.0, cv_fit=fake_fit,
-            cv_min_epochs=2, cv_min_span_s=1.0,
+            grid_step_km=25.0,
+            assoc_interval_s=0.0,
+            cv_fit=fake_fit,
+            cv_min_epochs=2,
+            cv_min_span_s=1.0,
             max_pairs_per_round=64,
         )
         for i in range(2):
@@ -187,8 +199,7 @@ class TestDeferredCounterMeansDeferred:
     rotation and budget exhaustion coincide."""
 
     def test_rotation_alone_does_not_count_as_deferral(self):
-        a = InterNodeAssociator(grid_step_km=25.0, assoc_interval_s=0.0,
-                                max_neighbors=2)
+        a = InterNodeAssociator(grid_step_km=25.0, assoc_interval_s=0.0, max_neighbors=2)
         for i in range(6):
             a.register_node(f"n{i}", _cfg(i))
         # No pending tracks anywhere: the round rotates the cursor but defers
@@ -197,8 +208,7 @@ class TestDeferredCounterMeansDeferred:
         assert a.track_pairs_deferred == 0
 
     def test_budget_exhaustion_counts_once(self):
-        a = InterNodeAssociator(grid_step_km=25.0, assoc_interval_s=0.0,
-                                max_pairs_per_round=1)
+        a = InterNodeAssociator(grid_step_km=25.0, assoc_interval_s=0.0, max_pairs_per_round=1)
         for i in range(2):
             a.register_node(f"n{i}", _cfg(i))
         t0, t1 = _tracks_on_grid(a, "n0", "n1", 12)

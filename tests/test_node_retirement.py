@@ -7,14 +7,11 @@ rewritten on every save, and the associator keeps a grid for every pair it was
 in.  Staging showed all three after a fleet layout change.
 """
 
-
 from retina_analytics.association import InterNodeAssociator
 from retina_analytics.manager import NodeAnalyticsManager
 
-_CFG_A = dict(rx_lat=34.85, rx_lon=-82.40, tx_lat=34.90, tx_lon=-82.30,
-              max_range_km=50, max_bistatic_range_km=50)
-_CFG_B = dict(rx_lat=34.86, rx_lon=-82.36, tx_lat=34.90, tx_lon=-82.30,
-              max_range_km=50, max_bistatic_range_km=50)
+_CFG_A = dict(rx_lat=34.85, rx_lon=-82.40, tx_lat=34.90, tx_lon=-82.30, max_range_km=50, max_bistatic_range_km=50)
+_CFG_B = dict(rx_lat=34.86, rx_lon=-82.36, tx_lat=34.90, tx_lon=-82.30, max_range_km=50, max_bistatic_range_km=50)
 
 
 class TestManagerRetirement:
@@ -25,8 +22,14 @@ class TestManagerRetirement:
 
         m.retire_node("gone")
 
-        for store in (m.trust_scores, m.detection_areas, m.metrics,
-                      m.reputations, m.coverage_maps, m.empirical_coverages):
+        for store in (
+            m.trust_scores,
+            m.detection_areas,
+            m.metrics,
+            m.reputations,
+            m.coverage_maps,
+            m.empirical_coverages,
+        ):
             assert "gone" not in store
         assert "stays" in m.trust_scores
         assert "stays" in m.detection_areas

@@ -3,19 +3,19 @@
 import math
 
 C_KM_US = 0.299792458
-C_KM_S = 299792.458      # speed of light, km/s   # speed of light km/μs
-R_EARTH = 6371.0         # Earth radius km
+C_KM_S = 299792.458  # speed of light, km/s   # speed of light km/μs
+R_EARTH = 6371.0  # Earth radius km
 
 # One kilometres-per-degree, derived rather than typed.  Four different values
 # were in circulation across this library and the backend — 111.0, 111.32,
 # 111.320 and R_EARTH·π/180 — for the same quantity, so a position dead-reckoned
 # in one module and compared in another disagreed by up to 0.3%.  Deriving it
 # from R_EARTH also means distance and dead-reckoning cannot drift apart.
-KM_PER_DEG_LAT = R_EARTH * math.pi / 180.0     # 111.1949…
+KM_PER_DEG_LAT = R_EARTH * math.pi / 180.0  # 111.1949…
 M_PER_DEG_LAT = KM_PER_DEG_LAT * 1000.0
 
 # Yagi antenna spec
-YAGI_BEAM_WIDTH_DEG = 42.0   # half-power beamwidth of the fleet Yagis
+YAGI_BEAM_WIDTH_DEG = 42.0  # half-power beamwidth of the fleet Yagis
 YAGI_MAX_RANGE_KM = 50.0
 
 
@@ -31,14 +31,12 @@ def km_per_deg_lon(lat_deg: float) -> float:
 
 def enu_km(ref_lat, ref_lon, lat, lon) -> tuple[float, float]:
     """(east_km, north_km) of a point relative to a reference, flat-earth."""
-    return ((lon - ref_lon) * km_per_deg_lon(ref_lat),
-            (lat - ref_lat) * KM_PER_DEG_LAT)
+    return ((lon - ref_lon) * km_per_deg_lon(ref_lat), (lat - ref_lat) * KM_PER_DEG_LAT)
 
 
 def offset_latlon(lat, lon, east_km, north_km) -> tuple[float, float]:
     """Move a position by an east/north offset in km.  Inverse of enu_km."""
-    return (lat + north_km / KM_PER_DEG_LAT,
-            lon + east_km / km_per_deg_lon(lat))
+    return (lat + north_km / KM_PER_DEG_LAT, lon + east_km / km_per_deg_lon(lat))
 
 
 def offset_latlon_m(lat, lon, east_m, north_m) -> tuple[float, float]:
@@ -46,8 +44,7 @@ def offset_latlon_m(lat, lon, east_m, north_m) -> tuple[float, float]:
     return offset_latlon(lat, lon, east_m / 1000.0, north_m / 1000.0)
 
 
-def bistatic_differential_km(tx_lat, tx_lon, rx_lat, rx_lon,
-                             target_lat, target_lon) -> float:
+def bistatic_differential_km(tx_lat, tx_lon, rx_lat, rx_lon, target_lat, target_lon) -> float:
     """Differential range R_tx + R_rx − L for a target, in km.
 
     This is what the delay measures and what sets received power, so it — not
@@ -61,17 +58,24 @@ def bistatic_differential_km(tx_lat, tx_lon, rx_lat, rx_lon,
     return r_tx + r_rx - baseline
 
 
-def bistatic_delay_us(tx_lat, tx_lon, rx_lat, rx_lon,
-                      target_lat, target_lon) -> float:
+def bistatic_delay_us(tx_lat, tx_lon, rx_lat, rx_lon, target_lat, target_lon) -> float:
     """Bistatic delay for a target, in microseconds."""
-    return bistatic_differential_km(tx_lat, tx_lon, rx_lat, rx_lon,
-                                    target_lat, target_lon) / C_KM_US
+    return bistatic_differential_km(tx_lat, tx_lon, rx_lat, rx_lon, target_lat, target_lon) / C_KM_US
 
 
-def point_in_beam(lat, lon, *, rx_lat, rx_lon,
-                  beam_azimuth_deg, beam_width_deg, max_range_km,
-                  tx_lat=None, tx_lon=None,
-                  max_bistatic_range_km=None) -> bool:
+def point_in_beam(
+    lat,
+    lon,
+    *,
+    rx_lat,
+    rx_lon,
+    beam_azimuth_deg,
+    beam_width_deg,
+    max_range_km,
+    tx_lat=None,
+    tx_lon=None,
+    max_bistatic_range_km=None,
+) -> bool:
     """Is a target inside a node's detection area?
 
     Three rules, which were separately re-derived in four places before this
@@ -109,9 +113,7 @@ def point_in_beam(lat, lon, *, rx_lat, rx_lon,
 def haversine_km(lat1, lon1, lat2, lon2):
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = (math.sin(dlat / 2) ** 2
-         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
-         * math.sin(dlon / 2) ** 2)
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
     return R_EARTH * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
@@ -120,13 +122,11 @@ def bearing_deg(lat1, lon1, lat2, lon2):
     lat1r, lat2r = math.radians(lat1), math.radians(lat2)
     dlon = math.radians(lon2 - lon1)
     x = math.sin(dlon) * math.cos(lat2r)
-    y = (math.cos(lat1r) * math.sin(lat2r)
-         - math.sin(lat1r) * math.cos(lat2r) * math.cos(dlon))
+    y = math.cos(lat1r) * math.sin(lat2r) - math.sin(lat1r) * math.cos(lat2r) * math.cos(dlon)
     return math.degrees(math.atan2(x, y)) % 360.0
 
 
-def bistatic_range_limit_km(psi_deg: float, baseline_km: float,
-                            max_bistatic_km: float) -> float:
+def bistatic_range_limit_km(psi_deg: float, baseline_km: float, max_bistatic_km: float) -> float:
     """How far a bistatic node can see at angle *psi_deg* off its RX→TX baseline.
 
     A node's detection limit is a *differential* range — the extra path the echo
@@ -187,3 +187,28 @@ def resolve_beam_azimuth_deg(config, rx_lat, rx_lon, tx_lat, tx_lon):
     if explicit_az is not None:
         return explicit_az
     return (bearing_deg(rx_lat, rx_lon, tx_lat, tx_lon) + 90.0) % 360.0
+
+
+def resolve_beam_width_deg(config):
+    """Resolve a node's beam width (deg), defaulting to the nominal Yagi spec.
+
+    ``beam_width_deg`` is nullable on the node wire contract, and the config dict
+    is built field by field from the node row, so an unset width arrives *present
+    and None* rather than absent.  ``dict.get`` with a default therefore never
+    fires, and the None reaches the half-width divisions in ``_point_in_beam``
+    and ``point_in_detection_area`` as a TypeError.  A null resolves to
+    YAGI_BEAM_WIDTH_DEG because every node in the fleet carries the same Yagi:
+    the width is a documented hardware spec that retina-gui simply never asks the
+    owner for, not a value invented to paper over the gap.
+
+    ``config`` is node-supplied, so the parse is guarded the same way as
+    resolve_beam_azimuth_deg and falls back to the nominal on bad input.
+    """
+    width = config.get("beam_width_deg")
+    try:
+        width = float(width) if width is not None else None
+    except (TypeError, ValueError):
+        width = None
+    if width is not None and not math.isfinite(width):
+        width = None
+    return width if width is not None else YAGI_BEAM_WIDTH_DEG

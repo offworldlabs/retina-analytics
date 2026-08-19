@@ -23,25 +23,27 @@ from retina_analytics.association import (
     _point_in_beam,
     compute_overlap_zone,
 )
-from retina_analytics.constants import bistatic_range_limit_km
+from retina_analytics.constants import KM_PER_DEG_LAT, bistatic_range_limit_km
 from retina_analytics.empirical_coverage import (
+    _MIN_BIN_POINTS_TO_CONSTRAIN,
     FOV_OPEN_MIN_POINTS,
     FOV_OPEN_MIN_SPAN_S,
     OBSERVED_LIMIT_MARGIN,
     EmpiricalCoverageState,
-    _MIN_BIN_POINTS_TO_CONSTRAIN,
 )
-from retina_analytics.constants import KM_PER_DEG_LAT
 
 _RX_LAT, _RX_LON = 34.85, -82.40
-_TX_LAT, _TX_LON = 35.236, -82.40      # 43 km due north
+_TX_LAT, _TX_LON = 35.236, -82.40  # 43 km due north
 _DELTA = 60.0
 
 
 def _state(bistatic=_DELTA, tx=(_TX_LAT, _TX_LON)):
     ec = EmpiricalCoverageState(
-        rx_lat=_RX_LAT, rx_lon=_RX_LON, max_range_km=_DELTA,
-        tx_lat=tx[0] if tx else None, tx_lon=tx[1] if tx else None,
+        rx_lat=_RX_LAT,
+        rx_lon=_RX_LON,
+        max_range_km=_DELTA,
+        tx_lat=tx[0] if tx else None,
+        tx_lon=tx[1] if tx else None,
     )
     ec.max_bistatic_range_km = bistatic
     return ec
@@ -50,9 +52,12 @@ def _state(bistatic=_DELTA, tx=(_TX_LAT, _TX_LON)):
 def _at_bearing(bearing_deg, range_km):
     """A lat/lon that many km from the RX on that bearing (flat approximation)."""
     import math
+
     rad = math.radians(bearing_deg)
-    return (_RX_LAT + range_km * math.cos(rad) / KM_PER_DEG_LAT,
-            _RX_LON + range_km * math.sin(rad) / (KM_PER_DEG_LAT * math.cos(math.radians(_RX_LAT))))
+    return (
+        _RX_LAT + range_km * math.cos(rad) / KM_PER_DEG_LAT,
+        _RX_LON + range_km * math.sin(rad) / (KM_PER_DEG_LAT * math.cos(math.radians(_RX_LAT))),
+    )
 
 
 class TestClampFollowsTheEllipse:
@@ -80,9 +85,10 @@ class TestClampFollowsTheEllipse:
         ec = _state()
         baseline = 43.0
         for psi in (0.0, 90.0, 180.0):
-            bearing = (0.0 + psi) % 360.0   # TX is due north
+            bearing = (0.0 + psi) % 360.0  # TX is due north
             assert ec._reach_at(bearing) == pytest.approx(
-                bistatic_range_limit_km(psi, baseline, _DELTA), abs=0.2,
+                bistatic_range_limit_km(psi, baseline, _DELTA),
+                abs=0.2,
             )
 
     def test_a_node_without_a_bistatic_limit_keeps_the_circle(self):
@@ -96,18 +102,18 @@ class TestClampFollowsTheEllipse:
         default 140), so it gets 4x admit room instead of the 2x a real
         physical ellipse earns."""
         ec = _state(bistatic=None)
-        lat, lon = _at_bearing(90.0, _DELTA * 3.5)   # beyond 2x, inside 4x
+        lat, lon = _at_bearing(90.0, _DELTA * 3.5)  # beyond 2x, inside 4x
         ec.add_point(lat, lon)
         assert ec.n_points == 1
-        lat, lon = _at_bearing(45.0, _DELTA * 4.5)   # beyond even 4x
+        lat, lon = _at_bearing(45.0, _DELTA * 4.5)  # beyond even 4x
         ec.add_point(lat, lon)
-        assert ec.n_points == 1   # the second point was rejected
+        assert ec.n_points == 1  # the second point was rejected
 
     def test_a_bistatic_declared_node_keeps_the_2x_ceiling(self):
         """The ellipse is physical once max_bistatic_range_km is declared —
         2x it stays implausible, unlike the monostatic config guess."""
-        ec = _state()   # bistatic declared (default)
-        lat, lon = _at_bearing(90.0, ec._reach_at(90.0) * 3.5)   # beyond 2x
+        ec = _state()  # bistatic declared (default)
+        lat, lon = _at_bearing(90.0, ec._reach_at(90.0) * 3.5)  # beyond 2x
         ec.add_point(lat, lon)
         assert ec.n_points == 0
 
@@ -148,10 +154,18 @@ class TestObservedLimitAbstains:
 
 def _geo(coverage_limit=None):
     return NodeGeometry(
-        node_id="n", rx_lat=_RX_LAT, rx_lon=_RX_LON, rx_alt_km=0.3,
-        tx_lat=_TX_LAT, tx_lon=_TX_LON, tx_alt_km=0.6, fc_hz=183e6,
-        beam_azimuth_deg=0.0, beam_width_deg=360.0,
-        max_range_km=_DELTA, max_bistatic_range_km=_DELTA,
+        node_id="n",
+        rx_lat=_RX_LAT,
+        rx_lon=_RX_LON,
+        rx_alt_km=0.3,
+        tx_lat=_TX_LAT,
+        tx_lon=_TX_LON,
+        tx_alt_km=0.6,
+        fc_hz=183e6,
+        beam_azimuth_deg=0.0,
+        beam_width_deg=360.0,
+        max_range_km=_DELTA,
+        max_bistatic_range_km=_DELTA,
         coverage_limit=coverage_limit,
     )
 
@@ -171,9 +185,9 @@ class TestAsymmetricLearning:
         former subject); limit_km does not."""
         ec = _state()
         ec.prior_azimuth_deg, ec.prior_width_deg = 90.0, 40.0
-        theoretical = ec._reach_at(92.5)   # bin centre — limit_km's reference
+        theoretical = ec._reach_at(92.5)  # bin centre — limit_km's reference
         for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
-            ec.add_point(*_at_bearing(92.5, 5.0))   # short detections only
+            ec.add_point(*_at_bearing(92.5, 5.0))  # short detections only
         assert ec.limit_km(92.5) == pytest.approx(theoretical)
 
     def test_an_out_of_wedge_bin_opens_at_fov_open_min_points_spanning_min_span_s(self):
@@ -182,12 +196,12 @@ class TestAsymmetricLearning:
         (>= FOV_OPEN_MIN_SPAN_S, so the count floor cannot be satisfied by
         one correlated burst — see test_a_single_pass_does_not_open_a_bin)."""
         ec = _state()
-        ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0   # narrow wedge, north
+        ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0  # narrow wedge, north
         t0 = 1_000_000.0
         assert ec.wedge_state(180.0) == "closed"
         for dt in (0.0, FOV_OPEN_MIN_SPAN_S / 2):
             ec.add_point(*_at_bearing(180.0, 20.0), ts=t0 + dt)
-        assert ec.wedge_state(180.0) == "closed"   # one short of K=3
+        assert ec.wedge_state(180.0) == "closed"  # one short of K=3
         ec.add_point(*_at_bearing(180.0, 20.0), ts=t0 + FOV_OPEN_MIN_SPAN_S)
         assert ec.wedge_state(180.0) != "closed"
 
@@ -200,7 +214,7 @@ class TestAsymmetricLearning:
         ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0
         t0 = 1_000_000.0
         for i in range(FOV_OPEN_MIN_POINTS + 5):
-            ec.add_point(*_at_bearing(180.0, 20.0), ts=t0 + i)   # a few seconds apart
+            ec.add_point(*_at_bearing(180.0, 20.0), ts=t0 + i)  # a few seconds apart
         assert ec.wedge_state(180.0) == "closed"
 
     def test_the_same_points_spread_over_the_span_floor_do_open_it(self):
@@ -208,15 +222,14 @@ class TestAsymmetricLearning:
         ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0
         t0 = 1_000_000.0
         for i in range(FOV_OPEN_MIN_POINTS + 5):
-            ec.add_point(*_at_bearing(180.0, 20.0),
-                        ts=t0 + i * (FOV_OPEN_MIN_SPAN_S / FOV_OPEN_MIN_POINTS))
+            ec.add_point(*_at_bearing(180.0, 20.0), ts=t0 + i * (FOV_OPEN_MIN_SPAN_S / FOV_OPEN_MIN_POINTS))
         assert ec.wedge_state(180.0) != "closed"
 
     def test_range_extends_past_theoretical_via_p95_times_margin(self):
         ec = _state()
         ec.prior_azimuth_deg, ec.prior_width_deg = 90.0, 40.0
         theoretical = ec._reach_at(92.5)
-        far = theoretical + 20.0   # past theoretical, inside the 2x bistatic admit ceiling
+        far = theoretical + 20.0  # past theoretical, inside the 2x bistatic admit ceiling
         for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
             ec.add_point(*_at_bearing(92.5, far))
         assert ec.limit_km(92.5) == pytest.approx(far * OBSERVED_LIMIT_MARGIN, rel=0.02)
@@ -224,17 +237,17 @@ class TestAsymmetricLearning:
     def test_extension_ceiling_is_2x_bistatic_but_4x_monostatic(self):
         """Same raw far detection: a bistatic-declared node cannot see past
         its 2x admit ceiling to extend from, a monostatic-guess node can."""
-        far_bistatic = _state()._reach_at(92.5) * 2.5   # beyond 2x
+        far_bistatic = _state()._reach_at(92.5) * 2.5  # beyond 2x
         bi = _state()
         bi.prior_azimuth_deg, bi.prior_width_deg = 90.0, 40.0
         for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
             bi.add_point(*_at_bearing(92.5, far_bistatic))
-        assert bi.n_points == 0   # nothing admitted, nothing to extend from
+        assert bi.n_points == 0  # nothing admitted, nothing to extend from
         assert bi.limit_km(92.5) == pytest.approx(bi._reach_at(92.5))
 
         mono = _state(bistatic=None)
         mono.prior_azimuth_deg, mono.prior_width_deg = 90.0, 40.0
-        far_mono = mono._reach_at(92.5) * 2.5   # beyond 2x, still inside 4x
+        far_mono = mono._reach_at(92.5) * 2.5  # beyond 2x, still inside 4x
         for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
             mono.add_point(*_at_bearing(92.5, far_mono))
         assert mono.n_points == _MIN_BIN_POINTS_TO_CONSTRAIN
@@ -305,12 +318,12 @@ class TestOutOfWedgeEvidenceProportionalLimit:
         ec.prior_azimuth_deg, ec.prior_width_deg = 90.0, 40.0
         theoretical = ec._reach_at(92.5)
         for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN - 1):
-            ec.add_point(*_at_bearing(92.5, 5.0))   # short, and below the floor
+            ec.add_point(*_at_bearing(92.5, 5.0))  # short, and below the floor
         assert ec.limit_km(92.5) == pytest.approx(theoretical)
 
     def test_below_own_bin_floor_the_limit_is_p95_of_the_pooled_bin_pm_1_evidence(self):
         ec = _mono_state()
-        ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0   # wedge north; 180 is out
+        ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0  # wedge north; 180 is out
         t0 = 1_000_000.0
         i = _bin_for_bearing_of(180.0)
         # Own bin (180 deg): 2 points, short of _MIN_BIN_POINTS_TO_CONSTRAIN.
@@ -325,6 +338,7 @@ class TestOutOfWedgeEvidenceProportionalLimit:
         assert len(ec._bins[i]) < _MIN_BIN_POINTS_TO_CONSTRAIN
 
         from retina_analytics.empirical_coverage import N_BINS, _percentile
+
         pooled = [r for off in (-1, 0, 1) for r in ec._bins[(i + off) % N_BINS]]
         expected = _percentile(pooled, 95) * OBSERVED_LIMIT_MARGIN
         assert ec.limit_km(180.0) == pytest.approx(expected)
@@ -339,16 +353,15 @@ class TestOutOfWedgeEvidenceProportionalLimit:
         ec = _mono_state()
         ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0
         t0 = 1_000_000.0
-        i = _bin_for_bearing_of(180.0)
         own_ranges = [10.0] * (_MIN_BIN_POINTS_TO_CONSTRAIN - 1) + [50.0]
         for k, r in enumerate(own_ranges):
-            ec.add_point(*_at_bearing(180.0, r),
-                        ts=t0 + k * (FOV_OPEN_MIN_SPAN_S / (len(own_ranges) - 1)))
+            ec.add_point(*_at_bearing(180.0, r), ts=t0 + k * (FOV_OPEN_MIN_SPAN_S / (len(own_ranges) - 1)))
         # A neighbour with a much larger (but still admissible) range — must
         # be excluded once the bin's own evidence clears the floor.
         ec.add_point(*_at_bearing(176.0, 150.0), ts=t0)
 
         from retina_analytics.empirical_coverage import _percentile
+
         expected = _percentile(own_ranges, 95) * OBSERVED_LIMIT_MARGIN
         assert ec.limit_km(180.0) == pytest.approx(expected)
         assert ec.limit_km(180.0) < 150.0 * OBSERVED_LIMIT_MARGIN
@@ -364,12 +377,11 @@ class TestOutOfWedgeEvidenceProportionalLimit:
         ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0
         t0 = 1_000_000.0
         for k in range(5):
-            ec.add_point(*_at_bearing(180.0, 15.0),
-                        ts=t0 + k * (FOV_OPEN_MIN_SPAN_S / 4))
+            ec.add_point(*_at_bearing(180.0, 15.0), ts=t0 + k * (FOV_OPEN_MIN_SPAN_S / 4))
         before = ec.limit_km(180.0)
         assert before == pytest.approx(15.0 * OBSERVED_LIMIT_MARGIN, rel=0.02)
 
-        neg_t0 = t0 + FOV_OPEN_MIN_SPAN_S + 1000.0   # after the last positive
+        neg_t0 = t0 + FOV_OPEN_MIN_SPAN_S + 1000.0  # after the last positive
         for dt in (0.0, FOV_NEG_MIN_SPAN_S / 2, FOV_NEG_MIN_SPAN_S):
             ec.record_disappearance(*_at_bearing(180.0, 8.0), ts=neg_t0 + dt)
         after = ec.limit_km(180.0)
@@ -392,7 +404,7 @@ class TestDigestMovesOnOpenAndCap:
 
     def test_a_bin_opening_changes_its_digest_entry(self):
         ec = _state()
-        ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0   # narrow wedge, north
+        ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0  # narrow wedge, north
         i = _bin_for_bearing_of(180.0)
         before = ec.fov_digest()[i]
         assert before[0] == "closed"
@@ -400,8 +412,9 @@ class TestDigestMovesOnOpenAndCap:
         for k in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
             # Spread across >= FOV_OPEN_MIN_SPAN_S so the bin actually opens
             # under the new span rule, not just the count floor.
-            ec.add_point(*_at_bearing(180.0, 20.0),
-                        ts=t0 + k * (FOV_OPEN_MIN_SPAN_S / (_MIN_BIN_POINTS_TO_CONSTRAIN - 1)))
+            ec.add_point(
+                *_at_bearing(180.0, 20.0), ts=t0 + k * (FOV_OPEN_MIN_SPAN_S / (_MIN_BIN_POINTS_TO_CONSTRAIN - 1))
+            )
         after = ec.fov_digest()[i]
         assert after != before
         assert after[0] in ("prior", "observed")
@@ -416,7 +429,7 @@ class TestDigestMovesOnOpenAndCap:
             ec.record_disappearance(*_at_bearing(92.5, 20.0), ts=t0 + dt)
         after = ec.fov_digest()[i]
         assert after != before
-        assert after[1] < before[1]   # limit component dropped
+        assert after[1] < before[1]  # limit component dropped
 
     def test_a_full_bin_reopening_survives_the_round_trip_to_disk(self):
         """The digest is read from the same object callers persist — a
@@ -426,15 +439,17 @@ class TestDigestMovesOnOpenAndCap:
         ec.prior_azimuth_deg, ec.prior_width_deg = 0.0, 20.0
         t0 = 1_000_000.0
         for k in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
-            ec.add_point(*_at_bearing(180.0, 20.0),
-                        ts=t0 + k * (FOV_OPEN_MIN_SPAN_S / (_MIN_BIN_POINTS_TO_CONSTRAIN - 1)))
-        assert ec.wedge_state(180.0) != "closed"   # sanity: the bin actually opened
+            ec.add_point(
+                *_at_bearing(180.0, 20.0), ts=t0 + k * (FOV_OPEN_MIN_SPAN_S / (_MIN_BIN_POINTS_TO_CONSTRAIN - 1))
+            )
+        assert ec.wedge_state(180.0) != "closed"  # sanity: the bin actually opened
         restored = EmpiricalCoverageState.from_dict(ec.to_dict())
         assert restored.fov_digest() == ec.fov_digest()
 
 
 def _bin_for_bearing_of(bearing):
     from retina_analytics.empirical_coverage import _bin_for_bearing
+
     return _bin_for_bearing(bearing)
 
 
@@ -452,7 +467,7 @@ class TestFovGateInAssociation:
         ec = _state()
         for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
             ec.add_point(*_at_bearing(90.0, 12.0))
-        far = _at_bearing(90.0, 40.0)   # inside the ellipse, far past what was seen
+        far = _at_bearing(90.0, 40.0)  # inside the ellipse, far past what was seen
         assert _point_in_beam(*far, _geo(None)) is True
         assert _point_in_beam(*far, _geo(ec.observed_limit_km)) is False
 
@@ -462,16 +477,17 @@ class TestFovGateInAssociation:
         fov branch is a replacement — not an additional filter stacked on
         top.  Falling through to the legacy bearing test afterward would
         reject a point the fov explicitly admits."""
+
         class _StubFov:
             def max_limit_km(self):
                 return 30.0
 
             def contains(self, bearing, range_km):
-                return range_km <= 30.0   # no bearing constraint at all
+                return range_km <= 30.0  # no bearing constraint at all
 
         geo = _geo(None)
         geo.beam_azimuth_deg = 0.0
-        geo.beam_width_deg = 10.0   # narrow theoretical wedge, pointed north
+        geo.beam_width_deg = 10.0  # narrow theoretical wedge, pointed north
         geo.fov = _StubFov()
 
         # Due east, 20 km out: the legacy 10 deg-wide northward wedge would
@@ -479,7 +495,7 @@ class TestFovGateInAssociation:
         east_20km = _at_bearing(90.0, 20.0)
         assert _point_in_beam(*east_20km, geo) is True
 
-        far = _at_bearing(90.0, 40.0)   # past the fov's own 30 km cap
+        far = _at_bearing(90.0, 40.0)  # past the fov's own 30 km cap
         assert _point_in_beam(*far, geo) is False
 
     def test_bounding_box_grows_with_the_learned_fov(self):
@@ -491,21 +507,31 @@ class TestFovGateInAssociation:
         fov rather than letting a baseline-sensitive bistatic ellipse
         confound the comparison.
         """
+
         class _WideFov:
             def max_limit_km(self):
-                return 200.0   # well past the 60 km theoretical footprint
+                return 200.0  # well past the 60 km theoretical footprint
 
             def contains(self, bearing, range_km):
                 return range_km <= self.max_limit_km()
 
-        far_lat, far_lon = _at_bearing(90.0, 150.0)   # > 60+60, <= 200+60
+        far_lat, far_lon = _at_bearing(90.0, 150.0)  # > 60+60, <= 200+60
 
         def _mono_geo(node_id, rx_lat, rx_lon, fov=None):
             return NodeGeometry(
-                node_id=node_id, rx_lat=rx_lat, rx_lon=rx_lon, rx_alt_km=0.3,
-                tx_lat=_TX_LAT, tx_lon=_TX_LON, tx_alt_km=0.6, fc_hz=183e6,
-                beam_azimuth_deg=0.0, beam_width_deg=360.0,
-                max_range_km=60.0, max_bistatic_range_km=None, fov=fov,
+                node_id=node_id,
+                rx_lat=rx_lat,
+                rx_lon=rx_lon,
+                rx_alt_km=0.3,
+                tx_lat=_TX_LAT,
+                tx_lon=_TX_LON,
+                tx_alt_km=0.6,
+                fc_hz=183e6,
+                beam_azimuth_deg=0.0,
+                beam_width_deg=360.0,
+                max_range_km=60.0,
+                max_bistatic_range_km=None,
+                fov=fov,
             )
 
         geo_a = _mono_geo("a", _RX_LAT, _RX_LON, fov=_WideFov())
@@ -513,7 +539,7 @@ class TestFovGateInAssociation:
         assert geo_a.footprint_radius_km + geo_b.footprint_radius_km < 150.0
 
         zone = compute_overlap_zone(geo_a, geo_b, grid_step_km=5.0, altitudes_km=(7.0,))
-        assert zone.grid_points   # the widened bounding box actually reached node b
+        assert zone.grid_points  # the widened bounding box actually reached node b
 
     def test_rebuild_zones_for_refreshes_geo_fov(self):
         class _Fov:
@@ -531,10 +557,19 @@ class TestFovGateInAssociation:
         def fov_provider(node_id):
             return fovs.get(node_id)
 
-        cfg_a = {"rx_lat": _RX_LAT, "rx_lon": _RX_LON, "rx_alt_ft": 1000,
-                 "tx_lat": _TX_LAT, "tx_lon": _TX_LON, "tx_alt_ft": 2000,
-                 "fc_hz": 183e6, "beam_width_deg": 360, "max_range_km": _DELTA,
-                 "max_bistatic_range_km": _DELTA, "beam_azimuth_deg": 0.0}
+        cfg_a = {
+            "rx_lat": _RX_LAT,
+            "rx_lon": _RX_LON,
+            "rx_alt_ft": 1000,
+            "tx_lat": _TX_LAT,
+            "tx_lon": _TX_LON,
+            "tx_alt_ft": 2000,
+            "fc_hz": 183e6,
+            "beam_width_deg": 360,
+            "max_range_km": _DELTA,
+            "max_bistatic_range_km": _DELTA,
+            "beam_azimuth_deg": 0.0,
+        }
         cfg_b = dict(cfg_a, rx_lon=-82.31, fc_hz=195e6)
 
         a = InterNodeAssociator(grid_step_km=3.0, fov_provider=fov_provider)
@@ -542,7 +577,7 @@ class TestFovGateInAssociation:
         a.register_node("n2", cfg_b)
         assert a.node_geometries["n1"].fov is fovs["n1"]
 
-        fovs["n1"] = _Fov(80.0)   # the node's learned fov widened
+        fovs["n1"] = _Fov(80.0)  # the node's learned fov widened
         a.rebuild_zones_for("n1")
         assert a.node_geometries["n1"].fov is fovs["n1"]
         assert a.node_geometries["n1"].fov.limit == 80.0

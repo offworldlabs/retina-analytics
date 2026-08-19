@@ -2,33 +2,35 @@
 
 import logging
 import os
-import time
 import threading
+import time
 
-from retina_analytics.trust import AdsReportEntry, TrustScoreState
-from retina_analytics.detection_area import DetectionAreaState
-from retina_analytics.metrics import NodeMetrics
-from retina_analytics.reputation import NodeReputation
-from retina_analytics.coverage import HistoricalCoverageMap
-from retina_analytics.empirical_coverage import (
-    CALIBRATION_SCHEMA,
-    N_BINS,
-    EmpiricalCoverageState,
-)
-from retina_analytics.cross_node import compute_delay_bin_overlap, coverage_suggestion
 from retina_analytics.constants import (
     YAGI_BEAM_WIDTH_DEG,
     YAGI_MAX_RANGE_KM,
     bearing_deg,
     haversine_km,
     resolve_beam_azimuth_deg,
+    resolve_beam_width_deg,
 )
+from retina_analytics.coverage import HistoricalCoverageMap
+from retina_analytics.cross_node import compute_delay_bin_overlap, coverage_suggestion
+from retina_analytics.detection_area import DetectionAreaState
+from retina_analytics.empirical_coverage import (
+    CALIBRATION_SCHEMA,
+    N_BINS,
+    EmpiricalCoverageState,
+)
+from retina_analytics.metrics import NodeMetrics
+from retina_analytics.reputation import NodeReputation
+from retina_analytics.trust import AdsReportEntry, TrustScoreState
 
-_RX_RELOCATE_THRESHOLD_KM = 0.05   # 50 m — above real GPS/reporting jitter
+_RX_RELOCATE_THRESHOLD_KM = 0.05  # 50 m — above real GPS/reporting jitter
 
 
-def _resolve_fov_prior(config: dict, rx_lat: float, rx_lon: float,
-                       tx_lat: float, tx_lon: float) -> tuple[float | None, float | None]:
+def _resolve_fov_prior(
+    config: dict, rx_lat: float, rx_lon: float, tx_lat: float, tx_lon: float
+) -> tuple[float | None, float | None]:
     """Theoretical prior (azimuth, width) for a node's learned FOV.
 
     Mirrors backend services.geo.node_beam_params' azimuth rule — explicit
@@ -89,8 +91,12 @@ class NodeAnalyticsManager:
         production removal goes through retire_node."""
         with self._save_lock:
             for store in (
-                self.trust_scores, self.detection_areas, self.metrics,
-                self.reputations, self.coverage_maps, self.empirical_coverages,
+                self.trust_scores,
+                self.detection_areas,
+                self.metrics,
+                self.reputations,
+                self.coverage_maps,
+                self.empirical_coverages,
             ):
                 store.clear()
             self._cross_node_cache = None
@@ -124,7 +130,7 @@ class NodeAnalyticsManager:
             tx_lon=tx_lon,
             fc_hz=config.get("fc_hz", config.get("FC", 195e6)),
             beam_azimuth_deg=beam_az,
-            beam_width_deg=config.get("beam_width_deg", YAGI_BEAM_WIDTH_DEG),
+            beam_width_deg=resolve_beam_width_deg(config),
             max_range_km=config.get("max_range_km", YAGI_MAX_RANGE_KM),
             max_bistatic_range_km=config.get("max_bistatic_range_km"),
         )
@@ -168,19 +174,14 @@ class NodeAnalyticsManager:
         # moves the clamp; switching range rules changes the footprint's shape,
         # which is a different thing.
         cfg_bistatic = config.get("max_bistatic_range_km")
-        rule_changed = (
-            ec is not None
-            and getattr(ec, "max_bistatic_range_km", None) != cfg_bistatic
-        )
+        rule_changed = ec is not None and getattr(ec, "max_bistatic_range_km", None) != cfg_bistatic
         # A polygon accumulated under an older calibration input is discarded on
         # the same footing.  The bistatic key cannot catch this one: switching
         # the feed from solver output to ADS-B positions changes what the bins
         # *mean* without changing any configured value, so a v1 polygon — shaped
         # partly by ghosts — would otherwise survive every restart on the named
         # coverage volume, with nothing to prompt an operator.
-        schema_changed = (
-            ec is not None and getattr(ec, "schema", 1) != CALIBRATION_SCHEMA
-        )
+        schema_changed = ec is not None and getattr(ec, "schema", 1) != CALIBRATION_SCHEMA
         # node_beam_params semantics (explicit -> resolved; elif TX known ->
         # broadside+90; else omni) — see _resolve_fov_prior.  Computed
         # unconditionally (not gated on fov_mode): it is cheap, and off/shadow
@@ -189,10 +190,13 @@ class NodeAnalyticsManager:
         prior_az, prior_width = _resolve_fov_prior(config, rx_lat, rx_lon, tx_lat, tx_lon)
         if ec is None or moved or rule_changed or schema_changed:
             self.empirical_coverages[node_id] = EmpiricalCoverageState(
-                rx_lat=rx_lat, rx_lon=rx_lon,
+                rx_lat=rx_lat,
+                rx_lon=rx_lon,
                 max_range_km=cfg_max_range,
-                tx_lat=tx_lat, tx_lon=tx_lon,
-                prior_azimuth_deg=prior_az, prior_width_deg=prior_width,
+                tx_lat=tx_lat,
+                tx_lon=tx_lon,
+                prior_azimuth_deg=prior_az,
+                prior_width_deg=prior_width,
             )
             # Record the rule this polygon was built under so the next
             # registration can tell whether it is still valid.
@@ -297,8 +301,12 @@ class NodeAnalyticsManager:
                 )
             }
             for store in (
-                self.trust_scores, self.detection_areas, self.metrics,
-                self.reputations, self.coverage_maps, self.empirical_coverages,
+                self.trust_scores,
+                self.detection_areas,
+                self.metrics,
+                self.reputations,
+                self.coverage_maps,
+                self.empirical_coverages,
             ):
                 store.pop(node_id, None)
 
@@ -311,8 +319,7 @@ class NodeAnalyticsManager:
                 except FileNotFoundError:
                     pass
                 except OSError:
-                    logging.warning("could not remove %s during retirement",
-                                    path, exc_info=True)
+                    logging.warning("could not remove %s during retirement", path, exc_info=True)
 
         # Any summary cached before this call still names the node.
         self._summaries_cache = None
@@ -324,8 +331,7 @@ class NodeAnalyticsManager:
         rep = self.reputations.get(node_id)
         return rep.blocked if rep else False
 
-    def record_calibration_point(self, node_id: str, lat: float, lon: float,
-                                 ts: float | None = None) -> None:
+    def record_calibration_point(self, node_id: str, lat: float, lon: float, ts: float | None = None) -> None:
         """Record a detection at an independently-known target position.
 
         ADS-B only.  Callers used to pass solver output here, which made the
@@ -360,8 +366,11 @@ class NodeAnalyticsManager:
         delay_err = abs(entry.predicted_delay - entry.measured_delay)
         if node_id in self.coverage_maps:
             self.coverage_maps[node_id].add_detection(
-                lat=entry.adsb_lat, lon=entry.adsb_lon, alt_km=0.0,
-                snr=0.0, delay_error=delay_err,
+                lat=entry.adsb_lat,
+                lon=entry.adsb_lon,
+                alt_km=0.0,
+                snr=0.0,
+                delay_error=delay_err,
             )
 
     def record_heartbeat(self, node_id: str):
@@ -387,12 +396,11 @@ class NodeAnalyticsManager:
 
         node_ids = sorted(self.reputations.keys())
         for i, a_id in enumerate(node_ids):
-            for b_id in node_ids[i + 1:]:
+            for b_id in node_ids[i + 1 :]:
                 area_a = self.detection_areas.get(a_id)
                 area_b = self.detection_areas.get(b_id)
                 if area_a and area_b and area_a.n_detections > 0 and area_b.n_detections > 0:
-                    dist = haversine_km(area_a.rx_lat, area_a.rx_lon,
-                                        area_b.rx_lat, area_b.rx_lon)
+                    dist = haversine_km(area_a.rx_lat, area_a.rx_lon, area_b.rx_lat, area_b.rx_lon)
                     # Bistatic footprints reach delta/2 + L from the RX; the
                     # monostatic sum pruned genuinely overlapping pairs.
                     if dist > area_a.footprint_radius_km() + area_b.footprint_radius_km():
@@ -476,8 +484,7 @@ class NodeAnalyticsManager:
             now = time.monotonic()
             if self._summaries_cache is not None and now - self._summaries_cache_ts < self._ANALYSIS_CACHE_TTL:
                 return self._summaries_cache
-            all_nodes = (set(self.trust_scores) | set(self.detection_areas)
-                         | set(self.metrics) | set(self.reputations))
+            all_nodes = set(self.trust_scores) | set(self.detection_areas) | set(self.metrics) | set(self.reputations)
             result = {nid: self.get_node_summary(nid) for nid in sorted(all_nodes)}
             self._summaries_cache = result
             self._summaries_cache_ts = now
@@ -498,36 +505,37 @@ class NodeAnalyticsManager:
             # Only compute pair overlaps for nodes within range of each other
             for i, a_id in enumerate(node_ids):
                 area_a = self.detection_areas[a_id]
-                for b_id in node_ids[i + 1:]:
+                for b_id in node_ids[i + 1 :]:
                     area_b = self.detection_areas[b_id]
-                    dist = haversine_km(area_a.rx_lat, area_a.rx_lon,
-                                        area_b.rx_lat, area_b.rx_lon)
+                    dist = haversine_km(area_a.rx_lat, area_a.rx_lon, area_b.rx_lat, area_b.rx_lon)
                     # Bistatic footprints reach delta/2 + L from the RX; the
                     # monostatic sum pruned genuinely overlapping pairs.
                     if dist > area_a.footprint_radius_km() + area_b.footprint_radius_km():
                         continue
                     overlap = compute_delay_bin_overlap(area_a, area_b)
                     if overlap["overlap_ratio"] > 0:
-                        pair_overlaps.append({
-                            "node_a": a_id,
-                            "node_b": b_id,
-                            **overlap,
-                        })
+                        pair_overlaps.append(
+                            {
+                                "node_a": a_id,
+                                "node_b": b_id,
+                                **overlap,
+                            }
+                        )
 
             if self.detection_areas:
                 areas = list(self.detection_areas.values())
                 avg_lat = sum(a.rx_lat for a in areas) / len(areas)
                 avg_lon = sum(a.rx_lon for a in areas) / len(areas)
                 suggestions = coverage_suggestion(
-                    areas, avg_lat, avg_lon,
+                    areas,
+                    avg_lat,
+                    avg_lon,
                     trust_scores=self.trust_scores,
                 )
             else:
                 suggestions = []
 
-            blocked = [
-                nid for nid, rep in self.reputations.items() if rep.blocked
-            ]
+            blocked = [nid for nid, rep in self.reputations.items() if rep.blocked]
 
             result = {
                 "pair_overlaps": pair_overlaps,
@@ -560,18 +568,16 @@ class NodeAnalyticsManager:
                 except Exception:
                     # A corrupt file used to be indistinguishable from an
                     # absent one — the node silently started with no coverage.
-                    logging.warning("could not load coverage map %s", fname,
-                                    exc_info=True)
+                    logging.warning("could not load coverage map %s", fname, exc_info=True)
             elif fname.startswith("empirical_") and fname.endswith(".json"):
                 try:
                     path = os.path.join(self._storage_dir, fname)
                     ec = EmpiricalCoverageState.load_from_file(path)
                     # Derive node_id from filename: empirical_<safe_id>.json
-                    node_id = fname[len("empirical_"):-len(".json")]
+                    node_id = fname[len("empirical_") : -len(".json")]
                     self.empirical_coverages[node_id] = ec
                 except Exception:
-                    logging.warning("could not load empirical coverage %s",
-                                    fname, exc_info=True)
+                    logging.warning("could not load empirical coverage %s", fname, exc_info=True)
 
     def save_coverage_maps(self):
         if not self._storage_dir:
