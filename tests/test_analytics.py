@@ -69,6 +69,42 @@ class TestTrustScore:
         )
         assert ts.score == 0.5
 
+    def test_provenance_defaults_to_self_report(self):
+        """Snapshots written before the provenance field existed construct
+        entries without it — they must load as self-reports unchanged."""
+        legacy = {
+            "timestamp_ms": 1000,
+            "predicted_delay": 10.0,
+            "predicted_doppler": 50.0,
+            "measured_delay": 10.5,
+            "measured_doppler": 51.0,
+            "adsb_hex": "abc123",
+            "adsb_lat": 33.9,
+            "adsb_lon": -84.6,
+        }
+        entry = AdsReportEntry(**legacy)
+        assert entry.provenance == "self_report"
+
+    def test_summary_breaks_samples_down_by_provenance(self):
+        ts = TrustScoreState(node_id="test-node")
+        for prov in ("self_report", "claim_residual", "claim_residual"):
+            ts.add_sample(
+                AdsReportEntry(
+                    timestamp_ms=1000,
+                    predicted_delay=10.0,
+                    predicted_doppler=50.0,
+                    measured_delay=10.5,
+                    measured_doppler=51.0,
+                    adsb_hex="abc123",
+                    adsb_lat=33.9,
+                    adsb_lon=-84.6,
+                    provenance=prov,
+                )
+            )
+        s = ts.summary()
+        assert s["n_samples"] == 3
+        assert s["samples_by_provenance"] == {"self_report": 1, "claim_residual": 2}
+
 
 class TestYagiConstants:
     def test_beam_width(self):
