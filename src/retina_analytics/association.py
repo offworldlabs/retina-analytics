@@ -252,7 +252,21 @@ class NodeGeometry:
 
     @property
     def baseline_km(self) -> float:
-        return _haversine_km(self.rx_lat, self.rx_lon, self.tx_lat, self.tx_lon)
+        """RX→TX baseline.
+
+        Memoised on the coordinate tuple, so a geometry whose position is
+        rewritten in place still recomputes.  footprint_radius_km reads this
+        once per grid point per node, which made a per-call haversine the
+        single largest cost in compute_overlap_zone (33% of a node rebuild)
+        for a value that is constant across the whole grid.
+        """
+        key = (self.rx_lat, self.rx_lon, self.tx_lat, self.tx_lon)
+        cached = self.__dict__.get("_baseline_cache")
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        value = _haversine_km(*key)
+        self.__dict__["_baseline_cache"] = (key, value)
+        return value
 
     @property
     def footprint_radius_km(self) -> float:
@@ -613,59 +627,82 @@ def compute_overlap_zone(
     delay_pairs = []
     bisector_pairs = []
 
+    # The both-beams test is 2-D — _point_in_beam takes (lat, lon) only, and
+    # the lat/lon of a column depends on (east, north) alone — so it is
+    # resolved once here rather than re-derived identically for each of the
+    # six altitudes.  It dominated the rebuild (87% of a node rebuild's time,
+    # 855k calls where 143k distinct columns exist), and the altitude loop
+    # below now runs over the survivors, which on this fleet is a small
+    # fraction of the bounding box.  Column order is preserved and altitude
+    # stays outermost, so the emitted grid is identical to the triple loop's.
+    columns = []
+    for i in range(n_steps):
+        east = -max_range + i * grid_step_km
+        for j in range(n_steps):
+            north = -max_range + j * grid_step_km
+
+            lat, lon, _ = _enu_to_lla(east, north, 0.0, ref_lat, ref_lon, ref_alt_km)
+
+            # Must be in BOTH beams
+            if not _point_in_beam(lat, lon, geo_a):
+                continue
+            if not _point_in_beam(lat, lon, geo_b):
+                continue
+            columns.append((east, north, lat, lon))
+
+    if not columns:
+        return OverlapZone(
+            node_a_id=geo_a.node_id,
+            node_b_id=geo_b.node_id,
+            grid_points=[],
+            delay_pairs=[],
+            fc_a_hz=geo_a.fc_hz,
+            fc_b_hz=geo_b.fc_hz,
+            delay_gate_us=delay_gate_us,
+            doppler_gate_hz=doppler_gate_hz,
+        )
+
     for alt_km in altitudes_km:
-        for i in range(n_steps):
-            for j in range(n_steps):
-                east = -max_range + i * grid_step_km
-                north = -max_range + j * grid_step_km
+        for east, north, lat, lon in columns:
+            # Calculate bistatic delay at each node
+            target_enu = (east, north, alt_km)
+            delay_a = _bistatic_delay_at(target_enu, tx_a_enu, rx_a_enu)
+            delay_b = _bistatic_delay_at(target_enu, tx_b_enu, rx_b_enu)
 
-                lat, lon, _ = _enu_to_lla(east, north, 0.0, ref_lat, ref_lon, ref_alt_km)
+            # Range limit, applied on the differential range the node is
+            # actually bounded by rather than on distance from the RX.  The
+            # delay is already in hand and is exact in 3-D, so this needs no
+            # closed form and costs nothing.
+            #
+            # The two are not close: at Δ = 60 km the footprint reaches only
+            # 30 km directly away from the transmitter, against the 60 km
+            # circle this used to allow — 4× the area, in the half where
+            # cross-aircraft pairings are cheapest to form.  Toward a distant
+            # tower it runs the other way, a 43 km baseline genuinely
+            # reaching 73 km.
+            if geo_a.max_bistatic_range_km is not None and delay_a * C_KM_US > geo_a.max_bistatic_range_km:
+                continue
+            if geo_b.max_bistatic_range_km is not None and delay_b * C_KM_US > geo_b.max_bistatic_range_km:
+                continue
 
-                # Must be in BOTH beams
-                if not _point_in_beam(lat, lon, geo_a):
-                    continue
-                if not _point_in_beam(lat, lon, geo_b):
-                    continue
+            # Only keep physically meaningful delays
+            if delay_a < 0 or delay_b < 0:
+                continue
 
-                # Calculate bistatic delay at each node
-                target_enu = (east, north, alt_km)
-                delay_a = _bistatic_delay_at(target_enu, tx_a_enu, rx_a_enu)
-                delay_b = _bistatic_delay_at(target_enu, tx_b_enu, rx_b_enu)
-
-                # Range limit, applied on the differential range the node is
-                # actually bounded by rather than on distance from the RX.  The
-                # delay is already in hand and is exact in 3-D, so this needs no
-                # closed form and costs nothing.
-                #
-                # The two are not close: at Δ = 60 km the footprint reaches only
-                # 30 km directly away from the transmitter, against the 60 km
-                # circle this used to allow — 4× the area, in the half where
-                # cross-aircraft pairings are cheapest to form.  Toward a distant
-                # tower it runs the other way, a 43 km baseline genuinely
-                # reaching 73 km.
-                if geo_a.max_bistatic_range_km is not None and delay_a * C_KM_US > geo_a.max_bistatic_range_km:
-                    continue
-                if geo_b.max_bistatic_range_km is not None and delay_b * C_KM_US > geo_b.max_bistatic_range_km:
-                    continue
-
-                # Only keep physically meaningful delays
-                if delay_a < 0 or delay_b < 0:
-                    continue
-
-                grid_points.append((lat, lon, alt_km))
-                delay_pairs.append((delay_a, delay_b))
-                # Bistatic bisector b = u_tx + u_rx (unit vectors from the
-                # target toward each station).  Doppler measures v · b — see
-                # implied_horizontal_velocity — so these are the projection axes
-                # the two nodes observe the velocity along.  Precomputed here
-                # because the grid is fixed at registration and the runtime
-                # test then costs a couple of dot products.
-                bisector_pairs.append(
-                    (
-                        _bisector(target_enu, tx_a_enu, rx_a_enu),
-                        _bisector(target_enu, tx_b_enu, rx_b_enu),
-                    )
+            grid_points.append((lat, lon, alt_km))
+            delay_pairs.append((delay_a, delay_b))
+            # Bistatic bisector b = u_tx + u_rx (unit vectors from the
+            # target toward each station).  Doppler measures v · b — see
+            # implied_horizontal_velocity — so these are the projection axes
+            # the two nodes observe the velocity along.  Precomputed here
+            # because the grid is fixed at registration and the runtime
+            # test then costs a couple of dot products.
+            bisector_pairs.append(
+                (
+                    _bisector(target_enu, tx_a_enu, rx_a_enu),
+                    _bisector(target_enu, tx_b_enu, rx_b_enu),
                 )
+            )
 
     return OverlapZone(
         node_a_id=geo_a.node_id,
