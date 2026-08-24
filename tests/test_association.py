@@ -294,14 +294,28 @@ class TestOverlapGridCost:
 
     def _pair(self):
         geo_a = NodeGeometry(
-            node_id="cost-A", rx_lat=33.939, rx_lon=-84.651, rx_alt_km=0.29,
-            tx_lat=33.756, tx_lon=-84.331, tx_alt_km=0.49,
-            beam_azimuth_deg=135, beam_width_deg=41, max_range_km=50,
+            node_id="cost-A",
+            rx_lat=33.939,
+            rx_lon=-84.651,
+            rx_alt_km=0.29,
+            tx_lat=33.756,
+            tx_lon=-84.331,
+            tx_alt_km=0.49,
+            beam_azimuth_deg=135,
+            beam_width_deg=41,
+            max_range_km=50,
         )
         geo_b = NodeGeometry(
-            node_id="cost-B", rx_lat=34.05, rx_lon=-84.4, rx_alt_km=0.3,
-            tx_lat=33.85, tx_lon=-84.15, tx_alt_km=0.5,
-            beam_azimuth_deg=210, beam_width_deg=41, max_range_km=50,
+            node_id="cost-B",
+            rx_lat=34.05,
+            rx_lon=-84.4,
+            rx_alt_km=0.3,
+            tx_lat=33.85,
+            tx_lon=-84.15,
+            tx_alt_km=0.5,
+            beam_azimuth_deg=210,
+            beam_width_deg=41,
+            max_range_km=50,
         )
         return geo_a, geo_b
 
@@ -311,7 +325,9 @@ class TestOverlapGridCost:
         geo_a, geo_b = self._pair()
         seen = []
         real = A._point_in_beam
-        monkeypatch.setattr(A, "_point_in_beam", lambda lat, lon, g: (seen.append((lat, lon, g.node_id)), real(lat, lon, g))[1])
+        monkeypatch.setattr(
+            A, "_point_in_beam", lambda lat, lon, g: (seen.append((lat, lon, g.node_id)), real(lat, lon, g))[1]
+        )
         zone = compute_overlap_zone(geo_a, geo_b, grid_step_km=5.0, altitudes_km=self.ALTS)
         assert zone.grid_points  # the pair does overlap, so this is a real grid
         assert len(seen) == len(set(seen))
