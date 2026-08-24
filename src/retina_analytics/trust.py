@@ -16,6 +16,16 @@ class AdsReportEntry:
     adsb_hex: str
     adsb_lat: float
     adsb_lon: float
+    # Who computed this sample.  "self_report" is the historical path (the
+    # node POSTs its own predicted/measured pair to the analytics route);
+    # backend-computed claim residuals arrive as "claim_residual".  The
+    # distinction matters twice: cross-validation against external ADS-B
+    # truth only makes sense for samples that carry the node's own position
+    # claim, and a backend-side hex demotion must be able to retract exactly
+    # the samples the backend fed, without touching what the node reported
+    # about itself.  Defaulted so snapshots written before this field existed
+    # still construct via AdsReportEntry(**saved_dict).
+    provenance: str = "self_report"
 
 
 @dataclass
@@ -60,10 +70,18 @@ class TrustScoreState:
         return math.sqrt(sum((s.predicted_doppler - s.measured_doppler) ** 2 for s in self.samples) / len(self.samples))
 
     def summary(self) -> dict:
+        # Provenance breakdown rides along so operators can see how much of a
+        # score rests on the node's own claims versus backend-computed
+        # residuals — a node whose score is 1.0 on 500 self-reports and 0.2
+        # on backend residuals is precisely the lying-radar signature.
+        by_provenance: dict[str, int] = {}
+        for s in self.samples:
+            by_provenance[s.provenance] = by_provenance.get(s.provenance, 0) + 1
         return {
             "node_id": self.node_id,
             "trust_score": round(self.score, 4),
             "rms_delay_error_us": round(self.rms_delay_error, 3),
             "rms_doppler_error_hz": round(self.rms_doppler_error, 3),
             "n_samples": len(self.samples),
+            "samples_by_provenance": by_provenance,
         }
