@@ -622,3 +622,41 @@ class TestBinBoundaries:
         for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
             ec.add_point(*_at_bearing(0.5, 15.0))
         assert ec.observed_limit_km(359.0) is not None
+
+
+class TestObservedLimitCache:
+    """observed_limit_km answers per 5 deg bin, and the overlap-grid builder
+    asks once per grid point — thousands of queries over a handful of bins.
+    The answer is memoised per bin; these pin that the memo cannot serve a
+    stale limit, which would silently freeze the shrink-only prior."""
+
+    def test_repeated_queries_agree(self):
+        ec = _state()
+        for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
+            ec.add_point(*_at_bearing(90.0, 20.0))
+        assert ec.observed_limit_km(90.0) == ec.observed_limit_km(90.0)
+
+    def test_a_new_point_invalidates_the_memo(self):
+        ec = _state()
+        for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
+            ec.add_point(*_at_bearing(90.0, 20.0))
+        before = ec.observed_limit_km(90.0)
+        for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN * 3):
+            ec.add_point(*_at_bearing(90.0, 40.0))
+        assert ec.observed_limit_km(90.0) > before
+
+    def test_abstention_is_memoised_without_becoming_permanent(self):
+        """None is a real answer, so the memo must distinguish it from empty."""
+        ec = _state()
+        assert ec.observed_limit_km(90.0) is None
+        assert ec.observed_limit_km(90.0) is None
+        for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
+            ec.add_point(*_at_bearing(90.0, 20.0))
+        assert ec.observed_limit_km(90.0) is not None
+
+    def test_a_restored_state_does_not_inherit_an_empty_memo(self):
+        ec = _state()
+        for _ in range(_MIN_BIN_POINTS_TO_CONSTRAIN):
+            ec.add_point(*_at_bearing(90.0, 20.0))
+        restored = type(ec).from_dict(ec.to_dict())
+        assert restored.observed_limit_km(90.0) == ec.observed_limit_km(90.0)

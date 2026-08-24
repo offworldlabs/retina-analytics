@@ -277,3 +277,74 @@ class TestDopplerIsAVelocityProjection:
                 rejected += 1
         assert judged > 1500
         assert rejected / judged < 0.02, f"false-rejection rate {rejected / judged:.3f}"
+
+
+class TestOverlapGridCost:
+    """The both-beams test is 2-D, so it must not be repeated per altitude.
+
+    compute_overlap_zone evaluates six altitude layers over one bounding box,
+    and _point_in_beam takes (lat, lon) only.  Re-deriving it per layer was 87%
+    of a node rebuild on the 52-node test deployment (855k calls where 143k
+    distinct columns exist), which is what put analytics_refresh past its 120 s
+    health budget.  These pin the property the restructure rests on, not the
+    restructure itself.
+    """
+
+    ALTS = (1.5, 3.0, 5.0, 7.0, 9.0, 11.0)
+
+    def _pair(self):
+        geo_a = NodeGeometry(
+            node_id="cost-A",
+            rx_lat=33.939,
+            rx_lon=-84.651,
+            rx_alt_km=0.29,
+            tx_lat=33.756,
+            tx_lon=-84.331,
+            tx_alt_km=0.49,
+            beam_azimuth_deg=135,
+            beam_width_deg=41,
+            max_range_km=50,
+        )
+        geo_b = NodeGeometry(
+            node_id="cost-B",
+            rx_lat=34.05,
+            rx_lon=-84.4,
+            rx_alt_km=0.3,
+            tx_lat=33.85,
+            tx_lon=-84.15,
+            tx_alt_km=0.5,
+            beam_azimuth_deg=210,
+            beam_width_deg=41,
+            max_range_km=50,
+        )
+        return geo_a, geo_b
+
+    def test_beam_membership_is_tested_once_per_column(self, monkeypatch):
+        import retina_analytics.association as A
+
+        geo_a, geo_b = self._pair()
+        seen = []
+        real = A._point_in_beam
+        monkeypatch.setattr(
+            A, "_point_in_beam", lambda lat, lon, g: (seen.append((lat, lon, g.node_id)), real(lat, lon, g))[1]
+        )
+        zone = compute_overlap_zone(geo_a, geo_b, grid_step_km=5.0, altitudes_km=self.ALTS)
+        assert zone.grid_points  # the pair does overlap, so this is a real grid
+        assert len(seen) == len(set(seen))
+
+    def test_every_altitude_layer_is_still_emitted(self):
+        geo_a, geo_b = self._pair()
+        zone = compute_overlap_zone(geo_a, geo_b, grid_step_km=5.0, altitudes_km=self.ALTS)
+        # Column set is altitude-independent, so each layer contributes the same
+        # (lat, lon) columns modulo the per-altitude delay gates.
+        by_alt = {}
+        for lat, lon, alt in zone.grid_points:
+            by_alt.setdefault(alt, set()).add((lat, lon))
+        assert set(by_alt) == set(self.ALTS)
+
+    def test_baseline_km_is_memoised_but_follows_a_moved_node(self):
+        geo_a, _ = self._pair()
+        first = geo_a.baseline_km
+        assert geo_a.baseline_km == first  # cached, same answer
+        geo_a.tx_lat += 0.5
+        assert geo_a.baseline_km != first  # keyed on the coordinates, not sticky

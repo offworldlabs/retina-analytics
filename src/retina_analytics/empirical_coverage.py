@@ -216,6 +216,11 @@ def _bearing_and_range(rx_lat: float, rx_lon: float, lat: float, lon: float) -> 
     return (bearing_deg(rx_lat, rx_lon, lat, lon), haversine_km(rx_lat, rx_lon, lat, lon))
 
 
+# Cache sentinel: None is a real observed_limit_km answer ("no evidence"), so
+# an empty slot cannot be spelled None.
+_UNSET = object()
+
+
 def _percentile(values: list[float], pct: float) -> float:
     """pct-th percentile of a non-empty list (sorted() — the input is untouched)."""
     s = sorted(values)
@@ -296,6 +301,12 @@ class EmpiricalCoverageState:
         # add_point and record_disappearance, the only two things that can
         # move it.
         self._max_limit_cache: float | None = None
+        # observed_limit_km() cache, one slot per bin, filled lazily.  The
+        # overlap-grid builder queries the prior once per grid point but there
+        # are only N_BINS distinct answers, so without this a single pair grid
+        # pays thousands of _p85 sorts over the same few bins.  Invalidated by
+        # add_point and from_dict, the only two things that move self._bins.
+        self._observed_limit_cache: list = [_UNSET] * N_BINS
 
     # ── Ingestion ─────────────────────────────────────────────────────────────
 
@@ -350,6 +361,10 @@ class EmpiricalCoverageState:
             del bt[0]  # kept in lockstep with b — see _bin_pos_ts
         self._bin_last_pos_ts[i] = t
         self._max_limit_cache = None
+        # Bin i ± 1 are the bins whose answer this point can move (see
+        # observed_limit_km's neighbour widening); clearing all N is simpler
+        # and costs nothing measurable against the _p85 it saves.
+        self._observed_limit_cache = [_UNSET] * N_BINS
 
     def record_disappearance(self, lat: float, lon: float, ts: float | None = None) -> bool:
         """Record one negative-evidence event: a target predicted detectable at
@@ -771,6 +786,9 @@ class EmpiricalCoverageState:
         it should go on its own with its own measurement.
         """
         i = _bin_for_bearing(bearing_deg_ % 360.0)
+        cached = self._observed_limit_cache[i]
+        if cached is not _UNSET:
+            return cached
         best = None
         for off in (-1, 0, 1):
             b = self._bins[(i + off) % N_BINS]
@@ -779,6 +797,7 @@ class EmpiricalCoverageState:
             v = _p85(b)
             if best is None or v > best:
                 best = v
+        self._observed_limit_cache[i] = best
         return best
 
     def constraint_digest(self) -> tuple:
@@ -856,6 +875,8 @@ class EmpiricalCoverageState:
                 ts_list.extend([0.0] * (n - len(ts_list)))
             elif len(ts_list) > n:
                 del ts_list[n:]
+        # _bins was written directly above, bypassing add_point's invalidation.
+        obj._observed_limit_cache = [_UNSET] * N_BINS
         bin_last_pos_ts = d.get("bin_last_pos_ts")
         if bin_last_pos_ts:
             for i, ts in enumerate(bin_last_pos_ts):
