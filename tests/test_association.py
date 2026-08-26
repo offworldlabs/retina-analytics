@@ -1,6 +1,9 @@
 """Tests for inter-node association logic."""
 
 import math
+import random
+
+import pytest
 
 from retina_analytics.association import (
     InterNodeAssociator,
@@ -8,7 +11,9 @@ from retina_analytics.association import (
     _bistatic_delay_at,
     _lla_to_enu,
     compute_overlap_zone,
+    predict_observation,
 )
+from retina_analytics.constants import C_KM_S, C_KM_US, R_EARTH
 
 # ── Overlap zone & bistatic delay ────────────────────────────────────────────
 
@@ -348,3 +353,211 @@ class TestOverlapGridCost:
         assert geo_a.baseline_km == first  # cached, same answer
         geo_a.tx_lat += 0.5
         assert geo_a.baseline_km != first  # keyed on the coordinates, not sticky
+
+    @pytest.mark.parametrize("field", ["rx_lat", "rx_lon", "tx_lat", "tx_lon"])
+    def test_baseline_km_follows_every_coordinate_it_is_keyed_on(self, field):
+        """Both ends, in place — a node re-registers by rewriting this object.
+
+        The RX half was untested: a memo keyed on the TX coordinates alone
+        passes the test above and still answers from the old receiver site
+        forever.
+        """
+        geo_a, _ = self._pair()
+        first = geo_a.baseline_km
+        setattr(geo_a, field, getattr(geo_a, field) + 0.5)
+        assert geo_a.baseline_km != first
+
+
+# ── Hot-path memoisation ─────────────────────────────────────────────────────
+
+
+def _hot_path_geo(**over) -> NodeGeometry:
+    base = dict(
+        node_id="memo-A",
+        rx_lat=33.939,
+        rx_lon=-84.651,
+        rx_alt_km=0.29,
+        tx_lat=33.756,
+        tx_lon=-84.331,
+        tx_alt_km=0.49,
+        fc_hz=195e6,
+        beam_azimuth_deg=135,
+        beam_width_deg=41,
+        max_range_km=50.0,
+    )
+    base.update(over)
+    return NodeGeometry(**base)
+
+
+def _predict_reference(geo, lat, lon, alt_km, ve_ms, vn_ms, vu_ms=0.0):
+    """predict_observation as it read before the ENU frame was memoised.
+
+    Written out straight rather than imported, so it keeps saying what the
+    answer used to be even as the module is optimised further: a shared helper
+    would follow the production code and stop being a reference.
+    """
+
+    def lla_to_enu(la, lo, al, ref_la, ref_lo, ref_al):
+        dlat = math.radians(la - ref_la)
+        dlon = math.radians(lo - ref_lo)
+        north = dlat * R_EARTH
+        east = dlon * R_EARTH * math.cos(math.radians(ref_la))
+        return (east, north, al - ref_al)
+
+    def norm(v):
+        return math.sqrt(sum(x * x for x in v))
+
+    ref = (geo.rx_lat, geo.rx_lon, geo.rx_alt_km)
+    rx = lla_to_enu(geo.rx_lat, geo.rx_lon, geo.rx_alt_km, *ref)
+    tx = lla_to_enu(geo.tx_lat, geo.tx_lon, geo.tx_alt_km, *ref)
+    tgt = lla_to_enu(lat, lon, alt_km, *ref)
+
+    d_tx = norm([tgt[i] - tx[i] for i in range(3)])
+    d_rx = norm([rx[i] - tgt[i] for i in range(3)])
+    d_bl = norm([rx[i] - tx[i] for i in range(3)])
+    delay_us = (d_tx + d_rx - d_bl) / C_KM_US
+
+    b_tx = norm([tgt[i] - tx[i] for i in range(3)]) or 1e-9
+    b_rx = norm([tgt[i] - rx[i] for i in range(3)]) or 1e-9
+    b = tuple((tx[i] - tgt[i]) / b_tx + (rx[i] - tgt[i]) / b_rx for i in range(3))
+    v_dot_b = ve_ms * b[0] + vn_ms * b[1] + vu_ms * b[2]
+    return delay_us, v_dot_b * geo.fc_hz / (C_KM_S * 1000.0)
+
+
+class TestPredictObservationMemoisation:
+    """The node's own ENU frame is a constant; caching it must not move a number.
+
+    predict_observation anchors ENU at the node's own RX, which makes rx_enu the
+    origin and leaves TX, the RX→TX baseline length and the longitude scale
+    factor fixed by the node's own coordinates — all three were rebuilt on every
+    call, on a path the claiming and ADS-B seeding rounds run per tracklet per
+    round.  A memo keyed on too few fields is invisible until a node
+    re-registers at a new site and every prediction quietly answers from the old
+    one, so both halves are pinned here: the values against the pre-memo maths,
+    and invalidation against an in-place rewrite of each coordinate in turn.
+    """
+
+    TARGET = (33.99, -84.50, 8.0, 200.0, 50.0)
+
+    def test_matches_the_pre_memo_maths_over_a_geometry_grid(self):
+        rng = random.Random(20260826)
+        for _ in range(400):
+            rx_lat = rng.uniform(-60.0, 60.0)
+            rx_lon = rng.uniform(-179.0, 179.0)
+            rx_alt_km = rng.uniform(0.0, 2.5)
+            if rng.random() < 0.35:  # monostatic: TX co-sited with RX
+                tx_lat, tx_lon, tx_alt_km = rx_lat, rx_lon, rx_alt_km
+            else:
+                tx_lat = rx_lat + rng.uniform(-0.5, 0.5)
+                tx_lon = rx_lon + rng.uniform(-0.5, 0.5)
+                tx_alt_km = rng.uniform(0.0, 2.5)
+            geo = _hot_path_geo(
+                rx_lat=rx_lat,
+                rx_lon=rx_lon,
+                rx_alt_km=rx_alt_km,
+                tx_lat=tx_lat,
+                tx_lon=tx_lon,
+                tx_alt_km=tx_alt_km,
+                fc_hz=rng.choice([98e6, 195e6, 430e6, 750e6]),
+            )
+            target = (
+                rx_lat + rng.uniform(-0.6, 0.6),
+                rx_lon + rng.uniform(-0.6, 0.6),
+                rng.uniform(0.0, 13.0),
+                rng.uniform(-300.0, 300.0),
+                rng.uniform(-300.0, 300.0),
+                rng.uniform(-20.0, 20.0),
+            )
+            got = predict_observation(geo, *target)
+            want = _predict_reference(geo, *target)
+            assert got[0] == pytest.approx(want[0], rel=1e-9, abs=1e-9)
+            assert got[1] == pytest.approx(want[1], rel=1e-9, abs=1e-9)
+
+    def test_a_target_sitting_on_the_receiver_still_agrees(self):
+        """d_rx == 0 exactly, which is the one branch the random grid cannot hit."""
+        geo = _hot_path_geo()
+        target = (geo.rx_lat, geo.rx_lon, geo.rx_alt_km, 200.0, 50.0, 0.0)
+        got = predict_observation(geo, *target)
+        want = _predict_reference(geo, *target)
+        assert got[0] == pytest.approx(want[0], rel=1e-9, abs=1e-9)
+        assert got[1] == pytest.approx(want[1], rel=1e-9, abs=1e-9)
+
+    def test_the_memo_is_warm_and_repeatable(self):
+        geo = _hot_path_geo()
+        first = predict_observation(geo, *self.TARGET)
+        assert predict_observation(geo, *self.TARGET) == first
+
+    @pytest.mark.parametrize(
+        "field, delta",
+        [
+            ("rx_lat", 0.4),
+            ("rx_lon", 0.4),
+            ("rx_alt_km", 0.35),
+            ("tx_lat", 0.5),
+            ("tx_lon", 0.5),
+            ("tx_alt_km", 0.4),
+        ],
+    )
+    def test_an_in_place_coordinate_rewrite_invalidates_the_frame(self, field, delta):
+        geo = _hot_path_geo()
+        before = predict_observation(geo, *self.TARGET)
+        assert predict_observation(geo, *self.TARGET) == before  # memo is warm
+
+        setattr(geo, field, getattr(geo, field) + delta)
+        after = predict_observation(geo, *self.TARGET)
+        assert after[0] != before[0], f"a rewritten {field} never reached the delay"
+        want = _predict_reference(geo, *self.TARGET)
+        assert after[0] == pytest.approx(want[0], rel=1e-9, abs=1e-9)
+        assert after[1] == pytest.approx(want[1], rel=1e-9, abs=1e-9)
+
+
+class TestFootprintRadiusMemoisation:
+    """footprint_radius_km is read per grid point per node, and is a constant.
+
+    Keyed on every field it reads: the bistatic limit, the monostatic range it
+    falls back to, and the four coordinates baseline_km is itself keyed on.
+    Each is rewritten in place below, because that is how a node re-registering
+    with a new configuration reaches this object.
+    """
+
+    def test_monostatic_radius_follows_a_rewritten_max_range(self):
+        geo = _hot_path_geo(max_bistatic_range_km=None)
+        assert geo.footprint_radius_km == pytest.approx(50.0)
+        geo.max_range_km = 72.0
+        assert geo.footprint_radius_km == pytest.approx(72.0)
+
+    def test_declaring_a_bistatic_limit_switches_the_formula(self):
+        geo = _hot_path_geo(max_bistatic_range_km=None)
+        assert geo.footprint_radius_km == pytest.approx(50.0)
+        geo.max_bistatic_range_km = 60.0
+        assert geo.footprint_radius_km == pytest.approx(30.0 + geo.baseline_km)
+
+    def test_a_rewritten_bistatic_limit_follows(self):
+        geo = _hot_path_geo(max_bistatic_range_km=60.0)
+        first = geo.footprint_radius_km
+        geo.max_bistatic_range_km = 90.0
+        assert geo.footprint_radius_km == pytest.approx(first + 15.0)
+
+    @pytest.mark.parametrize("field", ["rx_lat", "rx_lon", "tx_lat", "tx_lon"])
+    def test_a_moved_station_moves_the_bistatic_radius(self, field):
+        geo = _hot_path_geo(max_bistatic_range_km=60.0)
+        first = geo.footprint_radius_km
+        setattr(geo, field, getattr(geo, field) + 0.5)
+        assert geo.footprint_radius_km == pytest.approx(30.0 + geo.baseline_km)
+        assert geo.footprint_radius_km != first
+
+    def test_effective_radius_still_tracks_a_learning_fov(self):
+        """The FOV keeps widening with no field of this dataclass changing, which
+        is why effective_radius_km is left unmemoised over a memoised footprint."""
+
+        class _Fov:
+            reach = 40.0
+
+            def max_limit_km(self):
+                return self.reach
+
+        geo = _hot_path_geo(max_bistatic_range_km=None)
+        geo.fov = _Fov()
+        assert geo.effective_radius_km == pytest.approx(50.0)  # footprint still wider
+        geo.fov.reach = 85.0
+        assert geo.effective_radius_km == pytest.approx(85.0)

@@ -113,11 +113,21 @@ ADSB_SEED_MAX_DR_AGE_S = 45.0
 # delay/bisector maths that operates inside it.
 
 
-def _lla_to_enu(lat, lon, alt_km, ref_lat, ref_lon, ref_alt_km):
+def _lla_to_enu(lat, lon, alt_km, ref_lat, ref_lon, ref_alt_km, cos_ref=None):
+    """LLA to ENU metres-from-reference.
+
+    ``cos_ref`` is ``cos(radians(ref_lat))``, the one per-reference constant in
+    here, passed in by callers that already hold it for a fixed reference (see
+    NodeGeometry._rx_frame).  Left None it is computed as before, and the
+    arithmetic below is written in the same order either way, so a memoised
+    caller gets bit-identical output rather than merely close output.
+    """
     dlat = math.radians(lat - ref_lat)
     dlon = math.radians(lon - ref_lon)
     north = dlat * R_EARTH
-    east = dlon * R_EARTH * math.cos(math.radians(ref_lat))
+    if cos_ref is None:
+        cos_ref = math.cos(math.radians(ref_lat))
+    east = dlon * R_EARTH * cos_ref
     up = alt_km - ref_alt_km
     return (east, north, up)
 
@@ -130,15 +140,44 @@ def _enu_to_lla(east_km, north_km, up_km, ref_lat, ref_lon, ref_alt_km):
 
 
 def _norm(v):
-    return math.sqrt(sum(x * x for x in v))
+    """Euclidean length of a 3-vector.
+
+    Every caller in this module passes exactly three components (ENU
+    displacements and bisectors), so this unpacks rather than folding over an
+    arbitrary length: the generator-in-sum it replaces built a throwaway
+    iterator per call on a path that runs once per grid point per node.
+    """
+    x, y, z = v
+    return math.sqrt(x * x + y * y + z * z)
 
 
-def _bistatic_delay_at(target_enu, tx_enu, rx_enu=(0, 0, 0)):
-    """Bistatic differential delay in μs."""
-    d_tx = _norm([target_enu[i] - tx_enu[i] for i in range(3)])
-    d_rx = _norm([rx_enu[i] - target_enu[i] for i in range(3)])
-    d_bl = _norm([rx_enu[i] - tx_enu[i] for i in range(3)])
+def _ranges_to_stations(target_enu, tx_enu, rx_enu):
+    """(d_tx, d_rx): target→TX and target→RX ranges, in the given ENU frame.
+
+    The delay and the bisector both need this pair, so a caller wanting both
+    (predict_observation) computes it once here instead of twice.
+    """
+    d_tx = _norm((target_enu[0] - tx_enu[0], target_enu[1] - tx_enu[1], target_enu[2] - tx_enu[2]))
+    d_rx = _norm((target_enu[0] - rx_enu[0], target_enu[1] - rx_enu[1], target_enu[2] - rx_enu[2]))
+    return d_tx, d_rx
+
+
+def _delay_from_ranges(d_tx, d_rx, d_bl):
+    """Bistatic differential delay in μs from ranges that are already in hand."""
     return (d_tx + d_rx - d_bl) / C_KM_US
+
+
+def _bistatic_delay_at(target_enu, tx_enu, rx_enu=(0, 0, 0), d_bl=None):
+    """Bistatic differential delay in μs.
+
+    ``d_bl`` is the RX→TX baseline length in the same frame — a per-node
+    constant that a caller holding one (see NodeGeometry._rx_frame) passes in
+    rather than having it re-normed on every call.
+    """
+    d_tx, d_rx = _ranges_to_stations(target_enu, tx_enu, rx_enu)
+    if d_bl is None:
+        d_bl = _norm((rx_enu[0] - tx_enu[0], rx_enu[1] - tx_enu[1], rx_enu[2] - tx_enu[2]))
+    return _delay_from_ranges(d_tx, d_rx, d_bl)
 
 
 # ── Doppler as a velocity projection ─────────────────────────────────────────
@@ -176,11 +215,21 @@ _MIN_AXIS_DET = 0.05
 _MIN_BISECTOR = 0.15
 
 
+def _bisector_from_ranges(target_enu, tx_enu, rx_enu, d_tx, d_rx):
+    """b = u_tx + u_rx at the target, from ranges that are already in hand."""
+    d_tx = d_tx or 1e-9
+    d_rx = d_rx or 1e-9
+    return (
+        (tx_enu[0] - target_enu[0]) / d_tx + (rx_enu[0] - target_enu[0]) / d_rx,
+        (tx_enu[1] - target_enu[1]) / d_tx + (rx_enu[1] - target_enu[1]) / d_rx,
+        (tx_enu[2] - target_enu[2]) / d_tx + (rx_enu[2] - target_enu[2]) / d_rx,
+    )
+
+
 def _bisector(target_enu, tx_enu, rx_enu):
     """Return b = u_tx + u_rx at the target, in the same ENU frame."""
-    d_tx = _norm([target_enu[i] - tx_enu[i] for i in range(3)]) or 1e-9
-    d_rx = _norm([target_enu[i] - rx_enu[i] for i in range(3)]) or 1e-9
-    return tuple((tx_enu[i] - target_enu[i]) / d_tx + (rx_enu[i] - target_enu[i]) / d_rx for i in range(3))
+    d_tx, d_rx = _ranges_to_stations(target_enu, tx_enu, rx_enu)
+    return _bisector_from_ranges(target_enu, tx_enu, rx_enu, d_tx, d_rx)
 
 
 def implied_horizontal_velocity(m_a, b_a, m_b, b_b):
@@ -269,11 +318,55 @@ class NodeGeometry:
         return value
 
     @property
+    def _rx_frame(self) -> tuple[tuple[float, float, float], float, float]:
+        """ENU constants of the frame anchored at this node's own RX.
+
+        Returns (tx_enu, baseline_len_km, cos_rx_lat).  In that frame the RX is
+        the origin by construction, so the only station position left to derive
+        is the TX — and it, its distance from the origin, and the longitude
+        scale factor are all fixed by the node's own coordinates, not by
+        whatever target is being predicted.  predict_observation re-derived all
+        three on every call.
+
+        Memoised on the six coordinate fields the derivation reads, with the
+        same key-tuple pattern baseline_km uses, so a geometry whose position
+        is rewritten in place still recomputes rather than serving a stale
+        frame.
+        """
+        key = (self.rx_lat, self.rx_lon, self.rx_alt_km, self.tx_lat, self.tx_lon, self.tx_alt_km)
+        cached = self.__dict__.get("_rx_frame_cache")
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        cos_rx = math.cos(math.radians(self.rx_lat))
+        tx_enu = _lla_to_enu(self.tx_lat, self.tx_lon, self.tx_alt_km, self.rx_lat, self.rx_lon, self.rx_alt_km, cos_rx)
+        # RX is the origin here, so |RX − TX| is just |tx_enu|.
+        value = (tx_enu, _norm(tx_enu), cos_rx)
+        self.__dict__["_rx_frame_cache"] = (key, value)
+        return value
+
+    @property
     def footprint_radius_km(self) -> float:
-        """Largest RX-relative range this node's footprint reaches."""
+        """Largest RX-relative range this node's footprint reaches.
+
+        _point_in_beam reads this once (twice under FOV_MODE) for every grid
+        point of every node, for a value that is constant across the whole
+        grid, so the branch that derives something is memoised on exactly the
+        fields it reads — the bistatic limit and the four coordinates
+        baseline_km is itself keyed on — with baseline_km's key-tuple pattern,
+        so an in-place geometry rewrite still recomputes.
+
+        The monostatic branch returns before any of that: it is a bare field
+        read, and building a key to cache it costs more than it saves.
+        """
         if self.max_bistatic_range_km is None:
             return self.max_range_km
-        return bistatic_max_radius_km(self.baseline_km, self.max_bistatic_range_km)
+        key = (self.max_bistatic_range_km, self.rx_lat, self.rx_lon, self.tx_lat, self.tx_lon)
+        cached = self.__dict__.get("_footprint_cache")
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        value = bistatic_max_radius_km(self.baseline_km, self.max_bistatic_range_km)
+        self.__dict__["_footprint_cache"] = (key, value)
+        return value
 
     @property
     def effective_radius_km(self) -> float:
@@ -286,6 +379,12 @@ class NodeGeometry:
         footprint_radius_km alone would silently truncate exactly the region
         FOV_MODE exists to add.  Used by compute_overlap_zone's pair
         prefilter and grid bounding box.
+
+        Deliberately NOT memoised, unlike the two properties above: fov is a
+        live EmpiricalCoverageState that keeps learning, so max_limit_km()
+        moves without any field of this dataclass changing and there is no key
+        that would invalidate on it.  It inherits footprint_radius_km's memo
+        for the half that does have one.
         """
         radius = self.footprint_radius_km
         if self.fov is not None:
@@ -405,10 +504,17 @@ def predict_observation(
     (b points from the target toward TX and RX, so v.b > 0 shrinks the
     bistatic path).
     """
-    rx_enu, tx_enu = _compute_node_enu(geo, geo.rx_lat, geo.rx_lon, geo.rx_alt_km)
-    target_enu = _lla_to_enu(lat, lon, alt_km, geo.rx_lat, geo.rx_lon, geo.rx_alt_km)
-    delay_us = _bistatic_delay_at(target_enu, tx_enu, rx_enu)
-    b = _bisector(target_enu, tx_enu, rx_enu)
+    # The ENU reference IS this node's own RX, so rx_enu is the origin by
+    # construction and everything else about the frame is a per-node constant —
+    # see NodeGeometry._rx_frame, which memoises it.  The delay and the
+    # bisector then share one computation of the two target→station ranges
+    # instead of taking them twice.
+    tx_enu, d_bl, cos_rx = geo._rx_frame
+    rx_enu = (0.0, 0.0, 0.0)
+    target_enu = _lla_to_enu(lat, lon, alt_km, geo.rx_lat, geo.rx_lon, geo.rx_alt_km, cos_rx)
+    d_tx, d_rx = _ranges_to_stations(target_enu, tx_enu, rx_enu)
+    delay_us = _delay_from_ranges(d_tx, d_rx, d_bl)
+    b = _bisector_from_ranges(target_enu, tx_enu, rx_enu, d_tx, d_rx)
     v_dot_b = vel_east_ms * b[0] + vel_north_ms * b[1] + vel_up_ms * b[2]
     doppler_hz = v_dot_b * geo.fc_hz / (C_KM_S * 1000.0)
     return delay_us, doppler_hz
@@ -662,12 +768,18 @@ def compute_overlap_zone(
             doppler_gate_hz=doppler_gate_hz,
         )
 
+    # Each node's RX→TX baseline length is fixed for the whole grid, so it is
+    # normed once here rather than inside _bistatic_delay_at at every one of
+    # the ~16 000 points.
+    d_bl_a = _norm((rx_a_enu[0] - tx_a_enu[0], rx_a_enu[1] - tx_a_enu[1], rx_a_enu[2] - tx_a_enu[2]))
+    d_bl_b = _norm((rx_b_enu[0] - tx_b_enu[0], rx_b_enu[1] - tx_b_enu[1], rx_b_enu[2] - tx_b_enu[2]))
+
     for alt_km in altitudes_km:
         for east, north, lat, lon in columns:
             # Calculate bistatic delay at each node
             target_enu = (east, north, alt_km)
-            delay_a = _bistatic_delay_at(target_enu, tx_a_enu, rx_a_enu)
-            delay_b = _bistatic_delay_at(target_enu, tx_b_enu, rx_b_enu)
+            delay_a = _bistatic_delay_at(target_enu, tx_a_enu, rx_a_enu, d_bl_a)
+            delay_b = _bistatic_delay_at(target_enu, tx_b_enu, rx_b_enu, d_bl_b)
 
             # Range limit, applied on the differential range the node is
             # actually bounded by rather than on distance from the RX.  The
