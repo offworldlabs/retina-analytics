@@ -576,3 +576,6 @@ def test_has_full_geometry_requires_both_sides():
     assert has_full_geometry({**full, "rx_lat": 0.0, "rx_lon": 0.0}) is False
     # The equator and the prime meridian are each fine on their own.
     assert has_full_geometry({**full, "rx_lat": 0.0}) is True
+    # The sentinel check is receiver-only: a transmitter at (0, 0) is a real
+    # pair, not the legacy default, so it does not read as unset.
+    assert has_full_geometry({**full, "tx_lat": 0.0, "tx_lon": 0.0}) is True

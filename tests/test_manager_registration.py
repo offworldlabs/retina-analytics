@@ -252,6 +252,7 @@ def test_registration_without_geometry_does_not_raise(overrides):
     assert "n1" in m.trust_scores
     assert "n1" in m.reputations
     assert "n1" not in m.detection_areas
+    assert "n1" not in m.empirical_coverages
 
 
 def test_positionless_summary_omits_detection_area():
@@ -281,3 +282,4 @@ def test_losing_geometry_drops_a_stale_detection_area():
     assert "n1" in m.detection_areas
     m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))
     assert "n1" not in m.detection_areas
+    assert "n1" in m.empirical_coverages  # retained, not popped: see the guard's comment

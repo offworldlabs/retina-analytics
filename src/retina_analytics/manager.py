@@ -145,10 +145,13 @@ class NodeAnalyticsManager:
         # map, since get_node_summary omits the key and the map only draws a
         # marker for a node that has one.
         if not has_full_geometry(config):
-            # A node that had geometry and lost it must not keep a stale
-            # footprint. Empirical coverage is deliberately left alone: it is
-            # never read without a detection area, and the moved/rule_changed
-            # checks below revalidate it if the node is positioned again.
+            # Popping the detection area is what keeps a node that lost its
+            # geometry off the map, since the map draws neither marker nor
+            # polygon without a detection area. The empirical polygon is left
+            # alone even though get_node_summary still serves it independently
+            # of the detection area: it is deliberately kept so the
+            # moved/rule_changed checks below revalidate it if the node is
+            # positioned again.
             self.detection_areas.pop(node_id, None)
             return
 

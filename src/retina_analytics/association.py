@@ -1234,8 +1234,8 @@ class InterNodeAssociator:
         Reconnecting nodes skip the expensive O(n²) overlap recomputation
         as long as their geometry (RX/TX position) hasn't changed.
 
-        A node whose config carries no receiver position is registered but takes
-        no part in overlap — see has_full_geometry.
+        A node whose config lacks either end of the bistatic pair is
+        registered but takes no part in overlap: see has_full_geometry.
         """
         positioned = has_full_geometry(config)
         rx_alt_km = (config.get("rx_alt_ft") or 0) * 0.3048 / 1000.0
@@ -1349,7 +1349,7 @@ class InterNodeAssociator:
                 setattr(self, name, 0)
 
     def _is_positioned(self, node_id: str) -> bool:
-        """Whether a registered node has a receiver position to pair against."""
+        """Whether a registered node has both ends of its geometry to pair against."""
         return has_full_geometry(self.node_configs.get(node_id, {}))
 
     def _drop_zones_for(self, node_id: str) -> int:
