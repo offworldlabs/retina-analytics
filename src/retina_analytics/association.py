@@ -45,6 +45,7 @@ from retina_analytics.constants import (
     KM_PER_DEG_LAT,
     R_EARTH,
     bistatic_max_radius_km,
+    has_full_geometry,
     km_per_deg_lon,
     offset_latlon_m,
     resolve_beam_azimuth_deg,
@@ -913,22 +914,6 @@ def _coord(config: dict, key: str) -> float:
     return float(config.get(key) or 0.0)
 
 
-def _has_receiver_position(config: dict) -> bool:
-    """Whether this config says where the receiver actually is.
-
-    Absent coordinates default to (0, 0), a point in the Gulf of Guinea that no
-    node occupies.  Every node registered without a position therefore lands on
-    one footprint and overlaps every other completely — a pairing that is both
-    fictitious and, being total, the densest and most expensive grid the pair
-    can produce.  A fleet registered that way makes the neighbour graph
-    complete, which the multinode solver sees as one enormous candidate.
-
-    Only the exact (0, 0) pair reads as absent.  The equator and the prime
-    meridian are each perfectly good coordinates on their own.
-    """
-    return not (_coord(config, "rx_lat") == 0.0 and _coord(config, "rx_lon") == 0.0)
-
-
 def _merge_epochs_multi(histories: list[tuple[str, list[dict]]]) -> list:
     """N-node generalisation of _merge_epochs, same output shape.
 
@@ -1250,9 +1235,9 @@ class InterNodeAssociator:
         as long as their geometry (RX/TX position) hasn't changed.
 
         A node whose config carries no receiver position is registered but takes
-        no part in overlap — see _has_receiver_position.
+        no part in overlap — see has_full_geometry.
         """
-        positioned = _has_receiver_position(config)
+        positioned = has_full_geometry(config)
         rx_alt_km = (config.get("rx_alt_ft") or 0) * 0.3048 / 1000.0
         tx_alt_km = (config.get("tx_alt_ft") or 0) * 0.3048 / 1000.0
 
@@ -1365,7 +1350,7 @@ class InterNodeAssociator:
 
     def _is_positioned(self, node_id: str) -> bool:
         """Whether a registered node has a receiver position to pair against."""
-        return _has_receiver_position(self.node_configs.get(node_id, {}))
+        return has_full_geometry(self.node_configs.get(node_id, {}))
 
     def _drop_zones_for(self, node_id: str) -> int:
         """Remove every overlap zone and adjacency entry naming this node.

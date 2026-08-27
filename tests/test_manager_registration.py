@@ -2,6 +2,8 @@
 
 import os
 
+import pytest
+
 from retina_analytics.constants import KM_PER_DEG_LAT, bearing_deg
 from retina_analytics.manager import NodeAnalyticsManager
 
@@ -213,3 +215,69 @@ def test_schema_survives_a_save_load_round_trip(tmp_path):
     with open(path, "w") as f:
         json.dump(d, f)
     assert EmpiricalCoverageState.load_from_file(path).schema == 1
+
+
+# ── Registration without geometry ────────────────────────────────────────────
+
+_POSITIONED = {
+    "rx_lat": 34.85,
+    "rx_lon": -82.39,
+    "rx_alt_ft": 900.0,
+    "tx_lat": 34.90,
+    "tx_lon": -82.45,
+    "tx_alt_ft": 1200.0,
+    "fc_hz": 195e6,
+    "beam_width_deg": None,
+    "beam_azimuth_deg": None,
+}
+
+
+def _cfg(**overrides):
+    return {**_POSITIONED, **overrides}
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"rx_lat": None, "rx_lon": None},
+        {"tx_lat": None, "tx_lon": None},
+        {"rx_lat": None, "rx_lon": None, "tx_lat": None, "tx_lon": None},
+    ],
+    ids=["no-rx", "no-tx", "neither"],
+)
+def test_registration_without_geometry_does_not_raise(overrides):
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg(**overrides))
+    assert "n1" in m.metrics
+    assert "n1" in m.trust_scores
+    assert "n1" in m.reputations
+    assert "n1" not in m.detection_areas
+
+
+def test_positionless_summary_omits_detection_area():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))
+    summary = m.get_node_summary("n1")
+    assert "detection_area" not in summary
+    assert "metrics" in summary
+
+
+def test_null_altitude_still_positions_the_node():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg(rx_alt_ft=None, tx_alt_ft=None))
+    assert "n1" in m.detection_areas
+
+
+def test_frames_are_counted_for_a_positionless_node():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))
+    assert m.record_detection_frame("n1", {"timestamp": 1.0, "detections": []}) is True
+    assert m.metrics["n1"].total_frames == 1
+
+
+def test_losing_geometry_drops_a_stale_detection_area():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg())
+    assert "n1" in m.detection_areas
+    m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))
+    assert "n1" not in m.detection_areas

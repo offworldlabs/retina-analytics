@@ -189,6 +189,28 @@ def resolve_beam_azimuth_deg(config, rx_lat, rx_lon, tx_lat, tx_lon):
     return (bearing_deg(rx_lat, rx_lon, tx_lat, tx_lon) + 90.0) % 360.0
 
 
+_GEOMETRY_KEYS = ("rx_lat", "rx_lon", "tx_lat", "tx_lon")
+
+
+def has_full_geometry(config: dict) -> bool:
+    """Whether this config places both ends of the bistatic pair.
+
+    Both are needed: the beam points broadside to the RX->TX baseline and every
+    footprint has foci at RX and TX, so one missing side leaves a node
+    unplaceable rather than approximately placed.
+
+    Absent and null read alike, and so does the legacy (0, 0) sentinel that
+    absent coordinates used to default to. No node occupies the Gulf of Guinea,
+    and a fleet defaulted there overlaps completely, which makes the neighbour
+    graph complete and the solver's candidates pure artefact. Only the exact
+    pair reads as unset: the equator and the prime meridian are each perfectly
+    good coordinates on their own.
+    """
+    if any(config.get(key) is None for key in _GEOMETRY_KEYS):
+        return False
+    return not (float(config["rx_lat"]) == 0.0 and float(config["rx_lon"]) == 0.0)
+
+
 def resolve_beam_width_deg(config):
     """Resolve a node's beam width (deg), defaulting to the nominal Yagi spec.
 

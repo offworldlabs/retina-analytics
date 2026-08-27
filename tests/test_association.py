@@ -13,7 +13,7 @@ from retina_analytics.association import (
     compute_overlap_zone,
     predict_observation,
 )
-from retina_analytics.constants import C_KM_S, C_KM_US, R_EARTH
+from retina_analytics.constants import C_KM_S, C_KM_US, R_EARTH, has_full_geometry
 
 # ── Overlap zone & bistatic delay ────────────────────────────────────────────
 
@@ -561,3 +561,18 @@ class TestFootprintRadiusMemoisation:
         assert geo.effective_radius_km == pytest.approx(50.0)  # footprint still wider
         geo.fov.reach = 85.0
         assert geo.effective_radius_km == pytest.approx(85.0)
+
+
+# ── has_full_geometry ─────────────────────────────────────────────────────────
+
+
+def test_has_full_geometry_requires_both_sides():
+    full = {"rx_lat": 34.85, "rx_lon": -82.39, "tx_lat": 34.90, "tx_lon": -82.45}
+    assert has_full_geometry(full) is True
+    assert has_full_geometry({**full, "tx_lat": None}) is False
+    assert has_full_geometry({**full, "rx_lon": None}) is False
+    assert has_full_geometry({}) is False
+    # The legacy sentinel: absent coordinates used to default to (0, 0).
+    assert has_full_geometry({**full, "rx_lat": 0.0, "rx_lon": 0.0}) is False
+    # The equator and the prime meridian are each fine on their own.
+    assert has_full_geometry({**full, "rx_lat": 0.0}) is True

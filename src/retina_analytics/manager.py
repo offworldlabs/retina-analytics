@@ -9,6 +9,7 @@ from retina_analytics.constants import (
     YAGI_BEAM_WIDTH_DEG,
     YAGI_MAX_RANGE_KM,
     bearing_deg,
+    has_full_geometry,
     haversine_km,
     resolve_beam_azimuth_deg,
     resolve_beam_width_deg,
@@ -116,25 +117,6 @@ class NodeAnalyticsManager:
         if node_id not in self.trust_scores:
             self.trust_scores[node_id] = TrustScoreState(node_id=node_id)
 
-        rx_lat = config.get("rx_lat", 0)
-        rx_lon = config.get("rx_lon", 0)
-        tx_lat = config.get("tx_lat", 0)
-        tx_lon = config.get("tx_lon", 0)
-        # Honour an explicit aim if the config supplies one; else broadside.
-        beam_az = resolve_beam_azimuth_deg(config, rx_lat, rx_lon, tx_lat, tx_lon)
-        self.detection_areas[node_id] = DetectionAreaState(
-            node_id=node_id,
-            rx_lat=rx_lat,
-            rx_lon=rx_lon,
-            tx_lat=tx_lat,
-            tx_lon=tx_lon,
-            fc_hz=config.get("fc_hz", config.get("FC", 195e6)),
-            beam_azimuth_deg=beam_az,
-            beam_width_deg=resolve_beam_width_deg(config),
-            max_range_km=config.get("max_range_km", YAGI_MAX_RANGE_KM),
-            max_bistatic_range_km=config.get("max_bistatic_range_km"),
-        )
-
         # Preserve accumulated metrics across reconnects.  Every other
         # per-node store here is conditional, but this one was replaced
         # unconditionally — a reconnect wiped total_frames / SNR / gap
@@ -153,6 +135,41 @@ class NodeAnalyticsManager:
 
         if node_id not in self.coverage_maps:
             self.coverage_maps[node_id] = HistoricalCoverageMap(node_id=node_id)
+
+        # Identity, metrics and reputation are above and unconditional: a node
+        # we cannot place is still a node that is working, and its frames are
+        # counted through `metrics` membership in record_detection_frame.
+        #
+        # Geometry is undefined without both coordinate pairs, so everything
+        # below is skipped. No detection area is what keeps such a node off the
+        # map, since get_node_summary omits the key and the map only draws a
+        # marker for a node that has one.
+        if not has_full_geometry(config):
+            # A node that had geometry and lost it must not keep a stale
+            # footprint. Empirical coverage is deliberately left alone: it is
+            # never read without a detection area, and the moved/rule_changed
+            # checks below revalidate it if the node is positioned again.
+            self.detection_areas.pop(node_id, None)
+            return
+
+        rx_lat = config["rx_lat"]
+        rx_lon = config["rx_lon"]
+        tx_lat = config["tx_lat"]
+        tx_lon = config["tx_lon"]
+        # Honour an explicit aim if the config supplies one; else broadside.
+        beam_az = resolve_beam_azimuth_deg(config, rx_lat, rx_lon, tx_lat, tx_lon)
+        self.detection_areas[node_id] = DetectionAreaState(
+            node_id=node_id,
+            rx_lat=rx_lat,
+            rx_lon=rx_lon,
+            tx_lat=tx_lat,
+            tx_lon=tx_lon,
+            fc_hz=config.get("fc_hz", config.get("FC", 195e6)),
+            beam_azimuth_deg=beam_az,
+            beam_width_deg=resolve_beam_width_deg(config),
+            max_range_km=config.get("max_range_km", YAGI_MAX_RANGE_KM),
+            max_bistatic_range_km=config.get("max_bistatic_range_km"),
+        )
 
         # Recreate empirical coverage when the node is new OR its RX moved — node
         # IDs are reused across fleet regenerations at different positions, so a
