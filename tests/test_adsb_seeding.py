@@ -428,7 +428,66 @@ class TestAdsbSeedReset:
             "adsb_tracklets_tagged",
             "adsb_seed_no_state",
             "adsb_seed_gate_rejects",
+            "adsb_seed_world_rejects",
             "adsb_tracklets_excluded",
             "adsb_inputs_emitted",
         ):
             assert getattr(a, name) == 0
+
+
+class TestSeedWorldGate:
+    """A tagged state from the other world is no verification target.
+
+    The provider's cache is keyed by bare hex and mixes simulated
+    transponders with real traffic, so a hex collision hands the wrong
+    world's fix to the tag check — and the residual gates are two numbers a
+    wrong aircraft can pass by coincidence.  Fail-open in every unknown
+    case: only a positive world mismatch rejects."""
+
+    def _seed_round(self, st, node_world_provider=None):
+        kw = {"adsb_seed_mode": "active", "adsb_provider": lambda: {"abc123": st}}
+        if node_world_provider is not None:
+            kw["node_world_provider"] = node_world_provider
+        a = _assoc(**kw)
+        a._pending_tracks["site-a"] = [_view("a1", _NODE_A, "abc123")]
+        round_ = a.submit_tracks_round("site-b", [_view("b1", _NODE_B, "abc123")], 2000)
+        return a, round_
+
+    def test_cross_world_state_rejects_and_fails_open(self):
+        st = _adsb_state("abc123")
+        st["world"] = "real"
+        a, round_ = self._seed_round(st, node_world_provider=lambda nid: "sim")
+
+        assert a.adsb_seed_world_rejects == 2  # both round nodes' tags
+        assert round_.adsb_inputs == []
+        assert len(round_.pairs) == 1  # tracklets stay in dark pairing
+
+    def test_same_world_state_still_seeds(self):
+        st = _adsb_state("abc123")
+        st["world"] = "sim"
+        a, round_ = self._seed_round(st, node_world_provider=lambda nid: "sim")
+
+        assert a.adsb_seed_world_rejects == 0
+        assert len(round_.adsb_inputs) == 1
+
+    def test_untagged_state_is_not_gated(self):
+        a, round_ = self._seed_round(_adsb_state("abc123"), node_world_provider=lambda nid: "sim")
+
+        assert a.adsb_seed_world_rejects == 0
+        assert len(round_.adsb_inputs) == 1
+
+    def test_unknown_node_world_is_not_gated(self):
+        st = _adsb_state("abc123")
+        st["world"] = "real"
+        a, round_ = self._seed_round(st, node_world_provider=lambda nid: None)
+
+        assert a.adsb_seed_world_rejects == 0
+        assert len(round_.adsb_inputs) == 1
+
+    def test_no_provider_ignores_world_tags(self):
+        st = _adsb_state("abc123")
+        st["world"] = "real"
+        a, round_ = self._seed_round(st)
+
+        assert a.adsb_seed_world_rejects == 0
+        assert len(round_.adsb_inputs) == 1

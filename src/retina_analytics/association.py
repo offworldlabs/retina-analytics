@@ -1016,6 +1016,7 @@ class InterNodeAssociator:
         adsb_seed_doppler_gate_hz: float = ADSB_SEED_DOPPLER_GATE_HZ,
         adsb_seed_max_dr_age_s: float = ADSB_SEED_MAX_DR_AGE_S,
         adsb_provider=None,
+        node_world_provider=None,
     ):
         self.delay_gate_us = delay_gate_us
         self.doppler_gate_hz = doppler_gate_hz
@@ -1222,11 +1223,20 @@ class InterNodeAssociator:
         # the LIB applies freshness and gating, so the offline bench
         # measures shipped filtering.
         self.adsb_provider = adsb_provider
+        # node_id → "sim" | "real" | None.  The provider's cache mixes
+        # simulated transponders with real traffic over one footprint, and a
+        # node's echoes can only ever be of aircraft from its own world — so
+        # a tagged state from the other world is verified-looking noise (a
+        # hex collision, a mis-tag) whatever its residuals say.  Optional and
+        # fail-open in both directions: no provider, or an unknown world on
+        # either side, changes nothing.
+        self.node_world_provider = node_world_provider
         # Counters — plain += like the claiming ones above.
         self.adsb_seed_rounds: int = 0
         self.adsb_tracklets_tagged: int = 0
         self.adsb_seed_no_state: int = 0
         self.adsb_seed_gate_rejects: int = 0
+        self.adsb_seed_world_rejects: int = 0
         self.adsb_tracklets_excluded: int = 0
         self.adsb_inputs_emitted: int = 0
 
@@ -1347,6 +1357,7 @@ class InterNodeAssociator:
                 "adsb_tracklets_tagged",
                 "adsb_seed_no_state",
                 "adsb_seed_gate_rejects",
+                "adsb_seed_world_rejects",
                 "adsb_tracklets_excluded",
                 "adsb_inputs_emitted",
             ):
@@ -1472,6 +1483,18 @@ class InterNodeAssociator:
             if nid in self.node_geometries:
                 round_nodes[nid] = self._pending_tracks.get(nid) or []
 
+        # Which world each round node's echoes come from, resolved once per
+        # round.  A state tagged with the other world is no verification
+        # target for that node's tracklet, whatever its residuals say — the
+        # cache is keyed by bare hex, so a simulated hex colliding with a
+        # real one hands the wrong world's fix to the tag check.  None on
+        # either side (no provider, unknown node, untagged state) disables
+        # the comparison, never the tracklet.
+        world_of: dict[str, object] = {}
+        if self.node_world_provider is not None:
+            for nid in round_nodes:
+                world_of[nid] = self.node_world_provider(nid)
+
         # Best-scoring match per (hex, node_id) — step 4: two tracklets at
         # one node both verifying against the same hex, the loser is NOT
         # tagged (it may be a coincidentally-gating distinct target).
@@ -1494,6 +1517,11 @@ class InterNodeAssociator:
                 st = states.get(hexn)
                 if st is None or st.get("lat") is None or st.get("lon") is None:
                     self.adsb_seed_no_state += 1
+                    continue
+                st_world = st.get("world")
+                node_world = world_of.get(nid)
+                if st_world is not None and node_world is not None and st_world != node_world:
+                    self.adsb_seed_world_rejects += 1
                     continue
                 dt = float(last["t_s"]) - st.get("timestamp_ms", 0) / 1000.0
                 if abs(dt) > self.adsb_seed_max_dr_age_s:
