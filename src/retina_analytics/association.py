@@ -1314,6 +1314,12 @@ class InterNodeAssociator:
                 if zone.delay_pairs:  # only real overlaps, not geographic misses
                     self._neighbors.setdefault(node_id, set()).add(existing_id)
                     self._neighbors.setdefault(existing_id, set()).add(node_id)
+                else:
+                    # A relocated node may no longer overlap a former
+                    # neighbour; leaving the adjacency in place would occupy a
+                    # slot in the capped neighbour rotation forever.
+                    self._neighbors.get(node_id, set()).discard(existing_id)
+                    self._neighbors.get(existing_id, set()).discard(node_id)
 
             self.node_geometries[node_id] = geo
 

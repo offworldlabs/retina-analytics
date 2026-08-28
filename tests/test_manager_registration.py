@@ -315,3 +315,73 @@ def test_reregistration_that_gains_geometry_invalidates_the_summary_cache():
     m.register_node("n1", _cfg())
 
     assert "detection_area" in m.get_all_summaries()["n1"]
+
+
+# ── Cache invalidation must track actual content changes ─────────────────────
+#
+# get_all_summaries/get_cross_node_analysis are memoised for _ANALYSIS_CACHE_TTL
+# seconds. The server calls register_node on every TCP reconnect regardless of
+# whether the config changed, so invalidating unconditionally defeats the cache;
+# never invalidating a node's first-ever appearance leaves it missing from
+# summaries for up to a minute.
+
+
+def test_byte_identical_resend_does_not_invalidate_the_summary_cache():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg())
+    first = m.get_all_summaries()
+
+    m.register_node("n1", _cfg())  # same object contents, e.g. a TCP reconnect
+
+    assert m.get_all_summaries() is first
+
+
+def test_byte_identical_resend_does_not_invalidate_the_cross_node_cache():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg())
+    m.register_node("n2", _cfg(rx_lat=_RX_LAT + 0.05, rx_lon=_RX_LON + 0.05))
+    first = m.get_cross_node_analysis()
+
+    m.register_node("n1", _cfg())
+
+    assert m.get_cross_node_analysis() is first
+
+
+def test_first_positionless_registration_invalidates_the_summary_cache():
+    """The node just joined trust_scores/metrics/reputations/coverage_maps, so
+    it belongs in get_all_summaries immediately, not after the TTL expires."""
+    m = NodeAnalyticsManager()
+    m.register_node("n0", _cfg())
+    first = m.get_all_summaries()
+    assert "n1" not in first
+
+    m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))  # first-ever, no geometry
+
+    summaries = m.get_all_summaries()
+    assert summaries is not first
+    assert "n1" in summaries
+
+
+def test_repeat_positionless_resend_does_not_invalidate_the_summary_cache():
+    """Unlike the first registration above, a node already known to the
+    manager that reconnects still positionless changes nothing a summary
+    holds."""
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))
+    first = m.get_all_summaries()
+
+    m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))
+
+    assert m.get_all_summaries() is first
+
+
+def test_relocation_invalidates_the_summary_cache():
+    """A genuine geometry change, distinct from gaining or losing geometry
+    entirely, must still invalidate the cache."""
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg())
+    first = m.get_all_summaries()
+
+    m.register_node("n1", _cfg(rx_lat=_RX_LAT + 0.01))  # ~1.1 km move
+
+    assert m.get_all_summaries() is not first

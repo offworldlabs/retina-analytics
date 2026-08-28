@@ -114,7 +114,12 @@ class NodeAnalyticsManager:
             self._register_node_locked(node_id, config)
 
     def _register_node_locked(self, node_id: str, config: dict):
-        if node_id not in self.trust_scores:
+        # trust_scores is the first store this method ever populates for a
+        # node id (below) and retire_node is the only thing that removes it,
+        # so membership here is whether the manager has seen this node before
+        # at all, which decides cache invalidation on the positionless path.
+        is_new_node = node_id not in self.trust_scores
+        if is_new_node:
             self.trust_scores[node_id] = TrustScoreState(node_id=node_id)
 
         # Preserve accumulated metrics across reconnects.  Every other
@@ -145,9 +150,12 @@ class NodeAnalyticsManager:
         # map, since get_node_summary omits the key and the map only draws a
         # marker for a node that has one.
         if not has_full_geometry(config):
-            # A detection area from a previous positioned registration is
-            # dropped here.
-            if self.detection_areas.pop(node_id, None) is not None:
+            # Invalidate exactly when this changes what a summary holds: a
+            # detection area from a previous positioned registration is
+            # dropped here, or the node id itself is new to get_all_summaries
+            # (trust/metrics/reputation/coverage_map were just populated above).
+            had_area = self.detection_areas.pop(node_id, None) is not None
+            if is_new_node or had_area:
                 self._invalidate_analysis_caches()
             return
 
@@ -157,6 +165,26 @@ class NodeAnalyticsManager:
         tx_lon = config["tx_lon"]
         # Honour an explicit aim if the config supplies one; else broadside.
         beam_az = resolve_beam_azimuth_deg(config, rx_lat, rx_lon, tx_lat, tx_lon)
+        beam_width = resolve_beam_width_deg(config)
+        max_range_km = config.get("max_range_km", YAGI_MAX_RANGE_KM)
+        max_bistatic_range_km = config.get("max_bistatic_range_km")
+
+        # A summary's detection_area/empirical_coverage content is fully
+        # determined by these fields (DetectionAreaState.summary()), so a
+        # reconnect that repeats them changes nothing a cache holds. Mirrors
+        # InterNodeAssociator.register_node's unchanged-geometry check.
+        existing_da = self.detection_areas.get(node_id)
+        geometry_unchanged = existing_da is not None and (
+            abs(existing_da.rx_lat - rx_lat) < 1e-6
+            and abs(existing_da.rx_lon - rx_lon) < 1e-6
+            and abs(existing_da.tx_lat - tx_lat) < 1e-6
+            and abs(existing_da.tx_lon - tx_lon) < 1e-6
+            and abs(existing_da.max_range_km - max_range_km) < 1e-4
+            and abs(existing_da.beam_azimuth_deg - beam_az) < 1e-4
+            and abs(existing_da.beam_width_deg - beam_width) < 1e-4
+            and existing_da.max_bistatic_range_km == max_bistatic_range_km
+        )
+
         self.detection_areas[node_id] = DetectionAreaState(
             node_id=node_id,
             rx_lat=rx_lat,
@@ -165,9 +193,9 @@ class NodeAnalyticsManager:
             tx_lon=tx_lon,
             fc_hz=config.get("fc_hz", config.get("FC", 195e6)),
             beam_azimuth_deg=beam_az,
-            beam_width_deg=resolve_beam_width_deg(config),
-            max_range_km=config.get("max_range_km", YAGI_MAX_RANGE_KM),
-            max_bistatic_range_km=config.get("max_bistatic_range_km"),
+            beam_width_deg=beam_width,
+            max_range_km=max_range_km,
+            max_bistatic_range_km=max_bistatic_range_km,
         )
 
         # Recreate empirical coverage when the node is new OR its RX moved — node
@@ -175,7 +203,7 @@ class NodeAnalyticsManager:
         # persisted polygon from the old location would otherwise be served for
         # the new one (stale, beam-mismatched, collapsed).
         ec = self.empirical_coverages.get(node_id)
-        cfg_max_range = config.get("max_range_km", YAGI_MAX_RANGE_KM)
+        cfg_max_range = max_range_km
         moved = ec is not None and haversine_km(ec.rx_lat, ec.rx_lon, rx_lat, rx_lon) > _RX_RELOCATE_THRESHOLD_KM
         # A change in the *range rule* invalidates the accumulated polygon just
         # as surely as the RX physically moving: switching a node from a
@@ -189,7 +217,7 @@ class NodeAnalyticsManager:
         # *keeps* accumulated calibration (see the else branch) because it only
         # moves the clamp; switching range rules changes the footprint's shape,
         # which is a different thing.
-        cfg_bistatic = config.get("max_bistatic_range_km")
+        cfg_bistatic = max_bistatic_range_km
         rule_changed = ec is not None and getattr(ec, "max_bistatic_range_km", None) != cfg_bistatic
         # A polygon accumulated under an older calibration input is discarded on
         # the same footing.  The bistatic key cannot catch this one: switching
@@ -238,9 +266,12 @@ class NodeAnalyticsManager:
             # not the evidence.
             ec.prior_azimuth_deg, ec.prior_width_deg = prior_az, prior_width
 
-        # Reaching here always replaced detection_areas[node_id] above, so the
-        # cached summaries and cross-node analysis are stale.
-        self._invalidate_analysis_caches()
+        # detection_areas[node_id] was replaced above regardless, but a cache
+        # only actually goes stale when geometry_unchanged is False: a repeat
+        # registration of the same geometry (e.g. every TCP reconnect) must
+        # not defeat the cache.
+        if not geometry_unchanged:
+            self._invalidate_analysis_caches()
 
     def coverage_limit_for(self, node_id: str):
         """A bearing → observed-limit-km callable for one node, or None.
