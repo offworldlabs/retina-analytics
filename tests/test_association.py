@@ -9,6 +9,7 @@ from retina_analytics.association import (
     InterNodeAssociator,
     NodeGeometry,
     _bistatic_delay_at,
+    _coord,
     _lla_to_enu,
     compute_overlap_zone,
     predict_observation,
@@ -666,3 +667,28 @@ def test_has_full_geometry_rejects_bool():
     full = {"rx_lat": 34.85, "rx_lon": -82.39, "tx_lat": 34.90, "tx_lon": -82.45}
     assert has_full_geometry({**full, "rx_lat": True}) is False
     assert has_full_geometry({**full, "rx_lat": False}) is False
+
+
+# ── _coord ─────────────────────────────────────────────────────────────────
+
+
+def test_coord_is_total_never_raises():
+    """_coord builds a geometry object for a node has_full_geometry has
+    already ruled unpositioned, so a junk coordinate must default to 0.0
+    rather than raise."""
+    assert _coord({"rx_lat": "not a number"}, "rx_lat") == 0.0
+    assert _coord({"rx_lat": None}, "rx_lat") == 0.0
+    assert _coord({}, "rx_lat") == 0.0
+    assert _coord({"rx_lat": float("nan")}, "rx_lat") == 0.0
+    assert _coord({"rx_lat": float("inf")}, "rx_lat") == 0.0
+    assert _coord({"rx_lat": True}, "rx_lat") == 0.0
+    assert _coord({"rx_lat": 0}, "rx_lat") == 0.0
+    assert _coord({"rx_lat": 34.85}, "rx_lat") == 34.85
+
+
+def test_coord_does_not_overflow_on_a_huge_int():
+    """_is_real_coordinate accepts a huge int as finite without converting it
+    (see test_has_full_geometry_is_total_never_raises), but _coord must
+    itself produce a float, and converting one this large would raise
+    OverflowError."""
+    assert _coord({"rx_lat": 10**400}, "rx_lat") == 0.0

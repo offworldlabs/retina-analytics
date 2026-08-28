@@ -44,6 +44,7 @@ from retina_analytics.constants import (
     C_KM_US,
     KM_PER_DEG_LAT,
     R_EARTH,
+    _is_real_coordinate,
     bistatic_max_radius_km,
     has_full_geometry,
     km_per_deg_lon,
@@ -906,12 +907,25 @@ def _merge_epochs(hist_a: list, node_a_id: str, hist_b: list, node_b_id: str) ->
 
 
 def _coord(config: dict, key: str) -> float:
-    """A latitude/longitude from a config, absent or explicitly null reading 0.0.
+    """A latitude/longitude from a config, defaulting to 0.0 for anything that
+    is not a real finite number.
 
-    `config.get(key, 0)` is not enough: a v1 registration may carry the key with
-    a null value, and None then reaches the geodesy as a float.
+    `config.get(key, 0)` is not enough: a v1 registration may carry the key
+    with a null value, and None then reaches the geodesy as a float. Total,
+    like has_full_geometry (reusing its _is_real_coordinate): this builds a
+    geometry object for a node has_full_geometry has already ruled
+    unpositioned, so it must not raise on a non-numeric value either. An int
+    _is_real_coordinate accepts can still be too large to convert to float
+    (OverflowError), which the identity check alone cannot catch, since it
+    deliberately never performs that conversion.
     """
-    return float(config.get(key) or 0.0)
+    value = config.get(key)
+    if not _is_real_coordinate(value):
+        return 0.0
+    try:
+        return float(value)
+    except OverflowError:
+        return 0.0
 
 
 def _merge_epochs_multi(histories: list[tuple[str, list[dict]]]) -> list:

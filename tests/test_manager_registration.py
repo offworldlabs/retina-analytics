@@ -385,3 +385,52 @@ def test_relocation_invalidates_the_summary_cache():
     m.register_node("n1", _cfg(rx_lat=_RX_LAT + 0.01))  # ~1.1 km move
 
     assert m.get_all_summaries() is not first
+
+
+# ── DetectionAreaState is preserved across an unchanged reconnect ────────────
+#
+# A rebuild is skipped when nothing DetectionAreaState is built from has
+# changed, the same way the metrics store above is preserved rather than
+# replaced: a rebuild resets n_detections and the delay/doppler bounds back to
+# defaults, which a reconnect that changed nothing has no reason to do.
+
+
+def test_byte_identical_resend_preserves_detection_area_state():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg())
+    da = m.detection_areas["n1"]
+    da.update(delay=12.3, doppler=45.6)
+    assert da.n_detections == 1
+
+    m.register_node("n1", _cfg())  # same object contents, e.g. a TCP reconnect
+
+    assert m.detection_areas["n1"] is da  # not rebuilt
+    assert m.detection_areas["n1"].n_detections == 1  # accumulated state kept
+
+
+def test_relocation_replaces_detection_area_state():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg())
+    da = m.detection_areas["n1"]
+    da.update(delay=12.3, doppler=45.6)
+
+    m.register_node("n1", _cfg(rx_lat=_RX_LAT + 0.01))  # ~1.1 km move
+
+    assert m.detection_areas["n1"] is not da
+    assert m.detection_areas["n1"].n_detections == 0
+
+
+def test_beam_width_only_change_still_rebuilds_detection_area_state():
+    """Unchanged means unchanged in every field DetectionAreaState is built
+    from, not just position: a node retuning only its beam width must still
+    get a rebuild that reflects the new width."""
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg(beam_width_deg=41.0))
+    da = m.detection_areas["n1"]
+    da.update(delay=12.3, doppler=45.6)
+
+    m.register_node("n1", _cfg(beam_width_deg=30.0))
+
+    assert m.detection_areas["n1"] is not da
+    assert m.detection_areas["n1"].beam_width_deg == 30.0
+    assert m.detection_areas["n1"].n_detections == 0

@@ -168,13 +168,22 @@ class NodeAnalyticsManager:
         beam_width = resolve_beam_width_deg(config)
         max_range_km = config.get("max_range_km", YAGI_MAX_RANGE_KM)
         max_bistatic_range_km = config.get("max_bistatic_range_km")
+        fc_hz = config.get("fc_hz", config.get("FC", 195e6))
 
-        # A summary's detection_area/empirical_coverage content is fully
-        # determined by these fields (DetectionAreaState.summary()), so a
-        # reconnect that repeats them changes nothing a cache holds. Mirrors
-        # InterNodeAssociator.register_node's unchanged-geometry check.
+        # Every field DetectionAreaState is built from, compared against what
+        # it already holds. Unchanged means a reconnect would rebuild a
+        # byte-identical object, so the rebuild (and the reset of its
+        # accumulated n_detections/delay/doppler bounds/furthest_detections
+        # back to defaults) is skipped, the same way the metrics store above
+        # is preserved across a reconnect rather than replaced. Mirrors
+        # InterNodeAssociator.register_node's unchanged-geometry check, but
+        # that check omits fc_hz deliberately, because it always records the
+        # fresh config in node_configs regardless of the early return, so a
+        # changed fc_hz is never lost there even when NodeGeometry keeps its
+        # old one. Nothing here plays that role for detection_areas, so fc_hz
+        # has to be part of the comparison instead.
         existing_da = self.detection_areas.get(node_id)
-        geometry_unchanged = existing_da is not None and (
+        detection_area_unchanged = existing_da is not None and (
             abs(existing_da.rx_lat - rx_lat) < 1e-6
             and abs(existing_da.rx_lon - rx_lon) < 1e-6
             and abs(existing_da.tx_lat - tx_lat) < 1e-6
@@ -183,20 +192,22 @@ class NodeAnalyticsManager:
             and abs(existing_da.beam_azimuth_deg - beam_az) < 1e-4
             and abs(existing_da.beam_width_deg - beam_width) < 1e-4
             and existing_da.max_bistatic_range_km == max_bistatic_range_km
+            and existing_da.fc_hz == fc_hz
         )
 
-        self.detection_areas[node_id] = DetectionAreaState(
-            node_id=node_id,
-            rx_lat=rx_lat,
-            rx_lon=rx_lon,
-            tx_lat=tx_lat,
-            tx_lon=tx_lon,
-            fc_hz=config.get("fc_hz", config.get("FC", 195e6)),
-            beam_azimuth_deg=beam_az,
-            beam_width_deg=beam_width,
-            max_range_km=max_range_km,
-            max_bistatic_range_km=max_bistatic_range_km,
-        )
+        if not detection_area_unchanged:
+            self.detection_areas[node_id] = DetectionAreaState(
+                node_id=node_id,
+                rx_lat=rx_lat,
+                rx_lon=rx_lon,
+                tx_lat=tx_lat,
+                tx_lon=tx_lon,
+                fc_hz=fc_hz,
+                beam_azimuth_deg=beam_az,
+                beam_width_deg=beam_width,
+                max_range_km=max_range_km,
+                max_bistatic_range_km=max_bistatic_range_km,
+            )
 
         # Recreate empirical coverage when the node is new OR its RX moved — node
         # IDs are reused across fleet regenerations at different positions, so a
@@ -266,11 +277,10 @@ class NodeAnalyticsManager:
             # not the evidence.
             ec.prior_azimuth_deg, ec.prior_width_deg = prior_az, prior_width
 
-        # detection_areas[node_id] was replaced above regardless, but a cache
-        # only actually goes stale when geometry_unchanged is False: a repeat
-        # registration of the same geometry (e.g. every TCP reconnect) must
-        # not defeat the cache.
-        if not geometry_unchanged:
+        # detection_areas[node_id] was only just rebuilt above when it was not
+        # already unchanged, and a rebuild is the only way this path alters
+        # what a summary holds, so the two conditions coincide.
+        if not detection_area_unchanged:
             self._invalidate_analysis_caches()
 
     def coverage_limit_for(self, node_id: str):
