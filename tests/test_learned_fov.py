@@ -194,11 +194,18 @@ class TestPriorResolution:
     def test_unaimed_with_no_tx_is_omni(self):
         """No declared aim and no TX to derive broadside from -> None, the
         radar3 case: this is where the invented-broadside kill path stops
-        being invented — every bearing starts inside the prior."""
-        m = NodeAnalyticsManager()
-        m.register_node("N", dict(rx_lat=_RX_LAT, rx_lon=_RX_LON, max_range_km=50))
-        ec = m.empirical_coverages["N"]
-        assert ec.prior_azimuth_deg is None
+        being invented — every bearing starts inside the prior.
+
+        Exercised directly against _resolve_fov_prior rather than through
+        register_node: a config with no TX is exactly what has_full_geometry
+        excludes from registration, so no node state exists to inspect.
+        """
+        from retina_analytics.manager import _resolve_fov_prior
+
+        cfg = dict(rx_lat=_RX_LAT, rx_lon=_RX_LON, max_range_km=50)
+        az, width = _resolve_fov_prior(cfg, _RX_LAT, _RX_LON, 0, 0)
+        assert az is None
+        assert width is None
 
     def test_prior_updates_in_place_on_reconnect_without_losing_calibration(self):
         cfg = dict(rx_lat=_RX_LAT, rx_lon=_RX_LON, tx_lat=_TX_LAT, tx_lon=_TX_LON, max_range_km=50)

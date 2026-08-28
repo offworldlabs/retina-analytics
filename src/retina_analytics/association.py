@@ -44,7 +44,9 @@ from retina_analytics.constants import (
     C_KM_US,
     KM_PER_DEG_LAT,
     R_EARTH,
+    _is_real_coordinate,
     bistatic_max_radius_km,
+    has_full_geometry,
     km_per_deg_lon,
     offset_latlon_m,
     resolve_beam_azimuth_deg,
@@ -905,28 +907,25 @@ def _merge_epochs(hist_a: list, node_a_id: str, hist_b: list, node_b_id: str) ->
 
 
 def _coord(config: dict, key: str) -> float:
-    """A latitude/longitude from a config, absent or explicitly null reading 0.0.
+    """A latitude/longitude from a config, defaulting to 0.0 for anything that
+    is not a real finite number.
 
-    `config.get(key, 0)` is not enough: a v1 registration may carry the key with
-    a null value, and None then reaches the geodesy as a float.
+    `config.get(key, 0)` is not enough: a v1 registration may carry the key
+    with a null value, and None then reaches the geodesy as a float. Total,
+    like has_full_geometry (reusing its _is_real_coordinate): this builds a
+    geometry object for a node has_full_geometry has already ruled
+    unpositioned, so it must not raise on a non-numeric value either. An int
+    _is_real_coordinate accepts can still be too large to convert to float
+    (OverflowError), which the identity check alone cannot catch, since it
+    deliberately never performs that conversion.
     """
-    return float(config.get(key) or 0.0)
-
-
-def _has_receiver_position(config: dict) -> bool:
-    """Whether this config says where the receiver actually is.
-
-    Absent coordinates default to (0, 0), a point in the Gulf of Guinea that no
-    node occupies.  Every node registered without a position therefore lands on
-    one footprint and overlaps every other completely — a pairing that is both
-    fictitious and, being total, the densest and most expensive grid the pair
-    can produce.  A fleet registered that way makes the neighbour graph
-    complete, which the multinode solver sees as one enormous candidate.
-
-    Only the exact (0, 0) pair reads as absent.  The equator and the prime
-    meridian are each perfectly good coordinates on their own.
-    """
-    return not (_coord(config, "rx_lat") == 0.0 and _coord(config, "rx_lon") == 0.0)
+    value = config.get(key)
+    if not _is_real_coordinate(value):
+        return 0.0
+    try:
+        return float(value)
+    except OverflowError:
+        return 0.0
 
 
 def _merge_epochs_multi(histories: list[tuple[str, list[dict]]]) -> list:
@@ -1249,10 +1248,10 @@ class InterNodeAssociator:
         Reconnecting nodes skip the expensive O(n²) overlap recomputation
         as long as their geometry (RX/TX position) hasn't changed.
 
-        A node whose config carries no receiver position is registered but takes
-        no part in overlap — see _has_receiver_position.
+        A node whose config lacks either end of the bistatic pair is
+        registered but takes no part in overlap: see has_full_geometry.
         """
-        positioned = _has_receiver_position(config)
+        positioned = has_full_geometry(config)
         rx_alt_km = (config.get("rx_alt_ft") or 0) * 0.3048 / 1000.0
         tx_alt_km = (config.get("tx_alt_ft") or 0) * 0.3048 / 1000.0
 
@@ -1311,7 +1310,10 @@ class InterNodeAssociator:
             # RuntimeError: dictionary changed size during iteration when multiple
             # nodes register concurrently from a thread-pool executor).
             for existing_id, existing_geo in list(self.node_geometries.items()):
-                if not self._is_positioned(existing_id):
+                # node_configs[node_id] already holds the new config (rewritten
+                # above), so _is_positioned(node_id) cannot be used to skip this
+                # node's own stale entry here.
+                if existing_id == node_id or not self._is_positioned(existing_id):
                     continue
                 pair_key = tuple(sorted([node_id, existing_id]))
                 zone = compute_overlap_zone(
@@ -1326,6 +1328,12 @@ class InterNodeAssociator:
                 if zone.delay_pairs:  # only real overlaps, not geographic misses
                     self._neighbors.setdefault(node_id, set()).add(existing_id)
                     self._neighbors.setdefault(existing_id, set()).add(node_id)
+                else:
+                    # A relocated node may no longer overlap a former
+                    # neighbour; leaving the adjacency in place would occupy a
+                    # slot in the capped neighbour rotation forever.
+                    self._neighbors.get(node_id, set()).discard(existing_id)
+                    self._neighbors.get(existing_id, set()).discard(node_id)
 
             self.node_geometries[node_id] = geo
 
@@ -1364,8 +1372,8 @@ class InterNodeAssociator:
                 setattr(self, name, 0)
 
     def _is_positioned(self, node_id: str) -> bool:
-        """Whether a registered node has a receiver position to pair against."""
-        return _has_receiver_position(self.node_configs.get(node_id, {}))
+        """Whether a registered node has both ends of its geometry to pair against."""
+        return has_full_geometry(self.node_configs.get(node_id, {}))
 
     def _drop_zones_for(self, node_id: str) -> int:
         """Remove every overlap zone and adjacency entry naming this node.

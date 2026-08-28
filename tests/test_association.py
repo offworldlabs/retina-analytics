@@ -9,11 +9,12 @@ from retina_analytics.association import (
     InterNodeAssociator,
     NodeGeometry,
     _bistatic_delay_at,
+    _coord,
     _lla_to_enu,
     compute_overlap_zone,
     predict_observation,
 )
-from retina_analytics.constants import C_KM_S, C_KM_US, R_EARTH
+from retina_analytics.constants import C_KM_S, C_KM_US, R_EARTH, has_full_geometry
 
 # ── Overlap zone & bistatic delay ────────────────────────────────────────────
 
@@ -105,6 +106,57 @@ class TestInterNodeAssociator:
     def test_beam_width_in_geometry(self):
         assoc = self._make_assoc()
         assert assoc.node_geometries["assoc-A"].beam_width_deg == 41
+
+    def test_reregistering_a_moved_node_does_not_pair_it_with_itself(self):
+        """node_configs[node_id] is rewritten before the pairing loop runs, so
+        the loop's _is_positioned(existing_id) check already reads the new
+        config for this node's own (still-stale) entry in node_geometries and
+        does not skip it on that basis alone."""
+        assoc = self._make_assoc()
+        moved = {
+            "rx_lat": 33.939 + 0.09,  # ~10 km north: fails the unchanged-geometry shortcut
+            "rx_lon": -84.651,
+            "rx_alt_ft": 950,
+            "tx_lat": 33.756,
+            "tx_lon": -84.331,
+            "tx_alt_ft": 1600,
+            "fc_hz": 195e6,
+            "beam_width_deg": 41,
+            "max_range_km": 50,
+        }
+
+        assoc.register_node("assoc-A", moved)
+
+        assert ("assoc-A", "assoc-A") not in assoc.overlap_zones
+        assert "assoc-A" not in assoc._neighbors.get("assoc-A", set())
+
+    def test_reregistering_a_relocated_node_drops_a_stale_neighbour(self):
+        """A and B start close enough to overlap and pair as neighbours. Once A
+        re-registers somewhere distant but still positioned, the freshly
+        computed zone has no overlap and B must no longer be a listed
+        neighbour of A, nor A of B: otherwise the pairing survives forever
+        and permanently occupies a slot in the capped neighbour rotation."""
+        assoc = self._make_assoc()
+        assert "assoc-B" in assoc._neighbors.get("assoc-A", set())
+        assert "assoc-A" in assoc._neighbors.get("assoc-B", set())
+        assert assoc.overlap_zones[("assoc-A", "assoc-B")].delay_pairs
+
+        relocated = {
+            "rx_lat": 34.05,
+            "rx_lon": -118.25,  # Los Angeles: still positioned, no longer near B
+            "rx_alt_ft": 950,
+            "tx_lat": 33.87,
+            "tx_lon": -117.93,
+            "tx_alt_ft": 1600,
+            "fc_hz": 195e6,
+            "beam_width_deg": 41,
+            "max_range_km": 50,
+        }
+        assoc.register_node("assoc-A", relocated)
+
+        assert not assoc.overlap_zones[("assoc-A", "assoc-B")].delay_pairs
+        assert "assoc-B" not in assoc._neighbors.get("assoc-A", set())
+        assert "assoc-A" not in assoc._neighbors.get("assoc-B", set())
 
 
 _SCALING_CFG = {
@@ -561,3 +613,82 @@ class TestFootprintRadiusMemoisation:
         assert geo.effective_radius_km == pytest.approx(50.0)  # footprint still wider
         geo.fov.reach = 85.0
         assert geo.effective_radius_km == pytest.approx(85.0)
+
+
+# ── has_full_geometry ─────────────────────────────────────────────────────────
+
+
+def test_has_full_geometry_requires_both_sides():
+    full = {"rx_lat": 34.85, "rx_lon": -82.39, "tx_lat": 34.90, "tx_lon": -82.45}
+    assert has_full_geometry(full) is True
+    assert has_full_geometry({**full, "tx_lat": None}) is False
+    assert has_full_geometry({**full, "rx_lon": None}) is False
+    assert has_full_geometry({}) is False
+    # The legacy sentinel: absent coordinates used to default to (0, 0).
+    assert has_full_geometry({**full, "rx_lat": 0.0, "rx_lon": 0.0}) is False
+    # The equator and the prime meridian are each fine on their own, for
+    # either end.
+    assert has_full_geometry({**full, "rx_lat": 0.0}) is True
+    assert has_full_geometry({**full, "tx_lat": 0.0}) is True
+    # The sentinel applies to the transmitter too: a receiver paired with a
+    # transmitter at (0, 0) is not a bistatic geometry.
+    assert has_full_geometry({**full, "tx_lat": 0.0, "tx_lon": 0.0}) is False
+
+
+def test_has_full_geometry_is_total_never_raises():
+    """No input, however malformed, may raise: the predicate is reached from
+    an unvalidated ingest path, where a raised exception kills a node's
+    registration partway through, leaving it in some of the manager's stores
+    and absent from the associator."""
+    full = {"rx_lat": 34.85, "rx_lon": -82.39, "tx_lat": 34.90, "tx_lon": -82.45}
+    assert has_full_geometry(None) is False
+    assert has_full_geometry([]) is False
+    assert has_full_geometry("not a config") is False
+    assert has_full_geometry(42) is False
+    # A numeric string is not coerced: it is simply not a coordinate.
+    assert has_full_geometry({**full, "rx_lat": "34.85"}) is False
+    # An integer too large to convert to a float must not OverflowError.
+    assert has_full_geometry({**full, "rx_lat": 10**400}) is True
+    assert has_full_geometry({**full, "rx_lat": 10**400, "rx_lon": 0.0}) is True
+
+
+def test_has_full_geometry_rejects_nan_and_infinity():
+    """NaN and infinity are not finite, so neither counts as a real
+    coordinate: a NaN-foci detection area must never be built."""
+    full = {"rx_lat": 34.85, "rx_lon": -82.39, "tx_lat": 34.90, "tx_lon": -82.45}
+    assert has_full_geometry({**full, "rx_lat": float("nan")}) is False
+    assert has_full_geometry({**full, "tx_lon": float("nan")}) is False
+    assert has_full_geometry({**full, "rx_lat": float("inf")}) is False
+    assert has_full_geometry({**full, "tx_lat": float("-inf")}) is False
+
+
+def test_has_full_geometry_rejects_bool():
+    """bool is an int subclass but is not a coordinate."""
+    full = {"rx_lat": 34.85, "rx_lon": -82.39, "tx_lat": 34.90, "tx_lon": -82.45}
+    assert has_full_geometry({**full, "rx_lat": True}) is False
+    assert has_full_geometry({**full, "rx_lat": False}) is False
+
+
+# ── _coord ─────────────────────────────────────────────────────────────────
+
+
+def test_coord_is_total_never_raises():
+    """_coord builds a geometry object for a node has_full_geometry has
+    already ruled unpositioned, so a junk coordinate must default to 0.0
+    rather than raise."""
+    assert _coord({"rx_lat": "not a number"}, "rx_lat") == 0.0
+    assert _coord({"rx_lat": None}, "rx_lat") == 0.0
+    assert _coord({}, "rx_lat") == 0.0
+    assert _coord({"rx_lat": float("nan")}, "rx_lat") == 0.0
+    assert _coord({"rx_lat": float("inf")}, "rx_lat") == 0.0
+    assert _coord({"rx_lat": True}, "rx_lat") == 0.0
+    assert _coord({"rx_lat": 0}, "rx_lat") == 0.0
+    assert _coord({"rx_lat": 34.85}, "rx_lat") == 34.85
+
+
+def test_coord_does_not_overflow_on_a_huge_int():
+    """_is_real_coordinate accepts a huge int as finite without converting it
+    (see test_has_full_geometry_is_total_never_raises), but _coord must
+    itself produce a float, and converting one this large would raise
+    OverflowError."""
+    assert _coord({"rx_lat": 10**400}, "rx_lat") == 0.0

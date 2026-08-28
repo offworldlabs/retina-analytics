@@ -189,6 +189,52 @@ def resolve_beam_azimuth_deg(config, rx_lat, rx_lon, tx_lat, tx_lon):
     return (bearing_deg(rx_lat, rx_lon, tx_lat, tx_lon) + 90.0) % 360.0
 
 
+_GEOMETRY_KEYS = ("rx_lat", "rx_lon", "tx_lat", "tx_lon")
+
+
+def _is_real_coordinate(value) -> bool:
+    """Whether *value* is usable as one coordinate: a real, finite number.
+
+    Identity-based, not coerced: a numeric string is not a coordinate, and
+    neither is a ``bool`` (a subclass of ``int`` otherwise indistinguishable
+    from one). An ``int`` is accepted without a float conversion, since
+    Python ints have no NaN/infinity to exclude and one too large to
+    represent as a float would otherwise raise ``OverflowError``; a float is
+    admitted only when ``math.isfinite``, which never raises on an existing
+    float.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return isinstance(value, int) or math.isfinite(value)
+
+
+def has_full_geometry(config: dict) -> bool:
+    """Whether this config places both ends of the bistatic pair.
+
+    Both are needed: the beam points broadside to the RX->TX baseline and every
+    footprint has foci at RX and TX, so one missing side leaves a node
+    unplaceable rather than approximately placed.
+
+    Total: never raises, for any input, including a non-dict config or a
+    coordinate slot holding something other than a number. Absent and null
+    read alike, and so does the legacy (0, 0) sentinel that absent
+    coordinates used to default to. No node occupies the Gulf of Guinea, and
+    a fleet defaulted there overlaps completely, which makes the neighbour
+    graph complete and the solver's candidates pure artefact. Only the exact
+    (0, 0) pair reads as unset, on either end: the equator and the prime
+    meridian are each perfectly good coordinates on their own, for either
+    end. See _is_real_coordinate for what counts as a coordinate at all.
+    """
+    if not isinstance(config, dict):
+        return False
+    values = {key: config.get(key) for key in _GEOMETRY_KEYS}
+    if not all(_is_real_coordinate(v) for v in values.values()):
+        return False
+    if values["rx_lat"] == 0.0 and values["rx_lon"] == 0.0:
+        return False
+    return not (values["tx_lat"] == 0.0 and values["tx_lon"] == 0.0)
+
+
 def resolve_beam_width_deg(config):
     """Resolve a node's beam width (deg), defaulting to the nominal Yagi spec.
 
