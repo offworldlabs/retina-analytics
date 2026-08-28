@@ -145,14 +145,10 @@ class NodeAnalyticsManager:
         # map, since get_node_summary omits the key and the map only draws a
         # marker for a node that has one.
         if not has_full_geometry(config):
-            # Popping the detection area is what keeps a node that lost its
-            # geometry off the map, since the map draws neither marker nor
-            # polygon without a detection area. The empirical polygon is left
-            # alone even though get_node_summary still serves it independently
-            # of the detection area: it is deliberately kept so the
-            # moved/rule_changed checks below revalidate it if the node is
-            # positioned again.
-            self.detection_areas.pop(node_id, None)
+            # A detection area from a previous positioned registration is
+            # dropped here.
+            if self.detection_areas.pop(node_id, None) is not None:
+                self._invalidate_analysis_caches()
             return
 
         rx_lat = config["rx_lat"]
@@ -242,6 +238,10 @@ class NodeAnalyticsManager:
             # not the evidence.
             ec.prior_azimuth_deg, ec.prior_width_deg = prior_az, prior_width
 
+        # Reaching here always replaced detection_areas[node_id] above, so the
+        # cached summaries and cross-node analysis are stale.
+        self._invalidate_analysis_caches()
+
     def coverage_limit_for(self, node_id: str):
         """A bearing → observed-limit-km callable for one node, or None.
 
@@ -288,6 +288,11 @@ class NodeAnalyticsManager:
         if ec is None:
             return None
         return ec.fov_digest() if self.fov_mode != "off" else ec.constraint_digest()
+
+    def _invalidate_analysis_caches(self) -> None:
+        """Drop the memoised get_all_summaries/get_cross_node_analysis results."""
+        self._summaries_cache = None
+        self._cross_node_cache = None
 
     def retire_node(self, node_id: str) -> dict:
         """Forget a node entirely — in-memory state and its files on disk.
@@ -342,8 +347,7 @@ class NodeAnalyticsManager:
                     logging.warning("could not remove %s during retirement", path, exc_info=True)
 
         # Any summary cached before this call still names the node.
-        self._summaries_cache = None
-        self._cross_node_cache = None
+        self._invalidate_analysis_caches()
 
         return {"node_id": node_id, "dropped": dropped, "files_removed": files}
 
@@ -454,13 +458,16 @@ class NodeAnalyticsManager:
         if node_id in self.coverage_maps:
             result["coverage_map"] = self.coverage_maps[node_id].summary()
         ec = self.empirical_coverages.get(node_id)
-        if ec is not None:
-            da = self.detection_areas.get(node_id)
+        da = self.detection_areas.get(node_id)
+        # Also gated on da: empirical_coverages outlives a lost geometry (see
+        # _register_node_locked), so ec alone would publish an unconstrained
+        # polygon anchored on the node's stale receiver.
+        if ec is not None and da is not None:
             fov_mode_active = self.fov_mode != "off"
             poly_kwargs = {}
             if fov_mode_active:
                 poly_kwargs["use_learned_wedge"] = True
-            elif da is not None:
+            else:
                 poly_kwargs["beam_azimuth_deg"] = da.beam_azimuth_deg
                 poly_kwargs["beam_width_deg"] = da.beam_width_deg
                 poly_kwargs["max_range_km"] = da.max_range_km

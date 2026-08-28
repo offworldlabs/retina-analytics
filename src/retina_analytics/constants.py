@@ -203,12 +203,14 @@ def has_full_geometry(config: dict) -> bool:
     absent coordinates used to default to. No node occupies the Gulf of Guinea,
     and a fleet defaulted there overlaps completely, which makes the neighbour
     graph complete and the solver's candidates pure artefact. Only the exact
-    receiver pair reads as unset: the equator and the prime meridian are each
-    perfectly good coordinates on their own, for either end.
+    (0, 0) pair reads as unset, on either end: the equator and the prime
+    meridian are each perfectly good coordinates on their own, for either end.
     """
     if any(config.get(key) is None for key in _GEOMETRY_KEYS):
         return False
-    return not (float(config["rx_lat"]) == 0.0 and float(config["rx_lon"]) == 0.0)
+    if float(config["rx_lat"]) == 0.0 and float(config["rx_lon"]) == 0.0:
+        return False
+    return not (float(config["tx_lat"]) == 0.0 and float(config["tx_lon"]) == 0.0)
 
 
 def resolve_beam_width_deg(config):

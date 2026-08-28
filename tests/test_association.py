@@ -106,6 +106,29 @@ class TestInterNodeAssociator:
         assoc = self._make_assoc()
         assert assoc.node_geometries["assoc-A"].beam_width_deg == 41
 
+    def test_reregistering_a_moved_node_does_not_pair_it_with_itself(self):
+        """node_configs[node_id] is rewritten before the pairing loop runs, so
+        the loop's _is_positioned(existing_id) check already reads the new
+        config for this node's own (still-stale) entry in node_geometries and
+        does not skip it on that basis alone."""
+        assoc = self._make_assoc()
+        moved = {
+            "rx_lat": 33.939 + 0.09,  # ~10 km north: fails the unchanged-geometry shortcut
+            "rx_lon": -84.651,
+            "rx_alt_ft": 950,
+            "tx_lat": 33.756,
+            "tx_lon": -84.331,
+            "tx_alt_ft": 1600,
+            "fc_hz": 195e6,
+            "beam_width_deg": 41,
+            "max_range_km": 50,
+        }
+
+        assoc.register_node("assoc-A", moved)
+
+        assert ("assoc-A", "assoc-A") not in assoc.overlap_zones
+        assert "assoc-A" not in assoc._neighbors.get("assoc-A", set())
+
 
 _SCALING_CFG = {
     "rx_lat": 33.939,
@@ -574,8 +597,10 @@ def test_has_full_geometry_requires_both_sides():
     assert has_full_geometry({}) is False
     # The legacy sentinel: absent coordinates used to default to (0, 0).
     assert has_full_geometry({**full, "rx_lat": 0.0, "rx_lon": 0.0}) is False
-    # The equator and the prime meridian are each fine on their own.
+    # The equator and the prime meridian are each fine on their own, for
+    # either end.
     assert has_full_geometry({**full, "rx_lat": 0.0}) is True
-    # The sentinel check is receiver-only: a transmitter at (0, 0) is a real
-    # pair, not the legacy default, so it does not read as unset.
-    assert has_full_geometry({**full, "tx_lat": 0.0, "tx_lon": 0.0}) is True
+    assert has_full_geometry({**full, "tx_lat": 0.0}) is True
+    # The sentinel applies to the transmitter too: a receiver paired with a
+    # transmitter at (0, 0) is not a bistatic geometry.
+    assert has_full_geometry({**full, "tx_lat": 0.0, "tx_lon": 0.0}) is False

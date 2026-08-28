@@ -283,3 +283,35 @@ def test_losing_geometry_drops_a_stale_detection_area():
     m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))
     assert "n1" not in m.detection_areas
     assert "n1" in m.empirical_coverages  # retained, not popped: see the guard's comment
+
+
+def test_losing_geometry_stops_publishing_empirical_coverage():
+    """The empirical_coverages entry survives the loss of geometry (see
+    above), but with no detection area there is no beam or range left to
+    constrain its polygon, so the summary must not publish one."""
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg())
+    m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))
+    assert "n1" in m.empirical_coverages
+    summary = m.get_node_summary("n1")
+    assert "empirical_coverage" not in summary
+
+
+def test_reregistration_that_loses_geometry_invalidates_the_summary_cache():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg())
+    assert "detection_area" in m.get_all_summaries()["n1"]
+
+    m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))
+
+    assert "detection_area" not in m.get_all_summaries()["n1"]
+
+
+def test_reregistration_that_gains_geometry_invalidates_the_summary_cache():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))
+    assert "detection_area" not in m.get_all_summaries()["n1"]
+
+    m.register_node("n1", _cfg())
+
+    assert "detection_area" in m.get_all_summaries()["n1"]

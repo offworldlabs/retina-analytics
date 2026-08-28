@@ -1296,7 +1296,10 @@ class InterNodeAssociator:
             # RuntimeError: dictionary changed size during iteration when multiple
             # nodes register concurrently from a thread-pool executor).
             for existing_id, existing_geo in list(self.node_geometries.items()):
-                if not self._is_positioned(existing_id):
+                # node_configs[node_id] already holds the new config (rewritten
+                # above), so _is_positioned(node_id) cannot be used to skip this
+                # node's own stale entry here.
+                if existing_id == node_id or not self._is_positioned(existing_id):
                     continue
                 pair_key = tuple(sorted([node_id, existing_id]))
                 zone = compute_overlap_zone(
