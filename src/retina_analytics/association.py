@@ -214,6 +214,39 @@ _MIN_AXIS_DET = 0.05
 # wrong, so they abstain too.
 _MIN_BISECTOR = 0.15
 
+# Below this implied speed the heading of an implied velocity is noise, so the
+# velocity-conflict test compares magnitudes only.  Well under the 120 m/s
+# floor of the commercial envelope, so no real target is ever exempted by it.
+_MIN_HEADING_SPEED_MS = 30.0
+
+# How close two pairings' grid positions must be to be merged into one solver
+# input.  One association grid step, not two: the old 6.0 reached a full cell
+# beyond a true cluster's own spread, and two aircraft 5 km apart merged into a
+# single candidate the position solver then answered by splitting the
+# difference.  Swept on the offline bench (15-node ring, 6 seeds, --mode track
+# --cv-fit deferred), and monotone across the whole range — every metric
+# improves as the radius shrinks, with the real-track count identical at each
+# point:
+#
+#            published contam.   foreign nodes/solve   ghost by track
+#     6.0            32.0%              0.76               55.6%
+#     4.5            28.2%              0.63               54.3%
+#     3.0            25.1%              0.52               50.0%
+#
+# 3.0 is the floor of what was swept rather than a measured optimum; the trend
+# says a smaller radius is worth probing, but below the grid step two pairings
+# of one aircraft start landing in cells that can no longer reach each other.
+_MERGE_DIST_KM = 3.0
+
+# Velocity-conflict thresholds for pair-level exclusivity (see
+# velocity_conflict).  Two pairings sharing a track whose implied velocities
+# differ by more than 80 m/s in magnitude, or 40° in heading, cannot both
+# describe it.  Both sit well outside what the inference's own error can
+# produce on a true pairing (median 4° of heading error, measured) and well
+# inside the separation a cross-aircraft pairing shows.
+_PAIR_VEL_DV_MS = 80.0
+_PAIR_VEL_DTHETA_DEG = 40.0
+
 
 def _bisector_from_ranges(target_enu, tx_enu, rx_enu, d_tx, d_rx):
     """b = u_tx + u_rx at the target, from ranges that are already in hand."""
@@ -263,6 +296,52 @@ def implied_horizontal_speed(m_a, b_a, m_b, b_b):
     """Speed of the level-flight velocity implied by two Doppler projections."""
     v = implied_horizontal_velocity(m_a, b_a, m_b, b_b)
     return None if v is None else math.hypot(v[0], v[1])
+
+
+def _km_between(p, q) -> float:
+    """Ground distance between two candidates' positions, in km.
+
+    Flat-earth, the same approximation format_track_pairs_for_solver's
+    vectorised distance matrix uses — over a merge radius of a few km the
+    difference from a great circle is centimetres.
+    """
+    return math.hypot(
+        (p.lat - q.lat) * KM_PER_DEG_LAT,
+        (p.lon - q.lon) * km_per_deg_lon(0.5 * (p.lat + q.lat)),
+    )
+
+
+def velocity_conflict(v_a, v_b, dv_ms: float, dtheta_deg: float) -> bool:
+    """Whether two implied velocities are too different to be one aircraft.
+
+    Deliberately asymmetric in what it proves.  Agreement proves nothing —
+    two Doppler projections always admit *some* level-flight velocity (see
+    implied_horizontal_velocity), so a crossed pairing produces one as
+    readily as a true one, which is why the implied *speed* measured 0% power
+    as a standalone rejection.  Disagreement between two hypotheses that
+    share a track is a different question: one track is one aircraft and an
+    aircraft has one velocity, so if the two claims about it cannot both be
+    true, at most one pairing is.
+
+    Returns False whenever either side has no inference to offer — "no
+    information" is not evidence of conflict.
+    """
+    if v_a is None or v_b is None:
+        return False
+    s_a, s_b = math.hypot(v_a[0], v_a[1]), math.hypot(v_b[0], v_b[1])
+    if abs(s_a - s_b) > dv_ms:
+        return True
+    # A near-zero implied speed has no meaningful heading — the direction is
+    # then all noise — so heading is only asked once both sides have enough
+    # speed for the angle to mean something.
+    if min(s_a, s_b) < _MIN_HEADING_SPEED_MS:
+        return False
+    ang = abs(
+        math.degrees(
+            math.atan2(v_a[0] * v_b[1] - v_a[1] * v_b[0], v_a[0] * v_b[0] + v_a[1] * v_b[1]),
+        )
+    )
+    return ang > dtheta_deg
 
 
 # ── Node Pair Configuration ─────────────────────────────────────────────────
@@ -464,6 +543,18 @@ class TrackPairCandidate:
     chi2_per_dof: float | None = None
     dof: int = 0
     n_epochs: int = 0
+    # |predicted - measured| delay summed over both nodes at the grid point the
+    # coarse gate matched, in µs.  This is the ordering _pair_tracks already
+    # sorts its hypotheses by; carried on the candidate because the deferred
+    # path (cv_fit=None — production) has no chi2, so when two pairings claim
+    # the same track this is the only ranking in hand.  It is a tie-break, not
+    # a test: at n=2 it is ~0 for a crossed pairing too.
+    grid_resid_us: float = 0.0
+    # (v_east, v_north) in m/s that the two Dopplers imply at that grid point
+    # for level flight, or None where the geometry could not support the
+    # inference.  On the deferred path vel_east_ms/vel_north_ms hold the same
+    # numbers; this field keeps "no inference" distinguishable from "zero".
+    implied_vel: tuple | None = None
     # The measurements the constant-velocity fit needs, in
     # fit_constant_velocity's input shape.  Carried so the fit can run
     # somewhere other than here: it is an ~86 ms LM solve and submit_tracks
@@ -1017,6 +1108,11 @@ class InterNodeAssociator:
         adsb_seed_max_dr_age_s: float = ADSB_SEED_MAX_DR_AGE_S,
         adsb_provider=None,
         node_world_provider=None,
+        merge_dist_km: float = _MERGE_DIST_KM,
+        pair_vel_exclusive: bool = True,
+        merge_vel_consistent: bool = True,
+        pair_vel_dv_ms: float = _PAIR_VEL_DV_MS,
+        pair_vel_dtheta_deg: float = _PAIR_VEL_DTHETA_DEG,
     ):
         self.delay_gate_us = delay_gate_us
         self.doppler_gate_hz = doppler_gate_hz
@@ -1067,6 +1163,22 @@ class InterNodeAssociator:
         # stage 2 for why this exists and why greedy-on-chi2 is safe where two
         # earlier exclusivity schemes were not.
         self.cv_exclusive = cv_exclusive
+        # Pair-level exclusivity for the DEFERRED path only (cv_fit is None,
+        # i.e. production), where cv_exclusive above has nothing to rank on and
+        # every hypothesis the coarse grid passed is emitted.  See
+        # _drop_velocity_conflicts.  Gated so a caller that does supply a fit
+        # keeps exactly the chi2 arbitration it had.
+        self.pair_vel_exclusive = pair_vel_exclusive
+        self.pair_vel_dv_ms = pair_vel_dv_ms
+        self.pair_vel_dtheta_deg = pair_vel_dtheta_deg
+        # How far apart two pairings may sit and still be merged into one
+        # solver input — see _MERGE_DIST_KM — and whether proximity alone
+        # earns the merge or their implied velocities must agree too.  Both
+        # are separable from pair_vel_exclusive above because they act at a
+        # different stage (clustering, not hypothesis pruning) and were
+        # measured separately on the bench.
+        self.merge_dist_km = merge_dist_km
+        self.merge_vel_consistent = merge_vel_consistent
         # node_id -> (bearing -> observed limit km | None), or None for no
         # constraint.  Injected the same way cv_fit is, so this library keeps
         # knowing nothing about NodeAnalyticsManager.
@@ -1089,6 +1201,12 @@ class InterNodeAssociator:
         self.track_pairs_unfitted: int = 0  # too few epochs, or the fit failed
         self.track_pairs_superseded: int = 0  # lost their tracks to a better fit
         self.track_pairs_deferred: int = 0  # rounds cut short by a budget (once per round)
+        # Position clusters that turned out to hold two different tracks of one
+        # node and were split into one solver input each — see
+        # format_track_pairs_for_solver.  Counted once per cluster split, not
+        # once per input emitted, so it reads as "how often two aircraft were
+        # about to be solved as one".
+        self.cluster_splits: int = 0
         # Adjacency index: node_id → set of neighbor node_ids that share a real
         # overlap zone (delay_pairs is non-empty).  Built during registration so
         # submit_frame can iterate O(K) neighbors instead of O(N) all nodes.
@@ -1348,6 +1466,7 @@ class InterNodeAssociator:
                 "track_pairs_unfitted",
                 "track_pairs_superseded",
                 "track_pairs_deferred",
+                "cluster_splits",
                 "claim_rounds",
                 "claims_matched",
                 "claim_conflicts",
@@ -2111,15 +2230,17 @@ class InterNodeAssociator:
             if self.cv_fit is not None
             else _b.get("pairs", self._MAX_PAIRS_PER_ROUND)
         )
-        ordered = sorted(
-            matches.items(),
-            key=lambda kv: (
-                abs(zone._np_pred_a[kv[1]] - float(usable_a[kv[0][0]]["history"][-1]["delay_us"]))
-                + abs(zone._np_pred_b[kv[1]] - float(usable_b[kv[0][1]]["history"][-1]["delay_us"]))
-            ),
-        )[: max(limit, 0)]
 
-        for (i_a, i_b), best_g in ordered:
+        def _grid_resid_us(kv) -> float:
+            (i_a, i_b), g = kv
+            return float(
+                abs(zone._np_pred_a[g] - float(usable_a[i_a]["history"][-1]["delay_us"]))
+                + abs(zone._np_pred_b[g] - float(usable_b[i_b]["history"][-1]["delay_us"]))
+            )
+
+        ordered = sorted(((kv, _grid_resid_us(kv)) for kv in matches.items()), key=lambda x: x[1])[: max(limit, 0)]
+
+        for ((i_a, i_b), best_g), grid_resid in ordered:
             ta, tb = usable_a[i_a], usable_b[i_b]
             hist_a, hist_b = ta["history"], tb["history"]
             last_a, last_b = hist_a[-1], hist_b[-1]
@@ -2235,6 +2356,8 @@ class InterNodeAssociator:
                 dof=dof,
                 n_epochs=len(epochs),
                 epochs=deferred_epochs,
+                grid_resid_us=grid_resid,
+                implied_vel=(vel_seed["vel_east_ms"], vel_seed["vel_north_ms"]) if vel_seed else None,
             )
             (fitted if chi2_per_dof is not None else held).append(cand)
 
@@ -2276,6 +2399,8 @@ class InterNodeAssociator:
                 results.append(c)
             else:
                 self.track_pairs_rejected += 1
+        if self.cv_fit is None and self.pair_vel_exclusive:
+            held = self._drop_velocity_conflicts(held)
         for c in held:
             # A held pairing has no score, so it cannot claim anything — and a
             # track already explained by a scored winner does not get to seed a
@@ -2285,6 +2410,50 @@ class InterNodeAssociator:
                 continue
             results.append(c)
         return results
+
+    def _drop_velocity_conflicts(self, held: list[TrackPairCandidate]) -> list[TrackPairCandidate]:
+        """Prune pairings claiming a track another pairing explains differently.
+
+        Stage 2 above arbitrates on chi2, which production never has: it runs
+        cv_fit=None so nothing is fitted here and every hypothesis the coarse
+        delay grid passed is emitted, several of them for the same track in a
+        crowded zone.  Those land at similar positions and
+        format_track_pairs_for_solver merges them, so the solver is handed one
+        candidate describing two aircraft.
+
+        The evidence already in hand is the Doppler-implied level-flight
+        velocity at each pairing's matched grid point — the same quantity the
+        fit is seeded from.  It is not usable as a standalone test (see the
+        seed comment above: 0% power against real cross pairings), and neither
+        is the coarse delay residual, which an earlier assignment attempt
+        ranked on and lost recall to because at n=2 it is ~0 for a crossed
+        pairing too.  The *comparison* between two hypotheses about one track
+        is what neither of them is alone: one track is one aircraft, so two
+        claims about its velocity that cannot both be true mean at most one
+        pairing is.  Where they agree, nothing has been learned and both
+        survive — which is why this cannot cost the recall the residual
+        assignment cost.
+
+        Ties in the residual are broken on ids so a round is deterministic.
+        """
+        winner: dict[tuple[str, str], TrackPairCandidate] = {}
+        kept: list[TrackPairCandidate] = []
+        for c in sorted(
+            held,
+            key=lambda p: (p.grid_resid_us, p.node_a_id, p.track_a_id, p.node_b_id, p.track_b_id),
+        ):
+            keys = ((c.node_a_id, c.track_a_id), (c.node_b_id, c.track_b_id))
+            if any(
+                velocity_conflict(winner[k].implied_vel, c.implied_vel, self.pair_vel_dv_ms, self.pair_vel_dtheta_deg)
+                for k in keys
+                if k in winner
+            ):
+                self.track_pairs_superseded += 1
+                continue
+            for k in keys:
+                winner.setdefault(k, c)
+            kept.append(c)
+        return kept
 
     def format_track_pairs_for_solver(self, pairs: list[TrackPairCandidate]) -> list[dict]:
         """Cluster track pairs by fitted position into multinode solver inputs.
@@ -2297,7 +2466,6 @@ class InterNodeAssociator:
         if not pairs:
             return []
 
-        _MERGE_DIST_KM = 6.0
         n = len(pairs)
         parent = list(range(n))
 
@@ -2312,7 +2480,19 @@ class InterNodeAssociator:
         km_per_lat = KM_PER_DEG_LAT
         km_per_lon = km_per_deg_lon(float(np.mean(lats)))
         dist_sq = ((lats[:, None] - lats) * km_per_lat) ** 2 + ((lons[:, None] - lons) * km_per_lon) ** 2
-        rows, cols = np.where((dist_sq < _MERGE_DIST_KM**2) & (np.arange(n)[:, None] < np.arange(n)))
+        # Proximity alone was the whole merge criterion, and it is not enough:
+        # two aircraft crossing within the merge radius are as close together
+        # as one aircraft's own pairings are, so the union welded them into a
+        # single candidate.  Requiring the two pairings' Doppler-implied
+        # velocities to be compatible as well separates the crossing case,
+        # where the headings differ by definition, from the co-located case,
+        # where they do not.  Same abstention rule as everywhere else: a
+        # pairing with no usable inference blocks nothing.
+        rows, cols = np.where(
+            (dist_sq < self.merge_dist_km**2)
+            & ~self._velocity_conflict_matrix(pairs)
+            & (np.arange(n)[:, None] < np.arange(n))
+        )
         for i, j in zip(rows.tolist(), cols.tolist()):
             parent[_find(i)] = _find(j)
 
@@ -2321,59 +2501,156 @@ class InterNodeAssociator:
             groups[_find(i)].append(p)
 
         solver_inputs = []
-        for group in groups.values():
-            by_node: dict[str, dict] = {}
-            for p in group:
-                for nid, d, f, s in (
-                    (p.node_a_id, p.delay_a, p.doppler_a, p.snr_a),
-                    (p.node_b_id, p.delay_b, p.doppler_b, p.snr_b),
-                ):
-                    if nid not in by_node or s > by_node[nid]["snr"]:
-                        by_node[nid] = {"node_id": nid, "delay_us": d, "doppler_hz": f, "snr": s}
-
-            # Per-node track id sets, so a downstream trim (dropping one
-            # contaminated node's measurement and re-solving) can also drop
-            # exactly that node's source tracks from the published solve's
-            # provenance instead of carrying the whole cluster's track_ids.
-            track_ids_by_node: dict[str, set] = defaultdict(set)
-            for p in group:
-                track_ids_by_node[p.node_a_id].add(p.track_a_id)
-                track_ids_by_node[p.node_b_id].add(p.track_b_id)
-
-            fitted = [p for p in group if p.chi2_per_dof is not None]
-            # Worst fit in the cluster, not the best: a cluster is published as
-            # one target, so a pairing that failed to justify itself should not
-            # be laundered by a well-fitted neighbour sharing its position.
-            worst_chi2 = max((p.chi2_per_dof for p in fitted), default=None)
-
-            solver_inputs.append(
-                {
-                    "initial_guess": {
-                        "lat": sum(p.lat for p in group) / len(group),
-                        "lon": sum(p.lon for p in group) / len(group),
-                        "alt_km": sum(p.alt_km for p in group) / len(group),
-                    },
-                    "initial_velocity": {
-                        "vel_east_ms": sum(p.vel_east_ms for p in group) / len(group),
-                        "vel_north_ms": sum(p.vel_north_ms for p in group) / len(group),
-                    },
-                    "measurements": list(by_node.values()),
-                    "n_nodes": len(by_node),
-                    "timestamp_ms": group[0].timestamp_ms,
-                    "adsb_hex": None,
-                    "chi2_per_dof": worst_chi2,
-                    "n_epochs": min(p.n_epochs for p in group),
-                    # Present only when the fit has not run yet: the solver worker
-                    # runs it there, on its own threads and behind its own queue,
-                    # instead of on the frame path.  Taken from the pairing with the
-                    # most history, which is the best-conditioned in the cluster.
-                    "cv_epochs": max((p.epochs for p in group if p.epochs), key=len, default=None),
-                    "track_pair_ids": sorted({(p.track_a_id, p.track_b_id) for p in group})[:1],
-                    "track_ids": sorted({p.track_a_id for p in group} | {p.track_b_id for p in group}),
-                    "track_ids_by_node": {nid: sorted(ids) for nid, ids in track_ids_by_node.items()},
-                }
-            )
+        for merged in groups.values():
+            subs = self._partition_cluster(merged)
+            if len(subs) > 1:
+                self.cluster_splits += 1
+            solver_inputs.extend(self._solver_input(g) for g in subs)
         return solver_inputs
+
+    def _velocity_conflict_matrix(self, pairs: list[TrackPairCandidate]) -> np.ndarray:
+        """(n, n) mask: True where two pairings' implied velocities disagree.
+
+        The vectorised form of velocity_conflict — same thresholds, same
+        abstention when either side has no inference — because this runs
+        against every pairing pair in the round.
+        """
+        n = len(pairs)
+        has_v = np.array([p.implied_vel is not None for p in pairs])
+        if not self.merge_vel_consistent or not has_v.any():
+            return np.zeros((n, n), dtype=bool)
+        ve = np.array([p.implied_vel[0] if p.implied_vel else 0.0 for p in pairs], dtype=np.float64)
+        vn = np.array([p.implied_vel[1] if p.implied_vel else 0.0 for p in pairs], dtype=np.float64)
+        speed = np.hypot(ve, vn)
+        d_speed = np.abs(speed[:, None] - speed)
+        ang = np.abs(
+            np.degrees(
+                np.arctan2(ve[:, None] * vn - vn[:, None] * ve, ve[:, None] * ve + vn[:, None] * vn),
+            )
+        )
+        heading_meaningful = np.minimum(speed[:, None], speed) >= _MIN_HEADING_SPEED_MS
+        bad = (d_speed > self.pair_vel_dv_ms) | ((ang > self.pair_vel_dtheta_deg) & heading_meaningful)
+        return bad & has_v[:, None] & has_v
+
+    def _partition_cluster(self, group: list[TrackPairCandidate]) -> list[list[TrackPairCandidate]]:
+        """Break one connected position cluster into consistent solver inputs.
+
+        The union-find above is transitive, so "within 4.5 km" chains: three
+        aircraft strung out over 12 km arrive here as one group, and before
+        this partition ran the whole chain became a single solver input.  On
+        the 15-node bench scene the baseline emitted inputs spanning up to 23
+        single-node tracks — an aircraft has one track per node, so a 23-track
+        input at 10 nodes is describing at least three aircraft as one.
+
+        Two ways a cluster can be describing more than one aircraft, and this
+        rejects both:
+
+        - A node appears with two different tracks.  A node's tracker gives one
+          track per aircraft, so that is two aircraft outright.  The old answer
+          — keep the node's louder track — is the worst available: the quiet
+          track's aircraft silently borrows a measurement belonging to the loud
+          one's, the solver gets a candidate no position explains, and the trim
+          that follows drops legitimate nodes about as often as contaminated
+          ones (33 of 69, measured live).
+
+        - The cluster is wider than the merge distance, or holds pairings whose
+          implied velocities contradict each other.  Membership is therefore
+          tested against EVERY pairing already in the sub-cluster, not just one
+          of them, which is what bounds the diameter at merge_dist_km instead
+          of letting it grow with the chain.
+
+        Every resulting sub-cluster is emitted.  This stage cannot tell which
+        aircraft is real — the solver's gates and the resolve slot decide that
+        downstream — and suppressing the runners-up here is how the SNR pick
+        went wrong in the first place.
+
+        Best-residual-first, so the strongest hypothesis founds the first
+        sub-cluster rather than whichever pairing the zone iteration reached
+        first.
+        """
+        if len(group) == 1:
+            return [group]
+        subs: list[list[TrackPairCandidate]] = []
+        sub_nodes: list[dict[str, str]] = []
+        for p in sorted(
+            group,
+            key=lambda c: (c.grid_resid_us, c.node_a_id, c.track_a_id, c.node_b_id, c.track_b_id),
+        ):
+            own = ((p.node_a_id, p.track_a_id), (p.node_b_id, p.track_b_id))
+            for sub, nodes in zip(subs, sub_nodes):
+                if any(nodes.get(nid, tid) != tid for nid, tid in own):
+                    continue
+                if any(_km_between(p, q) >= self.merge_dist_km for q in sub):
+                    continue
+                if self.merge_vel_consistent and any(
+                    velocity_conflict(p.implied_vel, q.implied_vel, self.pair_vel_dv_ms, self.pair_vel_dtheta_deg)
+                    for q in sub
+                ):
+                    continue
+                sub.append(p)
+                nodes.update(own)
+                break
+            else:
+                subs.append([p])
+                sub_nodes.append(dict(own))
+        return subs
+
+    def _solver_input(self, group: list[TrackPairCandidate]) -> dict:
+        """One node-consistent cluster, in the shape the solver worker takes."""
+        by_node: dict[str, dict] = {}
+        for p in group:
+            for nid, d, f, s in (
+                (p.node_a_id, p.delay_a, p.doppler_a, p.snr_a),
+                (p.node_b_id, p.delay_b, p.doppler_b, p.snr_b),
+            ):
+                # First writer wins, and that is not a choice between rivals:
+                # _split_node_conflicts guarantees every pairing here agrees on
+                # which track each node contributed, and a track's measurement
+                # is its own history[-1], so the repeats are the same numbers.
+                by_node.setdefault(nid, {"node_id": nid, "delay_us": d, "doppler_hz": f, "snr": s})
+
+        # Per-node track id sets, so a downstream trim (dropping one
+        # contaminated node's measurement and re-solving) can also drop
+        # exactly that node's source tracks from the published solve's
+        # provenance instead of carrying the whole cluster's track_ids.
+        track_ids_by_node: dict[str, set] = defaultdict(set)
+        for p in group:
+            track_ids_by_node[p.node_a_id].add(p.track_a_id)
+            track_ids_by_node[p.node_b_id].add(p.track_b_id)
+
+        # Worst fit in the cluster, not the best: a cluster is published as one
+        # target, so a pairing that failed to justify itself should not be
+        # laundered by a well-fitted neighbour sharing its position.  None
+        # whenever no pairing here was fitted, which on the deferred path
+        # (cv_fit=None — production) is always: the fit runs in the solver
+        # worker, so this field says "not scored yet" rather than "scored 0".
+        worst_chi2 = max((p.chi2_per_dof for p in group if p.chi2_per_dof is not None), default=None)
+
+        return {
+            "initial_guess": {
+                "lat": sum(p.lat for p in group) / len(group),
+                "lon": sum(p.lon for p in group) / len(group),
+                "alt_km": sum(p.alt_km for p in group) / len(group),
+            },
+            "initial_velocity": {
+                "vel_east_ms": sum(p.vel_east_ms for p in group) / len(group),
+                "vel_north_ms": sum(p.vel_north_ms for p in group) / len(group),
+            },
+            "measurements": list(by_node.values()),
+            "n_nodes": len(by_node),
+            "timestamp_ms": group[0].timestamp_ms,
+            "adsb_hex": None,
+            "chi2_per_dof": worst_chi2,
+            "n_epochs": min(p.n_epochs for p in group),
+            # Present only when the fit has not run yet: the solver worker runs
+            # it there, on its own threads and behind its own queue, instead of
+            # on the frame path.  Taken from the pairing with the most history,
+            # which is the best-conditioned in the cluster.
+            "cv_epochs": max((p.epochs for p in group if p.epochs), key=len, default=None),
+            "track_pair_ids": sorted({(p.track_a_id, p.track_b_id) for p in group})[:1],
+            "track_ids": sorted({p.track_a_id for p in group} | {p.track_b_id for p in group}),
+            "track_ids_by_node": {nid: sorted(ids) for nid, ids in track_ids_by_node.items()},
+        }
 
     def get_overlap_summary(self) -> list[dict]:
         """Return summary of all overlap zones."""
