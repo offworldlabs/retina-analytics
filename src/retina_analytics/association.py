@@ -2490,8 +2490,10 @@ class InterNodeAssociator:
 
         solver_inputs = []
         for merged in groups.values():
-            for group in self._split_node_conflicts(merged):
-                solver_inputs.append(self._solver_input(group))
+            subs = self._partition_cluster(merged)
+            if len(subs) > 1:
+                self.cluster_splits += 1
+            solver_inputs.extend(self._solver_input(g) for g in subs)
         return solver_inputs
 
     def _velocity_conflict_matrix(self, pairs: list[TrackPairCandidate]) -> np.ndarray:
@@ -2518,41 +2520,44 @@ class InterNodeAssociator:
         bad = (d_speed > self.pair_vel_dv_ms) | ((ang > self.pair_vel_dtheta_deg) & heading_meaningful)
         return bad & has_v[:, None] & has_v
 
-    def _split_node_conflicts(self, group: list[TrackPairCandidate]) -> list[list[TrackPairCandidate]]:
-        """Split one position cluster where a node contributes two tracks.
+    def _partition_cluster(self, group: list[TrackPairCandidate]) -> list[list[TrackPairCandidate]]:
+        """Break one connected position cluster into consistent solver inputs.
 
-        A node's tracker gives one track per aircraft, so a cluster in which
-        node N appears with both track x and track y is a cluster describing
-        two aircraft — or one aircraft plus a false pairing.  Either way it is
-        not one target, and resolving it by keeping N's louder track (what this
-        did before) is the worst available answer: the quiet track's aircraft
-        silently borrows a measurement belonging to the loud one's, the solver
-        is handed a candidate no position can explain, and the trim that
-        follows drops legitimate nodes about as often as contaminated ones.
+        The union-find above is transitive, so "within 4.5 km" chains: three
+        aircraft strung out over 12 km arrive here as one group, and before
+        this partition ran the whole chain became a single solver input.  On
+        the 15-node bench scene the baseline emitted inputs spanning up to 23
+        single-node tracks — an aircraft has one track per node, so a 23-track
+        input at 10 nodes is describing at least three aircraft as one.
 
-        So the cluster is partitioned instead, into sub-clusters that are
-        node-consistent by construction: each pairing joins the first
-        sub-cluster that is within the merge distance of it AND assigns no node
-        a different track.  All of them are emitted — this stage cannot tell
-        which aircraft is real, and the solver's own gates and the resolve-slot
-        logic downstream are where that is decided.
+        Two ways a cluster can be describing more than one aircraft, and this
+        rejects both:
+
+        - A node appears with two different tracks.  A node's tracker gives one
+          track per aircraft, so that is two aircraft outright.  The old answer
+          — keep the node's louder track — is the worst available: the quiet
+          track's aircraft silently borrows a measurement belonging to the loud
+          one's, the solver gets a candidate no position explains, and the trim
+          that follows drops legitimate nodes about as often as contaminated
+          ones (33 of 69, measured live).
+
+        - The cluster is wider than the merge distance, or holds pairings whose
+          implied velocities contradict each other.  Membership is therefore
+          tested against EVERY pairing already in the sub-cluster, not just one
+          of them, which is what bounds the diameter at merge_dist_km instead
+          of letting it grow with the chain.
+
+        Every resulting sub-cluster is emitted.  This stage cannot tell which
+        aircraft is real — the solver's gates and the resolve slot decide that
+        downstream — and suppressing the runners-up here is how the SNR pick
+        went wrong in the first place.
 
         Best-residual-first, so the strongest hypothesis founds the first
-        sub-cluster rather than whichever pairing the zone iteration happened
-        to reach first.
+        sub-cluster rather than whichever pairing the zone iteration reached
+        first.
         """
-        assignment: dict[str, str] = {}
-        for p in group:
-            for nid, tid in ((p.node_a_id, p.track_a_id), (p.node_b_id, p.track_b_id)):
-                if assignment.setdefault(nid, tid) != tid:
-                    break
-            else:
-                continue
-            break
-        else:
-            # No node contributes two tracks — the common case, untouched.
+        if len(group) == 1:
             return [group]
-
         subs: list[list[TrackPairCandidate]] = []
         sub_nodes: list[dict[str, str]] = []
         for p in sorted(
@@ -2563,7 +2568,12 @@ class InterNodeAssociator:
             for sub, nodes in zip(subs, sub_nodes):
                 if any(nodes.get(nid, tid) != tid for nid, tid in own):
                     continue
-                if all(_km_between(p, q) >= self.merge_dist_km for q in sub):
+                if any(_km_between(p, q) >= self.merge_dist_km for q in sub):
+                    continue
+                if self.merge_vel_consistent and any(
+                    velocity_conflict(p.implied_vel, q.implied_vel, self.pair_vel_dv_ms, self.pair_vel_dtheta_deg)
+                    for q in sub
+                ):
                     continue
                 sub.append(p)
                 nodes.update(own)
@@ -2571,7 +2581,6 @@ class InterNodeAssociator:
             else:
                 subs.append([p])
                 sub_nodes.append(dict(own))
-        self.cluster_splits += 1
         return subs
 
     def _solver_input(self, group: list[TrackPairCandidate]) -> dict:
