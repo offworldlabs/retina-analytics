@@ -219,13 +219,24 @@ _MIN_BISECTOR = 0.15
 # floor of the commercial envelope, so no real target is ever exempted by it.
 _MIN_HEADING_SPEED_MS = 30.0
 
-# How close two pairings' fitted/grid positions must be to be merged into one
-# solver input.  1.5x the 3 km association grid step: a true multi-node cluster
-# lands its pairings on neighbouring grid cells, so the merge has to reach one
-# cell beyond itself, but no further — at the old 6.0 (2x the step) two
-# aircraft 5 km apart merged into a single candidate, which the position solver
-# then answered by splitting the difference.
-_MERGE_DIST_KM = 4.5
+# How close two pairings' grid positions must be to be merged into one solver
+# input.  One association grid step, not two: the old 6.0 reached a full cell
+# beyond a true cluster's own spread, and two aircraft 5 km apart merged into a
+# single candidate the position solver then answered by splitting the
+# difference.  Swept on the offline bench (15-node ring, 6 seeds, --mode track
+# --cv-fit deferred), and monotone across the whole range — every metric
+# improves as the radius shrinks, with the real-track count identical at each
+# point:
+#
+#            published contam.   foreign nodes/solve   ghost by track
+#     6.0            32.0%              0.76               55.6%
+#     4.5            28.2%              0.63               54.3%
+#     3.0            25.1%              0.52               50.0%
+#
+# 3.0 is the floor of what was swept rather than a measured optimum; the trend
+# says a smaller radius is worth probing, but below the grid step two pairings
+# of one aircraft start landing in cells that can no longer reach each other.
+_MERGE_DIST_KM = 3.0
 
 # Velocity-conflict thresholds for pair-level exclusivity (see
 # velocity_conflict).  Two pairings sharing a track whose implied velocities

@@ -444,14 +444,14 @@ class TestClusterPartition:
     """
 
     def test_a_chain_is_not_one_target(self):
-        """Three pairings 4 km apart in a line span 8 km — two targets, not one.
+        """Three pairings 2 km apart in a line span 4 km — two targets, not one.
 
         The union edge joins 1-2 and 2-3, so union-find hands the whole chain
         over as one group; membership is tested against every pairing already
         in a sub-cluster, which is what bounds the diameter.
         """
         a = InterNodeAssociator()
-        step = 4.0 / KM_PER_DEG_LAT
+        step = 2.0 / KM_PER_DEG_LAT
         inputs = a.format_track_pairs_for_solver(
             [
                 _candidate("a1", "b1", lat=34.88),
@@ -465,12 +465,12 @@ class TestClusterPartition:
         assert widest["n_nodes"] == 4
 
     def test_two_aircraft_split_instead_of_being_merged(self):
-        """Both nodes see both aircraft, 4 km apart — one input each."""
+        """Both nodes see both aircraft, 2 km apart — one input each."""
         a = InterNodeAssociator()
         inputs = a.format_track_pairs_for_solver(
             [
                 _candidate("aP", "bP", lat=34.88, snr_a=20.0, snr_b=20.0),
-                _candidate("aQ", "bQ", lat=34.88 + 4.0 / KM_PER_DEG_LAT, snr_a=6.0, snr_b=6.0),
+                _candidate("aQ", "bQ", lat=34.88 + 2.0 / KM_PER_DEG_LAT, snr_a=6.0, snr_b=6.0),
             ]
         )
         assert len(inputs) == 2
@@ -493,11 +493,11 @@ class TestClusterPartition:
         inputs = a.format_track_pairs_for_solver(
             [
                 _candidate("aP", "bP", lat=34.88, grid_resid_us=0.1),
-                _candidate("aQ", "bQ", lat=34.88 + 4.0 / KM_PER_DEG_LAT, grid_resid_us=0.1),
+                _candidate("aQ", "bQ", lat=34.88 + 2.0 / KM_PER_DEG_LAT, grid_resid_us=0.1),
                 # The cross pairing: node a's aircraft P against node b's Q,
                 # landing between the two true clusters and inside the merge
                 # radius of both.
-                _candidate("aP", "bQ", lat=34.88 + 2.0 / KM_PER_DEG_LAT, grid_resid_us=0.9),
+                _candidate("aP", "bQ", lat=34.88 + 1.0 / KM_PER_DEG_LAT, grid_resid_us=0.9),
             ]
         )
         assert len(inputs) == 3
