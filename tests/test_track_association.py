@@ -453,23 +453,46 @@ class TestFormatTrackPairsForSolver:
         assert InterNodeAssociator().format_track_pairs_for_solver([]) == []
 
 
-class TestSameNodeConflictSplits:
-    """A node contributing two tracks to one cluster means two aircraft.
+class TestClusterPartition:
+    """A cluster is one aircraft only if nothing in it says otherwise.
 
-    A node's tracker gives one track per aircraft, so the cluster is not one
-    target and cannot be made into one by keeping the louder track — that
-    hands the solver a candidate no position explains, and 58-65% of dark
-    candidates measured on the live fleet carried a node that could not see
-    the aircraft they were finally published as.
+    Two things say otherwise: a node appearing with two different tracks (its
+    tracker gives one track per aircraft, so that is two aircraft), and a
+    cluster wider than the merge distance (the union-find that builds it is
+    transitive, so "within 4.5 km" chains across an arbitrary distance).
+    Before this partition ran, 58-65% of dark candidates measured on the live
+    fleet carried a node that could not see the aircraft they were published
+    as.
     """
 
+    def test_a_chain_is_not_one_target(self):
+        """Three pairings 2 km apart in a line span 4 km — two targets, not one.
+
+        The union edge joins 1-2 and 2-3, so union-find hands the whole chain
+        over as one group; membership is tested against every pairing already
+        in a sub-cluster, which is what bounds the diameter.
+        """
+        a = InterNodeAssociator()
+        step = 2.0 / KM_PER_DEG_LAT
+        inputs = a.format_track_pairs_for_solver(
+            [
+                _candidate("a1", "b1", lat=34.88),
+                _candidate("a2", "b2", lat=34.88 + step, node_a_id="site-c", node_b_id="site-d"),
+                _candidate("a3", "b3", lat=34.88 + 2 * step, node_a_id="site-e", node_b_id="site-f"),
+            ]
+        )
+        assert len(inputs) == 2
+        assert a.cluster_splits == 1
+        widest = max(inputs, key=lambda s: s["n_nodes"])
+        assert widest["n_nodes"] == 4
+
     def test_two_aircraft_split_instead_of_being_merged(self):
-        """Both nodes see both aircraft, 4 km apart — one input each."""
+        """Both nodes see both aircraft, 2 km apart — one input each."""
         a = InterNodeAssociator()
         inputs = a.format_track_pairs_for_solver(
             [
                 _candidate("aP", "bP", lat=34.88, snr_a=20.0, snr_b=20.0),
-                _candidate("aQ", "bQ", lat=34.88 + 4.0 / KM_PER_DEG_LAT, snr_a=6.0, snr_b=6.0),
+                _candidate("aQ", "bQ", lat=34.88 + 2.0 / KM_PER_DEG_LAT, snr_a=6.0, snr_b=6.0),
             ]
         )
         assert len(inputs) == 2
@@ -492,11 +515,11 @@ class TestSameNodeConflictSplits:
         inputs = a.format_track_pairs_for_solver(
             [
                 _candidate("aP", "bP", lat=34.88, grid_resid_us=0.1),
-                _candidate("aQ", "bQ", lat=34.88 + 4.0 / KM_PER_DEG_LAT, grid_resid_us=0.1),
+                _candidate("aQ", "bQ", lat=34.88 + 2.0 / KM_PER_DEG_LAT, grid_resid_us=0.1),
                 # The cross pairing: node a's aircraft P against node b's Q,
                 # landing between the two true clusters and inside the merge
                 # radius of both.
-                _candidate("aP", "bQ", lat=34.88 + 2.0 / KM_PER_DEG_LAT, grid_resid_us=0.9),
+                _candidate("aP", "bQ", lat=34.88 + 1.0 / KM_PER_DEG_LAT, grid_resid_us=0.9),
             ]
         )
         assert len(inputs) == 3
