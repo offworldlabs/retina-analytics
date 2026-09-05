@@ -410,6 +410,26 @@ class TestFormatTrackPairsForSolver:
         which _split_node_conflicts now (correctly) separates into two targets,
         so the worst-fit rule would never have been reached.
         """
+        base = dict(
+            timestamp_ms=1000,
+            node_a_id="site-a",
+            node_b_id="site-b",
+            delay_a=30.0,
+            delay_b=40.0,
+            doppler_a=5.0,
+            doppler_b=-5.0,
+            snr_a=15.0,
+            snr_b=15.0,
+            t_s_a=1.0,
+            t_s_b=1.0,
+            lat=34.88,
+            lon=-82.35,
+            alt_km=7.0,
+            vel_east_ms=180.0,
+            vel_north_ms=-90.0,
+            dof=14,
+            n_epochs=6,
+        )
         pairs = [
             _candidate("a1", "b1", chi2_per_dof=0.4),
             _candidate("a1", "b2", node_b_id="site-c", chi2_per_dof=9.9),
