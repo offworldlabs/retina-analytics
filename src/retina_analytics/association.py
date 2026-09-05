@@ -453,6 +453,12 @@ class TrackPairCandidate:
     doppler_b: float
     snr_a: float
     snr_b: float
+    # Sample time (epoch seconds) of each of those latest measurements.  The
+    # two nodes sample at independent phases, so these differ by up to a frame
+    # interval and the solver — which treats its measurement set as one epoch —
+    # needs them to dead-reckon each delay onto a common time.
+    t_s_a: float
+    t_s_b: float
     # Fitted trajectory at the most recent epoch.
     lat: float
     lon: float
@@ -1616,6 +1622,7 @@ class InterNodeAssociator:
                             "delay_us": float(m["last"]["delay_us"]),
                             "doppler_hz": float(m["last"]["doppler_hz"]),
                             "snr": float(m["last"].get("snr", 0.0)),
+                            "t_s": float(m["last"]["t_s"]),
                         }
                         for m in matches
                     ],
@@ -1825,6 +1832,7 @@ class InterNodeAssociator:
                             "delay_us": float(m["_last"]["delay_us"]),
                             "doppler_hz": float(m["_last"]["doppler_hz"]),
                             "snr": float(m["_last"].get("snr", 0.0)),
+                            "t_s": float(m["_last"]["t_s"]),
                         }
                         for m in matches
                     ],
@@ -2226,6 +2234,8 @@ class InterNodeAssociator:
                 doppler_b=float(last_b["doppler_hz"]),
                 snr_a=float(last_a.get("snr", 0.0)),
                 snr_b=float(last_b.get("snr", 0.0)),
+                t_s_a=float(last_a["t_s"]),
+                t_s_b=float(last_b["t_s"]),
                 lat=lat,
                 lon=lon,
                 alt_km=alt_km,
@@ -2324,12 +2334,17 @@ class InterNodeAssociator:
         for group in groups.values():
             by_node: dict[str, dict] = {}
             for p in group:
-                for nid, d, f, s in (
-                    (p.node_a_id, p.delay_a, p.doppler_a, p.snr_a),
-                    (p.node_b_id, p.delay_b, p.doppler_b, p.snr_b),
+                for nid, d, f, s, t in (
+                    (p.node_a_id, p.delay_a, p.doppler_a, p.snr_a, p.t_s_a),
+                    (p.node_b_id, p.delay_b, p.doppler_b, p.snr_b, p.t_s_b),
                 ):
                     if nid not in by_node or s > by_node[nid]["snr"]:
-                        by_node[nid] = {"node_id": nid, "delay_us": d, "doppler_hz": f, "snr": s}
+                        # t_s travels with the measurement it belongs to (see
+                        # TrackPairCandidate.t_s_a): the consumer aligns the
+                        # cluster's delays onto one epoch, and a delay paired
+                        # with the wrong node's sample time is worse than no
+                        # alignment at all.
+                        by_node[nid] = {"node_id": nid, "delay_us": d, "doppler_hz": f, "snr": s, "t_s": t}
 
             # Per-node track id sets, so a downstream trim (dropping one
             # contaminated node's measurement and re-solving) can also drop
