@@ -2230,6 +2230,7 @@ class InterNodeAssociator:
             if self.cv_fit is not None
             else _b.get("pairs", self._MAX_PAIRS_PER_ROUND)
         )
+
         def _grid_resid_us(kv) -> float:
             (i_a, i_b), g = kv
             return float(
