@@ -15,6 +15,7 @@ from retina_analytics.association import (
     InterNodeAssociator,
     TrackPairCandidate,
     _merge_epochs,
+    velocity_conflict,
 )
 from retina_analytics.constants import KM_PER_DEG_LAT
 
@@ -118,6 +119,36 @@ def _assoc(cv_fit=None, **kw):
     a.register_node("site-a", _NODE_A)
     a.register_node("site-b", _NODE_B)
     return a
+
+
+def _candidate(track_a_id, track_b_id, **kw):
+    """A TrackPairCandidate at a default position, for the clustering tests.
+
+    Clustering is judged on position, per-node track ids and implied velocity
+    alone, so these need no zone geometry — building them by hand keeps a
+    two-aircraft scene readable and exactly reproducible.
+    """
+    fields = dict(
+        timestamp_ms=1000,
+        node_a_id="site-a",
+        node_b_id="site-b",
+        delay_a=30.0,
+        delay_b=40.0,
+        doppler_a=5.0,
+        doppler_b=-5.0,
+        snr_a=15.0,
+        snr_b=15.0,
+        lat=34.88,
+        lon=-82.35,
+        alt_km=7.0,
+        vel_east_ms=180.0,
+        vel_north_ms=-90.0,
+        implied_vel=(180.0, -90.0),
+        dof=14,
+        n_epochs=6,
+    )
+    fields.update(kw)
+    return TrackPairCandidate(track_a_id=track_a_id, track_b_id=track_b_id, **fields)
 
 
 def _cv_fit():
@@ -372,35 +403,215 @@ class TestFormatTrackPairsForSolver:
 
         The cluster is published as one target, so its quality is the quality of
         the weakest pairing holding it together.
+
+        The two pairings here share node-a track a1, which is what makes them
+        one cluster rather than two: same node, same track, two neighbours —
+        the 3-node case, not a conflict.  It used to be a2/b2 against a1/b1,
+        which _split_node_conflicts now (correctly) separates into two targets,
+        so the worst-fit rule would never have been reached.
         """
-        base = dict(
-            timestamp_ms=1000,
-            node_a_id="site-a",
-            node_b_id="site-b",
-            delay_a=30.0,
-            delay_b=40.0,
-            doppler_a=5.0,
-            doppler_b=-5.0,
-            snr_a=15.0,
-            snr_b=15.0,
-            lat=34.88,
-            lon=-82.35,
-            alt_km=7.0,
-            vel_east_ms=180.0,
-            vel_north_ms=-90.0,
-            dof=14,
-            n_epochs=6,
-        )
         pairs = [
-            TrackPairCandidate(track_a_id="a1", track_b_id="b1", chi2_per_dof=0.4, **base),
-            TrackPairCandidate(track_a_id="a2", track_b_id="b2", chi2_per_dof=9.9, **base),
+            _candidate("a1", "b1", chi2_per_dof=0.4),
+            _candidate("a1", "b2", node_b_id="site-c", chi2_per_dof=9.9),
         ]
         inputs = InterNodeAssociator().format_track_pairs_for_solver(pairs)
         assert len(inputs) == 1
         assert inputs[0]["chi2_per_dof"] == 9.9
 
+    def test_unfitted_cluster_reports_no_chi2(self):
+        """Production defers the fit, so the field must say so rather than 0.
+
+        With cv_fit=None nothing here is scored; a numeric chi2 would be the
+        solver worker's gate reading a quality nobody measured.
+        """
+        inputs = InterNodeAssociator().format_track_pairs_for_solver([_candidate("a1", "b1")])
+        assert inputs[0]["chi2_per_dof"] is None
+
     def test_empty_input(self):
         assert InterNodeAssociator().format_track_pairs_for_solver([]) == []
+
+
+class TestSameNodeConflictSplits:
+    """A node contributing two tracks to one cluster means two aircraft.
+
+    A node's tracker gives one track per aircraft, so the cluster is not one
+    target and cannot be made into one by keeping the louder track — that
+    hands the solver a candidate no position explains, and 58-65% of dark
+    candidates measured on the live fleet carried a node that could not see
+    the aircraft they were finally published as.
+    """
+
+    def test_two_aircraft_split_instead_of_being_merged(self):
+        """Both nodes see both aircraft, 4 km apart — one input each."""
+        a = InterNodeAssociator()
+        inputs = a.format_track_pairs_for_solver(
+            [
+                _candidate("aP", "bP", lat=34.88, snr_a=20.0, snr_b=20.0),
+                _candidate("aQ", "bQ", lat=34.88 + 4.0 / KM_PER_DEG_LAT, snr_a=6.0, snr_b=6.0),
+            ]
+        )
+        assert len(inputs) == 2
+        assert a.cluster_splits == 1
+        by_node = [s_in["track_ids_by_node"] for s_in in inputs]
+        assert {"site-a": ["aP"], "site-b": ["bP"]} in by_node
+        assert {"site-a": ["aQ"], "site-b": ["bQ"]} in by_node
+        # No SNR pick: the quiet aircraft keeps its own measurements rather
+        # than borrowing the loud one's.
+        assert sorted(m["snr"] for s_in in inputs for m in s_in["measurements"]) == [6.0, 6.0, 20.0, 20.0]
+
+    def test_a_false_pairing_between_them_stands_alone(self):
+        """The cross pairing is emitted too, but never welded onto a true one.
+
+        This stage cannot tell which of three hypotheses is real — the solver's
+        gates and the resolve slot decide that — so the requirement is only
+        that no emitted input mixes two aircraft.
+        """
+        a = InterNodeAssociator()
+        inputs = a.format_track_pairs_for_solver(
+            [
+                _candidate("aP", "bP", lat=34.88, grid_resid_us=0.1),
+                _candidate("aQ", "bQ", lat=34.88 + 4.0 / KM_PER_DEG_LAT, grid_resid_us=0.1),
+                # The cross pairing: node a's aircraft P against node b's Q,
+                # landing between the two true clusters and inside the merge
+                # radius of both.
+                _candidate("aP", "bQ", lat=34.88 + 2.0 / KM_PER_DEG_LAT, grid_resid_us=0.9),
+            ]
+        )
+        assert len(inputs) == 3
+        for s_in in inputs:
+            assert all(len(ids) == 1 for ids in s_in["track_ids_by_node"].values())
+        assert {"site-a": ["aP"], "site-b": ["bP"]} in [s["track_ids_by_node"] for s in inputs]
+        assert {"site-a": ["aQ"], "site-b": ["bQ"]} in [s["track_ids_by_node"] for s in inputs]
+
+    def test_one_aircraft_on_three_nodes_is_not_split(self):
+        """The legitimate multi-node cluster is untouched.
+
+        Two pairings sharing node-a track a1 are the same aircraft seen by
+        three nodes — one track per node, no conflict — and must still merge
+        into a single 3-node solver input.
+        """
+        a = InterNodeAssociator()
+        inputs = a.format_track_pairs_for_solver(
+            [
+                _candidate("a1", "b1"),
+                _candidate("a1", "c1", node_b_id="site-c"),
+            ]
+        )
+        assert len(inputs) == 1
+        assert inputs[0]["n_nodes"] == 3
+        assert a.cluster_splits == 0
+
+    def test_velocity_disagreement_blocks_the_merge(self):
+        """Two coincident pairings heading opposite ways are two targets.
+
+        Proximity alone made this one cluster, which is the crossing case the
+        old 6 km radius could not distinguish from one aircraft's own
+        neighbouring pairings.
+        """
+        a = InterNodeAssociator()
+        inputs = a.format_track_pairs_for_solver(
+            [
+                _candidate("a1", "b1", implied_vel=(200.0, 0.0)),
+                _candidate("a2", "b2", implied_vel=(-200.0, 0.0), lat=34.881),
+            ]
+        )
+        assert len(inputs) == 2
+        # Split by the merge edge, not by the conflict split, so nothing was
+        # ever a single cluster to begin with.
+        assert a.cluster_splits == 0
+
+
+class TestVelocityExclusivity:
+    """Deferred-path exclusivity: production has no chi2 to rank on.
+
+    cv_fit is None live, so stage 2's chi2 selection never runs and every
+    hypothesis the coarse grid passed is emitted — including the several that
+    claim the same track.  The Doppler-implied velocity cannot reject a
+    pairing on its own (0% power, measured), but two claims about one track's
+    velocity that cannot both be true mean at most one pairing is.
+    """
+
+    def _run(self, **kw):
+        a = _assoc(**kw)
+        a.submit_tracks(
+            "site-a",
+            [{"track_id": "aP", "history": _history(_NODE_A, 34.88, -82.35, 7.0, 180.0, -90.0, anchor="end")}],
+            1000,
+        )
+        return a, a.submit_tracks(
+            "site-b",
+            [
+                {"track_id": "bP", "history": _history(_NODE_B, 34.88, -82.35, 7.0, 180.0, -90.0, anchor="end")},
+                {"track_id": "bQ", "history": _history(_NODE_B, 34.88, -82.35, 7.0, -150.0, 170.0, anchor="end")},
+            ],
+            2000,
+        )
+
+    def test_the_contradicting_hypothesis_is_dropped(self):
+        """Both pairings pass the coarse gate at the same grid point and the
+        same delay residual — the residual is ~0 for a crossed pairing at n=2,
+        which is why an assignment on it alone cost recall.  The implied
+        headings differ by 75°, and that is decisive."""
+        a, pairs = self._run()
+        assert [(p.track_a_id, p.track_b_id) for p in pairs] == [("aP", "bP")]
+        assert a.track_pairs_superseded == 1
+
+    def test_off_by_flag_restores_both(self):
+        a, pairs = self._run(pair_vel_exclusive=False)
+        assert len(pairs) == 2
+        assert a.track_pairs_superseded == 0
+
+    def test_agreement_keeps_both(self):
+        """Where the two hypotheses agree, nothing has been learned.
+
+        A three-node target legitimately pairs one track against two
+        neighbours; this must never become an excuse to drop one of them, and
+        it is the reason the test is on disagreement rather than on rank.
+        """
+        a = _assoc()
+        a.submit_tracks(
+            "site-a",
+            [{"track_id": "aP", "history": _history(_NODE_A, 34.88, -82.35, 7.0, 180.0, -90.0, anchor="end")}],
+            1000,
+        )
+        pairs = a.submit_tracks(
+            "site-b",
+            [
+                {"track_id": "bP", "history": _history(_NODE_B, 34.88, -82.35, 7.0, 180.0, -90.0, anchor="end")},
+                {"track_id": "bP2", "history": _history(_NODE_B, 34.88, -82.35, 7.0, 182.0, -88.0, anchor="end")},
+            ],
+            2000,
+        )
+        assert len(pairs) == 2
+        assert a.track_pairs_superseded == 0
+
+    def test_a_supplied_fit_keeps_the_chi2_path(self):
+        """Gated on cv_fit is None, so an inline-fitting caller is untouched."""
+        a, pairs = self._run(cv_fit=_cv_fit(), cv_min_span_s=2.0, cv_min_epochs=2)
+        assert len(pairs) == 1
+        assert pairs[0].chi2_per_dof is not None
+
+
+class TestVelocityConflict:
+    def test_speed_alone_can_decide(self):
+        assert velocity_conflict((200.0, 0.0), (60.0, 0.0), 80.0, 40.0)
+        assert not velocity_conflict((200.0, 0.0), (150.0, 0.0), 80.0, 40.0)
+
+    def test_heading_alone_can_decide(self):
+        assert velocity_conflict((200.0, 0.0), (0.0, 200.0), 80.0, 40.0)
+        assert not velocity_conflict((200.0, 0.0), (190.0, 40.0), 80.0, 40.0)
+
+    def test_missing_inference_never_conflicts(self):
+        """No information is not evidence — the abstention this shares with
+        implied_horizontal_velocity, which returns None on geometry that
+        cannot support the inference at all."""
+        assert not velocity_conflict(None, (200.0, 0.0), 80.0, 40.0)
+        assert not velocity_conflict((200.0, 0.0), None, 80.0, 40.0)
+
+    def test_near_zero_speeds_compare_magnitude_only(self):
+        """Below 30 m/s the heading is noise, so opposite directions at a
+        crawl are not called a conflict."""
+        assert not velocity_conflict((5.0, 0.0), (-5.0, 0.0), 80.0, 40.0)
 
 
 # Third node at the same receiver — a triple-illuminator site — for exercising
