@@ -929,6 +929,19 @@ def _has_receiver_position(config: dict) -> bool:
     return not (_coord(config, "rx_lat") == 0.0 and _coord(config, "rx_lon") == 0.0)
 
 
+def _worlds_compatible(world_a, world_b) -> bool:
+    """Whether two world tags may be associated with each other.
+
+    Fail-open in both directions, which is the rule the ADS-B seed gate already
+    applies: an unknown world on either side — no provider, a node the provider
+    does not know, an untagged state — is compatible with everything, and only
+    two *known* and different tags are refused.  A tag that is present but empty
+    is not a world; it reads as unknown rather than as a third world that
+    matches nothing.
+    """
+    return not world_a or not world_b or world_a == world_b
+
+
 def _merge_epochs_multi(histories: list[tuple[str, list[dict]]]) -> list:
     """N-node generalisation of _merge_epochs, same output shape.
 
@@ -1230,6 +1243,15 @@ class InterNodeAssociator:
         # hex collision, a mis-tag) whatever its residuals say.  Optional and
         # fail-open in both directions: no provider, or an unknown world on
         # either side, changes nothing.
+        #
+        # The same reasoning applies one level lower, to the overlap zones
+        # bottom-up pairing is drawn from: two nodes in different worlds can
+        # never see the same echo, so a grid between them only ever pairs a
+        # synthetic tracklet with a real one.  On the test fleet that is 400
+        # of 1653 zones (50 synthetic × 8 hardware nodes), 39 of them with a
+        # real overlap, and the real node ids duly turned up in a third of
+        # the synthetic dark solver records.  register_node and
+        # rebuild_zones_for therefore skip cross-world pairs outright.
         self.node_world_provider = node_world_provider
         # Counters — plain += like the claiming ones above.
         self.adsb_seed_rounds: int = 0
@@ -1239,6 +1261,12 @@ class InterNodeAssociator:
         self.adsb_seed_world_rejects: int = 0
         self.adsb_tracklets_excluded: int = 0
         self.adsb_inputs_emitted: int = 0
+        # Node pairs registration or a rebuild declined to build a grid for
+        # because the two nodes are in different worlds.  Counted per pair
+        # considered, so it rises by O(N) on every registration in a mixed
+        # fleet — the useful reading is that it is non-zero at all, and
+        # against overlap_zones, how much of the pair space it is removing.
+        self.assoc_world_skipped_pairs: int = 0
 
     def register_node(self, node_id: str, config: dict):
         """Register a node and pre-compute overlap zones with all existing nodes.
@@ -1250,7 +1278,9 @@ class InterNodeAssociator:
         as long as their geometry (RX/TX position) hasn't changed.
 
         A node whose config carries no receiver position is registered but takes
-        no part in overlap — see _has_receiver_position.
+        no part in overlap — see _has_receiver_position.  A pair whose two nodes
+        are in known and different worlds gets no zone either — see
+        node_world_provider and _worlds_compatible.
         """
         positioned = _has_receiver_position(config)
         rx_alt_km = (config.get("rx_alt_ft") or 0) * 0.3048 / 1000.0
@@ -1310,10 +1340,19 @@ class InterNodeAssociator:
             # Pre-compute overlap zones with existing nodes (serialised to avoid
             # RuntimeError: dictionary changed size during iteration when multiple
             # nodes register concurrently from a thread-pool executor).
+            my_world = self._node_world(node_id)
             for existing_id, existing_geo in list(self.node_geometries.items()):
                 if not self._is_positioned(existing_id):
                     continue
                 pair_key = tuple(sorted([node_id, existing_id]))
+                if not _worlds_compatible(my_world, self._node_world(existing_id)):
+                    # Re-registration can be what moved this node between
+                    # worlds, so drop rather than merely skip: a grid built
+                    # while the pair was compatible must not survive the
+                    # change that made it cross-world.
+                    self._drop_pair(pair_key)
+                    self.assoc_world_skipped_pairs += 1
+                    continue
                 zone = compute_overlap_zone(
                     geo if pair_key[0] == node_id else existing_geo,
                     existing_geo if pair_key[0] == node_id else geo,
@@ -1360,12 +1399,34 @@ class InterNodeAssociator:
                 "adsb_seed_world_rejects",
                 "adsb_tracklets_excluded",
                 "adsb_inputs_emitted",
+                "assoc_world_skipped_pairs",
             ):
                 setattr(self, name, 0)
 
     def _is_positioned(self, node_id: str) -> bool:
         """Whether a registered node has a receiver position to pair against."""
         return _has_receiver_position(self.node_configs.get(node_id, {}))
+
+    def _node_world(self, node_id: str):
+        """This node's world, or None when nothing can say.
+
+        No provider means no world gate at all, which is what every caller
+        that never injects one gets.
+        """
+        if self.node_world_provider is None:
+            return None
+        return self.node_world_provider(node_id)
+
+    def _drop_pair(self, pair_key: tuple[str, str]) -> None:
+        """Remove one pair's overlap zone and both adjacency entries.
+
+        Caller holds _register_lock.  Both nodes stay registered and stay
+        paired with everyone else; only this edge goes.
+        """
+        a_id, b_id = pair_key
+        self.overlap_zones.pop(pair_key, None)
+        self._neighbors.get(a_id, set()).discard(b_id)
+        self._neighbors.get(b_id, set()).discard(a_id)
 
     def _drop_zones_for(self, node_id: str) -> int:
         """Remove every overlap zone and adjacency entry naming this node.
@@ -1427,10 +1488,18 @@ class InterNodeAssociator:
             geo.fov = self.fov_provider(node_id)
         rebuilt = 0
         with self._register_lock:
+            my_world = self._node_world(node_id)
             for other_id, other_geo in list(self.node_geometries.items()):
                 if other_id == node_id or not self._is_positioned(other_id):
                     continue
                 pair_key = tuple(sorted([node_id, other_id]))
+                if not _worlds_compatible(my_world, self._node_world(other_id)):
+                    # Dropped, not skipped: a rebuild is exactly where a node
+                    # that has since changed world sheds the grids it built
+                    # against the world it left.
+                    self._drop_pair(pair_key)
+                    self.assoc_world_skipped_pairs += 1
+                    continue
                 a, b = (geo, other_geo) if pair_key[0] == node_id else (other_geo, geo)
                 zone = compute_overlap_zone(
                     a,
@@ -1518,9 +1587,7 @@ class InterNodeAssociator:
                 if st is None or st.get("lat") is None or st.get("lon") is None:
                     self.adsb_seed_no_state += 1
                     continue
-                st_world = st.get("world")
-                node_world = world_of.get(nid)
-                if st_world is not None and node_world is not None and st_world != node_world:
+                if not _worlds_compatible(st.get("world"), world_of.get(nid)):
                     self.adsb_seed_world_rejects += 1
                     continue
                 dt = float(last["t_s"]) - st.get("timestamp_ms", 0) / 1000.0
