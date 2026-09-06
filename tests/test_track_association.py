@@ -138,6 +138,8 @@ def _candidate(track_a_id, track_b_id, **kw):
         doppler_b=-5.0,
         snr_a=15.0,
         snr_b=15.0,
+        t_s_a=1.0,
+        t_s_b=1.0,
         lat=34.88,
         lon=-82.35,
         alt_km=7.0,
