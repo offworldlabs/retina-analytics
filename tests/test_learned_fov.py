@@ -14,7 +14,7 @@ import math
 
 import pytest
 
-from retina_analytics.constants import KM_PER_DEG_LAT
+from retina_analytics.constants import KM_PER_DEG_LAT, bearing_deg, haversine_km
 from retina_analytics.empirical_coverage import (
     CALIBRATION_SCHEMA,
     EmpiricalCoverageState,
@@ -301,6 +301,61 @@ class TestLearnedWedgePolygon:
         assert open_bins < N_BINS  # most bearings never opened
         # RX-start + RX-close + exactly the open bins.
         assert len(poly) == open_bins + 2
+
+
+# ── FOV off: what get_node_summary publishes ────────────────────────────────
+
+
+class TestFovOffPublishesEvidenceOnly:
+    """The published polygon under FOV_MODE=off is evidence-only.
+
+    It used to be the accumulated bins clipped to the detection area's
+    declared beam_azimuth_deg/beam_width_deg — configuration, not
+    measurement — so every measured bin outside the declared wedge was
+    zeroed and the map drew a pie slice over a node that had been seen
+    detecting all round it.
+    """
+
+    def _manager_with_a_narrow_wedge(self):
+        """A node aimed due north with a 20 deg wedge, evidence on both sides."""
+        m = NodeAnalyticsManager()  # fov_mode defaults to "off"
+        m.register_node(
+            "N",
+            dict(
+                rx_lat=_RX_LAT,
+                rx_lon=_RX_LON,
+                tx_lat=_TX_LAT,
+                tx_lon=_TX_LON,
+                max_range_km=50,
+                beam_azimuth_deg=0.0,
+                beam_width_deg=20.0,
+            ),
+        )
+        ec = m.empirical_coverages["N"]
+        for bearing in (2.5, 182.5):  # bin 0 (in wedge) and bin 36 (opposite)
+            for i in range(12):
+                ec.add_point(*_at_bearing(bearing, 20.0 + i * 0.01))
+        return m
+
+    def test_the_declared_wedge_no_longer_clips_the_published_polygon(self):
+        m = self._manager_with_a_narrow_wedge()
+        assert m.detection_areas["N"].beam_width_deg == 20.0
+        poly = m.get_node_summary("N")["empirical_coverage"]["polygon"]
+        assert poly is not None
+        out_of_wedge = [
+            (lat, lon)
+            for lat, lon in poly
+            if abs((bearing_deg(_RX_LAT, _RX_LON, lat, lon) + 180.0) % 360.0 - 180.0) > 10.0
+            and haversine_km(_RX_LAT, _RX_LON, lat, lon) > 1.0
+        ]
+        assert out_of_wedge, "the southern lobe was clipped away by the declared beam"
+
+    def test_it_is_the_evidence_only_shape(self):
+        """Not merely "unclipped" — the same polygon to_polygon(evidence_only)
+        returns, so the two cannot drift apart unnoticed."""
+        m = self._manager_with_a_narrow_wedge()
+        poly = m.get_node_summary("N")["empirical_coverage"]["polygon"]
+        assert poly == m.empirical_coverages["N"].to_polygon(evidence_only=True)
 
 
 # ── max_limit_km cache invalidation ──────────────────────────────────────────
