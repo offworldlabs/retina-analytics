@@ -287,7 +287,8 @@ class TestDopplerIsAVelocityProjection:
 class TestOverlapGridCost:
     """The both-beams test is 2-D, so it must not be repeated per altitude.
 
-    compute_overlap_zone evaluates six altitude layers over one bounding box,
+    compute_overlap_zone evaluates a configurable set of altitude layers over
+    one bounding box (six by default, twelve in production),
     and _point_in_beam takes (lat, lon) only.  Re-deriving it per layer was 87%
     of a node rebuild on the 52-node test deployment (855k calls where 143k
     distinct columns exist), which is what put analytics_refresh past its 120 s
@@ -346,6 +347,53 @@ class TestOverlapGridCost:
         for lat, lon, alt in zone.grid_points:
             by_alt.setdefault(alt, set()).add((lat, lon))
         assert set(by_alt) == set(self.ALTS)
+
+    def test_layer_count_scales_the_grid_linearly(self):
+        """Twelve 1 km layers cost exactly twice a six-layer grid, not more.
+
+        The columns are altitude-independent (they are what the both-beams
+        test resolves once, above), so doubling the ladder doubles the emitted
+        points and nothing else — this is the precompute bill production pays
+        for ASSOC_ALT_LAYERS_KM, and the number the server PR quotes.
+        """
+        geo_a, geo_b = self._pair()
+        six = compute_overlap_zone(geo_a, geo_b, grid_step_km=5.0, altitudes_km=self.ALTS)
+        twelve_alts = tuple(float(k) for k in range(1, 13))
+        twelve = compute_overlap_zone(geo_a, geo_b, grid_step_km=5.0, altitudes_km=twelve_alts)
+        assert six.grid_points
+        assert len(twelve.grid_points) == 2 * len(six.grid_points)
+        assert {a for _, _, a in twelve.grid_points} == set(twelve_alts)
+
+    def test_associator_threads_its_layer_set_into_every_zone(self):
+        """The layer set is a property of the associator, not a hardcode.
+
+        register_node builds a zone per neighbour pair; the ladder the
+        deployment configured has to reach all of them, or the finer layers
+        exist only in whichever build path happened to be patched.
+        """
+        geo_a, geo_b = self._pair()
+        alts = (2.0, 4.0, 6.0, 8.0)
+        assoc = InterNodeAssociator(grid_step_km=5.0, altitudes_km=alts)
+        assert assoc.altitudes_km == alts
+        for geo in (geo_a, geo_b):
+            assoc.register_node(
+                geo.node_id,
+                {
+                    "rx_lat": geo.rx_lat,
+                    "rx_lon": geo.rx_lon,
+                    "rx_alt_km": geo.rx_alt_km,
+                    "tx_lat": geo.tx_lat,
+                    "tx_lon": geo.tx_lon,
+                    "tx_alt_km": geo.tx_alt_km,
+                    "beam_azimuth_deg": geo.beam_azimuth_deg,
+                    "beam_width_deg": geo.beam_width_deg,
+                    "max_range_km": geo.max_range_km,
+                },
+            )
+        zones = [z for z in assoc.overlap_zones.values() if z.grid_points]
+        assert zones, "the fixture pair overlaps, so a zone must have been built"
+        for zone in zones:
+            assert {a for _, _, a in zone.grid_points} == set(alts)
 
     def test_baseline_km_is_memoised_but_follows_a_moved_node(self):
         geo_a, _ = self._pair()

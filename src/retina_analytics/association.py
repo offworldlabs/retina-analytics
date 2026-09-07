@@ -778,11 +778,21 @@ def _point_in_beam(lat, lon, geo: NodeGeometry) -> bool:
     return True
 
 
+# Altitude layers the overlap grid is built on when a caller does not say.
+# Kept at the historic six so every existing caller — the unit tests, the
+# offline bench, any library user — sees exactly the grid it saw before the
+# layer set became a parameter.  Production overrides it (retina-server's
+# ASSOC_ALT_LAYERS_KM): the association altitude is what an n=2 solve's
+# position error is made of, so the deployment wants a finer ladder than the
+# library's conservative default.
+DEFAULT_ALTITUDES_KM: tuple[float, ...] = (1.5, 3.0, 5.0, 7.0, 9.0, 11.0)
+
+
 def compute_overlap_zone(
     geo_a: NodeGeometry,
     geo_b: NodeGeometry,
     grid_step_km: float = 3.0,
-    altitudes_km: tuple[float, ...] = (1.5, 3.0, 5.0, 7.0, 9.0, 11.0),
+    altitudes_km: tuple[float, ...] = DEFAULT_ALTITUDES_KM,
     delay_gate_us: float = 5.0,
     doppler_gate_hz: float = 30.0,
 ) -> OverlapZone:
@@ -832,8 +842,8 @@ def compute_overlap_zone(
 
     # The both-beams test is 2-D — _point_in_beam takes (lat, lon) only, and
     # the lat/lon of a column depends on (east, north) alone — so it is
-    # resolved once here rather than re-derived identically for each of the
-    # six altitudes.  It dominated the rebuild (87% of a node rebuild's time,
+    # resolved once here rather than re-derived identically for each
+    # altitude layer.  It dominated the rebuild (87% of a node rebuild's time,
     # 855k calls where 143k distinct columns exist), and the altitude loop
     # below now runs over the survivors, which on this fleet is a small
     # fraction of the bounding box.  Column order is preserved and altitude
@@ -1105,6 +1115,7 @@ class InterNodeAssociator:
         delay_gate_us: float = 5.0,
         doppler_gate_hz: float = 30.0,
         grid_step_km: float = 3.0,
+        altitudes_km: tuple[float, ...] = DEFAULT_ALTITUDES_KM,
         assoc_interval_s: float = 30.0,
         cv_fit=None,
         cv_chi2_max: float = 2.0,
@@ -1136,6 +1147,12 @@ class InterNodeAssociator:
         self.delay_gate_us = delay_gate_us
         self.doppler_gate_hz = doppler_gate_hz
         self.grid_step_km = grid_step_km
+        # Threaded through to compute_overlap_zone on every zone build, the
+        # same way grid_step_km is: the horizontal step is not what limits an
+        # n=2 solve (the LM converges from a 3 km start), the altitude layer
+        # it picks is, so the layer ladder has to be tunable per deployment
+        # rather than frozen in the library.
+        self.altitudes_km = tuple(altitudes_km)
         self.node_geometries: dict[str, NodeGeometry] = {}
         # Raw registration configs, kept because the constant-velocity fit wants
         # rx/tx lat/lon/alt and fc in the same shape the solver takes them.
@@ -1481,6 +1498,7 @@ class InterNodeAssociator:
                     geo if pair_key[0] == node_id else existing_geo,
                     existing_geo if pair_key[0] == node_id else geo,
                     grid_step_km=self.grid_step_km,
+                    altitudes_km=self.altitudes_km,
                     delay_gate_us=self.delay_gate_us,
                     doppler_gate_hz=self.doppler_gate_hz,
                 )
@@ -1630,6 +1648,7 @@ class InterNodeAssociator:
                     a,
                     b,
                     grid_step_km=self.grid_step_km,
+                    altitudes_km=self.altitudes_km,
                     delay_gate_us=self.delay_gate_us,
                     doppler_gate_hz=self.doppler_gate_hz,
                 )
