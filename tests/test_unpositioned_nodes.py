@@ -94,6 +94,20 @@ class TestUnpositionedRegistration:
         assert "bare" in assoc.node_geometries
         assert "bare" in assoc.node_configs
 
+    def test_a_non_numeric_coordinate_registers_unpositioned_rather_than_raising(self, assoc):
+        """has_full_geometry and _coord both read a node's config from an
+        unvalidated ingest path. A junk coordinate must complete registration
+        rather than abort it partway through, and the node must come out
+        unpositioned rather than paired against a positioned peer."""
+        assoc.register_node("A", POSITIONED_A)
+        junk = {**POSITIONED_B, "rx_lat": "not a number"}
+
+        assoc.register_node("junk", junk)
+
+        assert "junk" in assoc.node_geometries
+        assert "junk" in assoc.node_configs
+        assert ("A", "junk") not in assoc.overlap_zones
+
     def test_supplying_a_position_later_builds_the_zones(self, assoc):
         """The upgrade path: a node that registers bare and re-registers with real
         geometry must become a full participant."""

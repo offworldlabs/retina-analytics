@@ -191,14 +191,24 @@ class TestPriorResolution:
         expected = (bearing_deg(_RX_LAT, _RX_LON, _TX_LAT, _TX_LON) + 90.0) % 360.0
         assert ec.prior_azimuth_deg == pytest.approx(expected, abs=1e-6)
 
-    def test_unaimed_with_no_tx_is_omni(self):
-        """No declared aim and no TX to derive broadside from -> None, the
-        radar3 case: this is where the invented-broadside kill path stops
-        being invented — every bearing starts inside the prior."""
-        m = NodeAnalyticsManager()
-        m.register_node("N", dict(rx_lat=_RX_LAT, rx_lon=_RX_LON, max_range_km=50))
-        ec = m.empirical_coverages["N"]
-        assert ec.prior_azimuth_deg is None
+    def test_resolve_fov_prior_returns_omni_without_a_tx(self):
+        """No declared aim and no TX to derive broadside from gives None, so
+        no broadside is invented and every bearing starts inside the prior.
+
+        A unit test of the helper, not of registration, and deliberately so:
+        has_full_geometry now excludes a TX-less config, so this branch is
+        unreachable through register_node and no node state exists to inspect.
+        It is kept as a guard on the helper's own contract, for whoever moves
+        that gate. What a TX-less node actually does on registration (no
+        detection area, no empirical coverage) is pinned by
+        test_registration_without_geometry_does_not_raise.
+        """
+        from retina_analytics.manager import _resolve_fov_prior
+
+        cfg = dict(rx_lat=_RX_LAT, rx_lon=_RX_LON, max_range_km=50)
+        az, width = _resolve_fov_prior(cfg, _RX_LAT, _RX_LON, 0, 0)
+        assert az is None
+        assert width is None
 
     def test_prior_updates_in_place_on_reconnect_without_losing_calibration(self):
         cfg = dict(rx_lat=_RX_LAT, rx_lon=_RX_LON, tx_lat=_TX_LAT, tx_lon=_TX_LON, max_range_km=50)
