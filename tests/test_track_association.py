@@ -433,6 +433,65 @@ class TestFormatTrackPairsForSolver:
         assert InterNodeAssociator().format_track_pairs_for_solver([]) == []
 
 
+class TestSharedTrackPool:
+    """pool_n_nodes answers "could this round have solved it wider?".
+
+    The pool is the node set of the shared-track component — pairings joined
+    because they name the same (node, track), which by construction means one
+    aircraft — so it is independent of every clustering threshold.  An input
+    whose n_nodes is below its pool is a solve the round had the measurements
+    for and did not make.
+    """
+
+    def test_pool_counts_nodes_the_clustering_left_out(self):
+        """(A,B),(B,C) cluster; (A,C) sits 55 km off but shares both tracks.
+
+        A single aircraft's three pairings, one of which the position union
+        cannot reach.  Both emitted inputs report pool 3, and the far one is
+        the case we are trying to count: n_nodes 2 out of a pool of 3.
+        """
+        pairs = [
+            _candidate("a1", "b1"),
+            _candidate("b1", "c1", node_a_id="site-b", node_b_id="site-c"),
+            _candidate("a1", "c1", node_b_id="site-c", lat=35.38),
+        ]
+        inputs = InterNodeAssociator().format_track_pairs_for_solver(pairs)
+        assert len(inputs) == 2
+        assert all(s_in["pool_n_nodes"] == 3 for s_in in inputs)
+        assert all(s_in["pool_node_ids"] == ["site-a", "site-b", "site-c"] for s_in in inputs)
+        narrow = [s_in for s_in in inputs if s_in["n_nodes"] < s_in["pool_n_nodes"]]
+        assert len(narrow) == 1
+        assert narrow[0]["n_nodes"] == 2
+        assert {m["node_id"] for m in narrow[0]["measurements"]} == {"site-a", "site-c"}
+
+    def test_clean_three_node_cluster_has_no_shortfall(self):
+        """Nothing was left out, so the pool equals what was used."""
+        pairs = [
+            _candidate("a1", "b1"),
+            _candidate("b1", "c1", node_a_id="site-b", node_b_id="site-c"),
+            _candidate("a1", "c1", node_b_id="site-c"),
+        ]
+        inputs = InterNodeAssociator().format_track_pairs_for_solver(pairs)
+        assert len(inputs) == 1
+        assert inputs[0]["n_nodes"] == 3 == inputs[0]["pool_n_nodes"]
+
+    def test_separate_aircraft_do_not_share_a_pool(self):
+        """No shared track, no shared pool — the pool is per aircraft.
+
+        Two pairings at the same position over different tracks: the position
+        union-find welds them (they are within merge_dist), _partition_cluster
+        splits them back apart on the node conflict, and each half must still
+        report its own pool of 2 rather than the round's 3 nodes.
+        """
+        pairs = [
+            _candidate("a1", "b1"),
+            _candidate("a2", "c1", node_b_id="site-c"),
+        ]
+        inputs = InterNodeAssociator().format_track_pairs_for_solver(pairs)
+        assert len(inputs) == 2
+        assert all(s_in["n_nodes"] == 2 == s_in["pool_n_nodes"] for s_in in inputs)
+
+
 class TestClusterPartition:
     """A cluster is one aircraft only if nothing in it says otherwise.
 

@@ -2539,6 +2539,10 @@ class InterNodeAssociator:
         unchanged.  Two differences that matter downstream: the initial guess is
         a fitted trajectory rather than a 3 km grid point, and each input
         carries the fit quality so publication can be gated on it.
+
+        Each input also carries the node POOL it was clustered out of — see
+        _shared_track_pools for what that is and why it is the denominator we
+        want.
         """
         if not pairs:
             return []
@@ -2577,13 +2581,68 @@ class InterNodeAssociator:
         for i, p in enumerate(pairs):
             groups[_find(i)].append(p)
 
+        pool_by_pair = self._shared_track_pools(pairs)
+
         solver_inputs = []
         for merged in groups.values():
             subs = self._partition_cluster(merged)
             if len(subs) > 1:
                 self.cluster_splits += 1
-            solver_inputs.extend(self._solver_input(g) for g in subs)
+            for g in subs:
+                pool: set[str] = set()
+                for p in g:
+                    pool |= pool_by_pair[id(p)]
+                solver_inputs.append(self._solver_input(g, pool))
         return solver_inputs
+
+    def _shared_track_pools(self, pairs: list[TrackPairCandidate]) -> dict[int, set[str]]:
+        """Map each pairing to the node set of its shared-track component.
+
+        A second union-find over the same round's pairings, joined not by
+        position but by identity: two pairings are connected when they name the
+        same (node_id, track_id).  A node's tracker gives one track per
+        aircraft, so pairings sharing a track are talking about one aircraft by
+        construction — no distance threshold, no velocity test, nothing that
+        can be tuned wrong.  That makes the component's node set the widest
+        solve the round could possibly have produced for that aircraft, which
+        is the denominator we lack: "could this round have solved this aircraft
+        wider than it did?"
+
+        The position clustering above answers a different question and answers
+        it conservatively — merge_dist_km, velocity consistency and the
+        sub-cluster diameter bound can all leave a genuine third node in its
+        own input.  Comparing the emitted n_nodes against this pool separates
+        "the third node never paired" (pool is 2 as well) from "it paired and
+        the clustering did not take it" (pool is 3, n_nodes is 2), which is the
+        thing no existing counter can tell apart.
+
+        Keyed by id() rather than by index because _partition_cluster hands
+        back the candidate objects, not their positions in `pairs`; the objects
+        live for the whole call, so the ids are stable here.
+
+        O(n α(n)) over the round's pairings, on top of the O(n²) position
+        matrix already built above.
+        """
+        n = len(pairs)
+        parent = list(range(n))
+
+        def _find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        first_seen: dict[tuple[str, str], int] = {}
+        for i, p in enumerate(pairs):
+            for key in ((p.node_a_id, p.track_a_id), (p.node_b_id, p.track_b_id)):
+                j = first_seen.setdefault(key, i)
+                if j != i:
+                    parent[_find(i)] = _find(j)
+
+        nodes: dict[int, set[str]] = defaultdict(set)
+        for i, p in enumerate(pairs):
+            nodes[_find(i)].update((p.node_a_id, p.node_b_id))
+        return {id(p): nodes[_find(i)] for i, p in enumerate(pairs)}
 
     def _velocity_conflict_matrix(self, pairs: list[TrackPairCandidate]) -> np.ndarray:
         """(n, n) mask: True where two pairings' implied velocities disagree.
@@ -2672,8 +2731,14 @@ class InterNodeAssociator:
                 sub_nodes.append(dict(own))
         return subs
 
-    def _solver_input(self, group: list[TrackPairCandidate]) -> dict:
-        """One node-consistent cluster, in the shape the solver worker takes."""
+    def _solver_input(self, group: list[TrackPairCandidate], pool_node_ids: set[str] | None = None) -> dict:
+        """One node-consistent cluster, in the shape the solver worker takes.
+
+        pool_node_ids is the shared-track node pool this cluster came out of
+        (see _shared_track_pools); None only for callers that have no round to
+        take it from, in which case the input says "not measured" rather than
+        claiming the pool equals what was used.
+        """
         by_node: dict[str, dict] = {}
         for p in group:
             for nid, d, f, s, t in (
@@ -2730,6 +2795,11 @@ class InterNodeAssociator:
             "track_pair_ids": sorted({(p.track_a_id, p.track_b_id) for p in group})[:1],
             "track_ids": sorted({p.track_a_id for p in group} | {p.track_b_id for p in group}),
             "track_ids_by_node": {nid: sorted(ids) for nid, ids in track_ids_by_node.items()},
+            # The pool this input was clustered out of, so a published solve can
+            # be compared against the nodes the round actually had for the same
+            # aircraft instead of against the fleet size.
+            "pool_n_nodes": len(pool_node_ids) if pool_node_ids is not None else None,
+            "pool_node_ids": sorted(pool_node_ids) if pool_node_ids is not None else None,
         }
 
     def get_overlap_summary(self) -> list[dict]:
