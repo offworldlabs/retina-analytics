@@ -226,8 +226,9 @@ def find_associations(zone: OverlapZone, frame_a: dict, frame_b: dict, timestamp
 
         # ── ADS-B altitude override ──────────────────────────────────────────
         # ADS-B altitude is exact (to ~10 m) while the pre-computed grid only
-        # has discrete layers (e.g. 5, 7, 9, 11 km), introducing up to ±1 km
-        # altitude error.  Prefer frame_a; fall back to frame_b.
+        # has discrete layers (whatever altitudes_km the zone was built on),
+        # introducing up to half a layer spacing of altitude error.
+        # Prefer frame_a; fall back to frame_b.
         # Require alt_baro > 100 ft to exclude spurious zero reports.
         if isinstance(_ae_a, dict) and (_ae_a.get("alt_baro") or 0) > 100:
             g_alt = float(_ae_a["alt_baro"]) * 0.3048 / 1000.0  # ft → km
@@ -499,7 +500,8 @@ class DetectionAssociator(InterNodeAssociator):
 
             # Use the altitude of the best-matching grid point (min delay
             # residual) from each candidate, then take the mean across the
-            # group.  Layers default to (1.5, 3, 5, 7, 9, 11) km so low-altitude
+            # group.  The layer set is the associator's altitudes_km (six by
+            # default, twelve at 1 km spacing in production) so low-altitude
             # bistatic ghost solutions (which can map to positions hundreds of
             # km away) are never considered.
             g_alt_km = sum(c.grid_alt_km for c in group) / len(group)
