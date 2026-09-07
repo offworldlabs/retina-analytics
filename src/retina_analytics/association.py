@@ -2581,7 +2581,7 @@ class InterNodeAssociator:
         for i, p in enumerate(pairs):
             groups[_find(i)].append(p)
 
-        pool_by_pair = self._shared_track_pools(pairs)
+        pool_by_pair, pool_meas_by_pair = self._shared_track_pools(pairs)
 
         solver_inputs = []
         for merged in groups.values():
@@ -2590,12 +2590,23 @@ class InterNodeAssociator:
                 self.cluster_splits += 1
             for g in subs:
                 pool: set[str] = set()
+                # node_id → track_id → measurement, so a node the component saw
+                # on two different tracks keeps both candidates until
+                # _solver_input picks between them (highest SNR) and counts the
+                # ambiguity.  Merging by track id also makes this idempotent
+                # across the pairings of one component, which all map to the
+                # same per-component dict.
+                pool_meas: dict[str, dict[str, dict]] = defaultdict(dict)
                 for p in g:
                     pool |= pool_by_pair[id(p)]
-                solver_inputs.append(self._solver_input(g, pool))
+                    for nid, by_track in pool_meas_by_pair[id(p)].items():
+                        pool_meas[nid].update(by_track)
+                solver_inputs.append(self._solver_input(g, pool, pool_meas))
         return solver_inputs
 
-    def _shared_track_pools(self, pairs: list[TrackPairCandidate]) -> dict[int, set[str]]:
+    def _shared_track_pools(
+        self, pairs: list[TrackPairCandidate]
+    ) -> tuple[dict[int, set[str]], dict[int, dict[str, dict[str, dict]]]]:
         """Map each pairing to the node set of its shared-track component.
 
         A second union-find over the same round's pairings, joined not by
@@ -2615,6 +2626,15 @@ class InterNodeAssociator:
         "the third node never paired" (pool is 2 as well) from "it paired and
         the clustering did not take it" (pool is 3, n_nodes is 2), which is the
         thing no existing counter can tell apart.
+
+        Returns (node_ids_by_pair, measurements_by_pair).  The second map
+        carries the component's actual measurements — node_id → track_id →
+        {node_id, track_id, delay_us, doppler_hz, snr, t_s} — because knowing
+        that a third node was available is only half of what the solver needs:
+        to widen a narrow solve it has to be handed what that node measured,
+        and the pairing that carried it is the only place those numbers exist
+        once the clustering has declined to merge it.  Both maps are per
+        component, so every pairing in a component shares the same dict object.
 
         Keyed by id() rather than by index because _partition_cluster hands
         back the candidate objects, not their positions in `pairs`; the objects
@@ -2640,9 +2660,26 @@ class InterNodeAssociator:
                     parent[_find(i)] = _find(j)
 
         nodes: dict[int, set[str]] = defaultdict(set)
+        meas: dict[int, dict[str, dict[str, dict]]] = defaultdict(lambda: defaultdict(dict))
         for i, p in enumerate(pairs):
-            nodes[_find(i)].update((p.node_a_id, p.node_b_id))
-        return {id(p): nodes[_find(i)] for i, p in enumerate(pairs)}
+            root = _find(i)
+            nodes[root].update((p.node_a_id, p.node_b_id))
+            for nid, tid, d, f, s, t in (
+                (p.node_a_id, p.track_a_id, p.delay_a, p.doppler_a, p.snr_a, p.t_s_a),
+                (p.node_b_id, p.track_b_id, p.delay_b, p.doppler_b, p.snr_b, p.t_s_b),
+            ):
+                # Same first-writer-wins reasoning as _solver_input: a track's
+                # measurement is its own history[-1], so repeats of the same
+                # (node, track) across the component's pairings are the same
+                # numbers, not rivals.
+                meas[root][nid].setdefault(
+                    tid,
+                    {"node_id": nid, "track_id": tid, "delay_us": d, "doppler_hz": f, "snr": s, "t_s": t},
+                )
+        return (
+            {id(p): nodes[_find(i)] for i, p in enumerate(pairs)},
+            {id(p): meas[_find(i)] for i, p in enumerate(pairs)},
+        )
 
     def _velocity_conflict_matrix(self, pairs: list[TrackPairCandidate]) -> np.ndarray:
         """(n, n) mask: True where two pairings' implied velocities disagree.
@@ -2731,13 +2768,26 @@ class InterNodeAssociator:
                 sub_nodes.append(dict(own))
         return subs
 
-    def _solver_input(self, group: list[TrackPairCandidate], pool_node_ids: set[str] | None = None) -> dict:
+    def _solver_input(
+        self,
+        group: list[TrackPairCandidate],
+        pool_node_ids: set[str] | None = None,
+        pool_measurements: dict[str, dict[str, dict]] | None = None,
+    ) -> dict:
         """One node-consistent cluster, in the shape the solver worker takes.
 
         pool_node_ids is the shared-track node pool this cluster came out of
         (see _shared_track_pools); None only for callers that have no round to
         take it from, in which case the input says "not measured" rather than
         claiming the pool equals what was used.
+
+        pool_measurements is that pool's raw measurements, node_id → track_id →
+        measurement.  What lands on the input is only the part the cluster does
+        NOT already carry: one measurement per pool node absent from
+        `measurements`, which is exactly the material the solver worker needs to
+        try widening a solve the clustering left narrow.  Nothing here decides
+        whether widening is right — that judgement needs a solved position, and
+        this stage has none.
         """
         by_node: dict[str, dict] = {}
         for p in group:
@@ -2771,6 +2821,31 @@ class InterNodeAssociator:
         # worker, so this field says "not scored yet" rather than "scored 0".
         worst_chi2 = max((p.chi2_per_dof for p in group if p.chi2_per_dof is not None), default=None)
 
+        # The pool's spare measurements: pool nodes with nothing in this
+        # cluster.  A node the component saw on two tracks is genuinely
+        # ambiguous here — one of them belongs to another aircraft — so take
+        # the strongest and report how many nodes needed that tiebreak, which
+        # is the rate at which a consumer's adoption gate is being handed a
+        # coin flip.  None (not []) when there was no round to take a pool
+        # from, matching pool_n_nodes' "not measured".
+        spare: list[dict] | None = None
+        pool_conflicts: int | None = None
+        if pool_node_ids is not None:
+            spare = []
+            pool_conflicts = 0
+            for nid in sorted(pool_measurements or {}):
+                if nid in by_node:
+                    continue
+                by_track = pool_measurements[nid]
+                if len(by_track) > 1:
+                    pool_conflicts += 1
+                spare.append(
+                    max(
+                        by_track.values(),
+                        key=lambda m: (m["snr"] if m["snr"] is not None else float("-inf"), m["track_id"]),
+                    )
+                )
+
         return {
             "initial_guess": {
                 "lat": sum(p.lat for p in group) / len(group),
@@ -2800,6 +2875,8 @@ class InterNodeAssociator:
             # aircraft instead of against the fleet size.
             "pool_n_nodes": len(pool_node_ids) if pool_node_ids is not None else None,
             "pool_node_ids": sorted(pool_node_ids) if pool_node_ids is not None else None,
+            "pool_measurements": spare,
+            "pool_conflicts": pool_conflicts,
         }
 
     def get_overlap_summary(self) -> list[dict]:
