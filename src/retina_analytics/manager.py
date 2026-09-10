@@ -9,6 +9,7 @@ from retina_analytics.constants import (
     YAGI_BEAM_WIDTH_DEG,
     YAGI_MAX_RANGE_KM,
     bearing_deg,
+    has_full_geometry,
     haversine_km,
     resolve_beam_azimuth_deg,
     resolve_beam_width_deg,
@@ -113,27 +114,17 @@ class NodeAnalyticsManager:
             self._register_node_locked(node_id, config)
 
     def _register_node_locked(self, node_id: str, config: dict):
+        # Whether this call adds anything a summary reads, which is what the
+        # cache invalidation below turns on.  Tracked per store as each is
+        # written rather than inferred from one of them: a node id can already
+        # be present in trust_scores without ever having registered, since
+        # record_adsb_correlation creates entries there too, and its summary
+        # still gains metrics, reputation and coverage here.
+        added_to_summary = False
+
         if node_id not in self.trust_scores:
             self.trust_scores[node_id] = TrustScoreState(node_id=node_id)
-
-        rx_lat = config.get("rx_lat", 0)
-        rx_lon = config.get("rx_lon", 0)
-        tx_lat = config.get("tx_lat", 0)
-        tx_lon = config.get("tx_lon", 0)
-        # Honour an explicit aim if the config supplies one; else broadside.
-        beam_az = resolve_beam_azimuth_deg(config, rx_lat, rx_lon, tx_lat, tx_lon)
-        self.detection_areas[node_id] = DetectionAreaState(
-            node_id=node_id,
-            rx_lat=rx_lat,
-            rx_lon=rx_lon,
-            tx_lat=tx_lat,
-            tx_lon=tx_lon,
-            fc_hz=config.get("fc_hz", config.get("FC", 195e6)),
-            beam_azimuth_deg=beam_az,
-            beam_width_deg=resolve_beam_width_deg(config),
-            max_range_km=config.get("max_range_km", YAGI_MAX_RANGE_KM),
-            max_bistatic_range_km=config.get("max_bistatic_range_km"),
-        )
+            added_to_summary = True
 
         # Preserve accumulated metrics across reconnects.  Every other
         # per-node store here is conditional, but this one was replaced
@@ -145,21 +136,97 @@ class NodeAnalyticsManager:
                 node_id=node_id,
                 connected_at=time.time(),
             )
+            added_to_summary = True
         else:
             existing_metrics.connected_at = time.time()
 
         if node_id not in self.reputations:
             self.reputations[node_id] = NodeReputation(node_id=node_id)
+            added_to_summary = True
 
         if node_id not in self.coverage_maps:
             self.coverage_maps[node_id] = HistoricalCoverageMap(node_id=node_id)
+            added_to_summary = True
+
+        # Identity, metrics and reputation are above and unconditional: a node
+        # we cannot place is still a node that is working, and its frames are
+        # counted through `metrics` membership in record_detection_frame.
+        #
+        # Geometry is undefined without both coordinate pairs, so everything
+        # below is skipped. No detection area is what keeps such a node off the
+        # map, since get_node_summary omits the key and the map only draws a
+        # marker for a node that has one.
+        if not has_full_geometry(config):
+            # Invalidate exactly when this changes what a summary holds: a
+            # detection area from a previous positioned registration is
+            # dropped here, or one of trust/metrics/reputation/coverage_map
+            # was just populated above.
+            had_area = self.detection_areas.pop(node_id, None) is not None
+            if added_to_summary or had_area:
+                self._invalidate_analysis_caches()
+            return
+
+        rx_lat = config["rx_lat"]
+        rx_lon = config["rx_lon"]
+        tx_lat = config["tx_lat"]
+        tx_lon = config["tx_lon"]
+        # Honour an explicit aim if the config supplies one; else broadside.
+        beam_az = resolve_beam_azimuth_deg(config, rx_lat, rx_lon, tx_lat, tx_lon)
+        beam_width = resolve_beam_width_deg(config)
+        # Keyed on None, not on absence: a config carrying an explicit null
+        # reaches here unchanged, and a .get default does not substitute for
+        # one, so the comparison below would subtract None from None.
+        max_range_km = config.get("max_range_km")
+        if max_range_km is None:
+            max_range_km = YAGI_MAX_RANGE_KM
+        max_bistatic_range_km = config.get("max_bistatic_range_km")
+        fc_hz = config.get("fc_hz", config.get("FC", 195e6))
+
+        # Every field DetectionAreaState is built from, compared against what
+        # it already holds. Unchanged means a reconnect would rebuild a
+        # byte-identical object, so the rebuild (and the reset of its
+        # accumulated n_detections/delay/doppler bounds/furthest_detections
+        # back to defaults) is skipped, the same way the metrics store above
+        # is preserved across a reconnect rather than replaced. Mirrors
+        # InterNodeAssociator.register_node's unchanged-geometry check, but
+        # that check omits fc_hz deliberately, because it always records the
+        # fresh config in node_configs regardless of the early return, so a
+        # changed fc_hz is never lost there even when NodeGeometry keeps its
+        # old one. Nothing here plays that role for detection_areas, so fc_hz
+        # has to be part of the comparison instead.
+        existing_da = self.detection_areas.get(node_id)
+        detection_area_unchanged = existing_da is not None and (
+            abs(existing_da.rx_lat - rx_lat) < 1e-6
+            and abs(existing_da.rx_lon - rx_lon) < 1e-6
+            and abs(existing_da.tx_lat - tx_lat) < 1e-6
+            and abs(existing_da.tx_lon - tx_lon) < 1e-6
+            and abs(existing_da.max_range_km - max_range_km) < 1e-4
+            and abs(existing_da.beam_azimuth_deg - beam_az) < 1e-4
+            and abs(existing_da.beam_width_deg - beam_width) < 1e-4
+            and existing_da.max_bistatic_range_km == max_bistatic_range_km
+            and existing_da.fc_hz == fc_hz
+        )
+
+        if not detection_area_unchanged:
+            self.detection_areas[node_id] = DetectionAreaState(
+                node_id=node_id,
+                rx_lat=rx_lat,
+                rx_lon=rx_lon,
+                tx_lat=tx_lat,
+                tx_lon=tx_lon,
+                fc_hz=fc_hz,
+                beam_azimuth_deg=beam_az,
+                beam_width_deg=beam_width,
+                max_range_km=max_range_km,
+                max_bistatic_range_km=max_bistatic_range_km,
+            )
 
         # Recreate empirical coverage when the node is new OR its RX moved — node
         # IDs are reused across fleet regenerations at different positions, so a
         # persisted polygon from the old location would otherwise be served for
         # the new one (stale, beam-mismatched, collapsed).
         ec = self.empirical_coverages.get(node_id)
-        cfg_max_range = config.get("max_range_km", YAGI_MAX_RANGE_KM)
+        cfg_max_range = max_range_km
         moved = ec is not None and haversine_km(ec.rx_lat, ec.rx_lon, rx_lat, rx_lon) > _RX_RELOCATE_THRESHOLD_KM
         # A change in the *range rule* invalidates the accumulated polygon just
         # as surely as the RX physically moving: switching a node from a
@@ -173,7 +240,7 @@ class NodeAnalyticsManager:
         # *keeps* accumulated calibration (see the else branch) because it only
         # moves the clamp; switching range rules changes the footprint's shape,
         # which is a different thing.
-        cfg_bistatic = config.get("max_bistatic_range_km")
+        cfg_bistatic = max_bistatic_range_km
         rule_changed = ec is not None and getattr(ec, "max_bistatic_range_km", None) != cfg_bistatic
         # A polygon accumulated under an older calibration input is discarded on
         # the same footing.  The bistatic key cannot catch this one: switching
@@ -222,6 +289,12 @@ class NodeAnalyticsManager:
             # not the evidence.
             ec.prior_azimuth_deg, ec.prior_width_deg = prior_az, prior_width
 
+        # detection_areas[node_id] was only just rebuilt above when it was not
+        # already unchanged, and a rebuild is the only way this path alters
+        # what a summary holds, so the two conditions coincide.
+        if not detection_area_unchanged:
+            self._invalidate_analysis_caches()
+
     def coverage_limit_for(self, node_id: str):
         """A bearing → observed-limit-km callable for one node, or None.
 
@@ -268,6 +341,11 @@ class NodeAnalyticsManager:
         if ec is None:
             return None
         return ec.fov_digest() if self.fov_mode != "off" else ec.constraint_digest()
+
+    def _invalidate_analysis_caches(self) -> None:
+        """Drop the memoised get_all_summaries/get_cross_node_analysis results."""
+        self._summaries_cache = None
+        self._cross_node_cache = None
 
     def retire_node(self, node_id: str) -> dict:
         """Forget a node entirely — in-memory state and its files on disk.
@@ -322,8 +400,7 @@ class NodeAnalyticsManager:
                     logging.warning("could not remove %s during retirement", path, exc_info=True)
 
         # Any summary cached before this call still names the node.
-        self._summaries_cache = None
-        self._cross_node_cache = None
+        self._invalidate_analysis_caches()
 
         return {"node_id": node_id, "dropped": dropped, "files_removed": files}
 
@@ -434,7 +511,11 @@ class NodeAnalyticsManager:
         if node_id in self.coverage_maps:
             result["coverage_map"] = self.coverage_maps[node_id].summary()
         ec = self.empirical_coverages.get(node_id)
-        if ec is not None:
+        da = self.detection_areas.get(node_id)
+        # Also gated on da: empirical_coverages outlives a lost geometry (see
+        # _register_node_locked), so ec alone would publish an unconstrained
+        # polygon anchored on the node's stale receiver.
+        if ec is not None and da is not None:
             fov_mode_active = self.fov_mode != "off"
             # FOV off publishes what the node has been SEEN to detect, with no
             # theoretical clip.  It used to pass the detection area's
@@ -445,7 +526,8 @@ class NodeAnalyticsManager:
             # published as a 120 deg pie slice).  See
             # EmpiricalCoverageState._evidence_only_polygon.  FOV active
             # publishes the learned wedge instead, which is itself derived
-            # from evidence.
+            # from evidence.  The detection area is still required (above) —
+            # it is the geometry check, not the clip.
             poly_kwargs = {"use_learned_wedge": True} if fov_mode_active else {"evidence_only": True}
             result["empirical_coverage"] = {
                 "n_points": ec.n_points,

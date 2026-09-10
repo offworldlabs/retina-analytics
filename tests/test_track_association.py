@@ -433,6 +433,117 @@ class TestFormatTrackPairsForSolver:
         assert InterNodeAssociator().format_track_pairs_for_solver([]) == []
 
 
+class TestSharedTrackPool:
+    """pool_n_nodes answers "could this round have solved it wider?".
+
+    The pool is the node set of the shared-track component — pairings joined
+    because they name the same (node, track), which by construction means one
+    aircraft — so it is independent of every clustering threshold.  An input
+    whose n_nodes is below its pool is a solve the round had the measurements
+    for and did not make.
+    """
+
+    def test_pool_counts_nodes_the_clustering_left_out(self):
+        """(A,B),(B,C) cluster; (A,C) sits 55 km off but shares both tracks.
+
+        A single aircraft's three pairings, one of which the position union
+        cannot reach.  Both emitted inputs report pool 3, and the far one is
+        the case we are trying to count: n_nodes 2 out of a pool of 3.
+        """
+        pairs = [
+            _candidate("a1", "b1"),
+            _candidate("b1", "c1", node_a_id="site-b", node_b_id="site-c"),
+            _candidate("a1", "c1", node_b_id="site-c", lat=35.38),
+        ]
+        inputs = InterNodeAssociator().format_track_pairs_for_solver(pairs)
+        assert len(inputs) == 2
+        assert all(s_in["pool_n_nodes"] == 3 for s_in in inputs)
+        assert all(s_in["pool_node_ids"] == ["site-a", "site-b", "site-c"] for s_in in inputs)
+        narrow = [s_in for s_in in inputs if s_in["n_nodes"] < s_in["pool_n_nodes"]]
+        assert len(narrow) == 1
+        assert narrow[0]["n_nodes"] == 2
+        assert {m["node_id"] for m in narrow[0]["measurements"]} == {"site-a", "site-c"}
+
+    def test_clean_three_node_cluster_has_no_shortfall(self):
+        """Nothing was left out, so the pool equals what was used."""
+        pairs = [
+            _candidate("a1", "b1"),
+            _candidate("b1", "c1", node_a_id="site-b", node_b_id="site-c"),
+            _candidate("a1", "c1", node_b_id="site-c"),
+        ]
+        inputs = InterNodeAssociator().format_track_pairs_for_solver(pairs)
+        assert len(inputs) == 1
+        assert inputs[0]["n_nodes"] == 3 == inputs[0]["pool_n_nodes"]
+
+    def test_separate_aircraft_do_not_share_a_pool(self):
+        """No shared track, no shared pool — the pool is per aircraft.
+
+        Two pairings at the same position over different tracks: the position
+        union-find welds them (they are within merge_dist), _partition_cluster
+        splits them back apart on the node conflict, and each half must still
+        report its own pool of 2 rather than the round's 3 nodes.
+        """
+        pairs = [
+            _candidate("a1", "b1"),
+            _candidate("a2", "c1", node_b_id="site-c"),
+        ]
+        inputs = InterNodeAssociator().format_track_pairs_for_solver(pairs)
+        assert len(inputs) == 2
+        assert all(s_in["n_nodes"] == 2 == s_in["pool_n_nodes"] for s_in in inputs)
+
+    def test_pool_carries_the_missing_node_measurements(self):
+        """The shortfall is only actionable if the numbers travel with it.
+
+        Same scene as the counting test — (A,B),(A,C),(B,C) with (A,C) 55 km
+        off — but read for content.  (A,B) and (B,C) merge into the 3-node
+        input; the far (A,C) pairing is the narrow one, and it must carry
+        site-b's delay/Doppler from the pairing that did observe it, so the
+        solver worker can predict what site-b should have measured at the
+        solved position and decide whether to adopt it.  The 3-node input has
+        nothing spare — every pool node is already in it.
+        """
+        pairs = [
+            _candidate("a1", "b1", delay_b=52.0, doppler_b=-11.0),
+            _candidate("b1", "c1", node_a_id="site-b", node_b_id="site-c", delay_a=52.0, doppler_a=-11.0),
+            _candidate("a1", "c1", node_b_id="site-c", lat=35.38),
+        ]
+        inputs = InterNodeAssociator().format_track_pairs_for_solver(pairs)
+        by_nodes = {frozenset(m["node_id"] for m in s["measurements"]): s for s in inputs}
+        narrow = by_nodes[frozenset({"site-a", "site-c"})]
+        assert [m["node_id"] for m in narrow["pool_measurements"]] == ["site-b"]
+        assert narrow["pool_measurements"][0]["delay_us"] == 52.0
+        assert narrow["pool_measurements"][0]["doppler_hz"] == -11.0
+        assert narrow["pool_measurements"][0]["track_id"] == "b1"
+        assert narrow["pool_conflicts"] == 0
+        assert by_nodes[frozenset({"site-a", "site-b", "site-c"})]["pool_measurements"] == []
+
+    def test_pool_node_seen_on_two_tracks_takes_the_strongest(self):
+        """An ambiguous pool node is a coin flip the input has to declare.
+
+        Three pairings of one shared-track component, each at its own position
+        so none of them merge.  site-c reaches the component on two different
+        tracks (c1 via A–C, c2 via B–C), which means one of them belongs to
+        another aircraft.  Take the higher SNR and count the node in
+        pool_conflicts so the rate is visible rather than silently guessed.
+        """
+        pairs = [
+            _candidate("a1", "b1"),
+            _candidate("b1", "c2", node_a_id="site-b", node_b_id="site-c", lat=36.0, snr_b=4.0, delay_b=71.0),
+            _candidate("a1", "c1", node_b_id="site-c", lat=35.38, snr_b=19.0, delay_b=52.0),
+        ]
+        inputs = InterNodeAssociator().format_track_pairs_for_solver(pairs)
+        narrow = next(s for s in inputs if {m["node_id"] for m in s["measurements"]} == {"site-a", "site-b"})
+        assert [m["track_id"] for m in narrow["pool_measurements"]] == ["c1"]
+        assert narrow["pool_measurements"][0]["delay_us"] == 52.0
+        assert narrow["pool_conflicts"] == 1
+
+    def test_input_with_no_round_reports_no_pool_measurements(self):
+        """None, not [] — the same "not measured" the pool count uses."""
+        s_in = InterNodeAssociator()._solver_input([_candidate("a1", "b1")])
+        assert s_in["pool_measurements"] is None
+        assert s_in["pool_conflicts"] is None
+
+
 class TestClusterPartition:
     """A cluster is one aircraft only if nothing in it says otherwise.
 

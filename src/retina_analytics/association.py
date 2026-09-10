@@ -44,7 +44,9 @@ from retina_analytics.constants import (
     C_KM_US,
     KM_PER_DEG_LAT,
     R_EARTH,
+    _is_real_coordinate,
     bistatic_max_radius_km,
+    has_full_geometry,
     km_per_deg_lon,
     offset_latlon_m,
     resolve_beam_azimuth_deg,
@@ -778,11 +780,21 @@ def _point_in_beam(lat, lon, geo: NodeGeometry) -> bool:
     return True
 
 
+# Altitude layers the overlap grid is built on when a caller does not say.
+# Kept at the historic six so every existing caller — the unit tests, the
+# offline bench, any library user — sees exactly the grid it saw before the
+# layer set became a parameter.  Production overrides it (retina-server's
+# ASSOC_ALT_LAYERS_KM): the association altitude is what an n=2 solve's
+# position error is made of, so the deployment wants a finer ladder than the
+# library's conservative default.
+DEFAULT_ALTITUDES_KM: tuple[float, ...] = (1.5, 3.0, 5.0, 7.0, 9.0, 11.0)
+
+
 def compute_overlap_zone(
     geo_a: NodeGeometry,
     geo_b: NodeGeometry,
     grid_step_km: float = 3.0,
-    altitudes_km: tuple[float, ...] = (1.5, 3.0, 5.0, 7.0, 9.0, 11.0),
+    altitudes_km: tuple[float, ...] = DEFAULT_ALTITUDES_KM,
     delay_gate_us: float = 5.0,
     doppler_gate_hz: float = 30.0,
 ) -> OverlapZone:
@@ -832,8 +844,8 @@ def compute_overlap_zone(
 
     # The both-beams test is 2-D — _point_in_beam takes (lat, lon) only, and
     # the lat/lon of a column depends on (east, north) alone — so it is
-    # resolved once here rather than re-derived identically for each of the
-    # six altitudes.  It dominated the rebuild (87% of a node rebuild's time,
+    # resolved once here rather than re-derived identically for each
+    # altitude layer.  It dominated the rebuild (87% of a node rebuild's time,
     # 855k calls where 143k distinct columns exist), and the altitude loop
     # below now runs over the survivors, which on this fleet is a small
     # fraction of the bounding box.  Column order is preserved and altitude
@@ -1002,28 +1014,21 @@ def _merge_epochs(hist_a: list, node_a_id: str, hist_b: list, node_b_id: str) ->
 
 
 def _coord(config: dict, key: str) -> float:
-    """A latitude/longitude from a config, absent or explicitly null reading 0.0.
+    """A latitude/longitude from a config, defaulting to 0.0 for anything that
+    is not a real finite number.
 
-    `config.get(key, 0)` is not enough: a v1 registration may carry the key with
-    a null value, and None then reaches the geodesy as a float.
+    `config.get(key, 0)` is not enough: a v1 registration may carry the key
+    with a null value, and None then reaches the geodesy as a float. Total,
+    like has_full_geometry (reusing its _is_real_coordinate): this builds a
+    geometry object for a node has_full_geometry has already ruled
+    unpositioned, so it must not raise on a non-numeric value either. The
+    conversion below cannot overflow, because _is_real_coordinate admits an
+    int only once it has converted one itself.
     """
-    return float(config.get(key) or 0.0)
-
-
-def _has_receiver_position(config: dict) -> bool:
-    """Whether this config says where the receiver actually is.
-
-    Absent coordinates default to (0, 0), a point in the Gulf of Guinea that no
-    node occupies.  Every node registered without a position therefore lands on
-    one footprint and overlaps every other completely — a pairing that is both
-    fictitious and, being total, the densest and most expensive grid the pair
-    can produce.  A fleet registered that way makes the neighbour graph
-    complete, which the multinode solver sees as one enormous candidate.
-
-    Only the exact (0, 0) pair reads as absent.  The equator and the prime
-    meridian are each perfectly good coordinates on their own.
-    """
-    return not (_coord(config, "rx_lat") == 0.0 and _coord(config, "rx_lon") == 0.0)
+    value = config.get(key)
+    if not _is_real_coordinate(value):
+        return 0.0
+    return float(value)
 
 
 def _worlds_compatible(world_a, world_b) -> bool:
@@ -1105,6 +1110,7 @@ class InterNodeAssociator:
         delay_gate_us: float = 5.0,
         doppler_gate_hz: float = 30.0,
         grid_step_km: float = 3.0,
+        altitudes_km: tuple[float, ...] = DEFAULT_ALTITUDES_KM,
         assoc_interval_s: float = 30.0,
         cv_fit=None,
         cv_chi2_max: float = 2.0,
@@ -1136,6 +1142,12 @@ class InterNodeAssociator:
         self.delay_gate_us = delay_gate_us
         self.doppler_gate_hz = doppler_gate_hz
         self.grid_step_km = grid_step_km
+        # Threaded through to compute_overlap_zone on every zone build, the
+        # same way grid_step_km is: the horizontal step is not what limits an
+        # n=2 solve (the LM converges from a 3 km start), the altitude layer
+        # it picks is, so the layer ladder has to be tunable per deployment
+        # rather than frozen in the library.
+        self.altitudes_km = tuple(altitudes_km)
         self.node_geometries: dict[str, NodeGeometry] = {}
         # Raw registration configs, kept because the constant-velocity fit wants
         # rx/tx lat/lon/alt and fc in the same shape the solver takes them.
@@ -1401,12 +1413,12 @@ class InterNodeAssociator:
         Reconnecting nodes skip the expensive O(n²) overlap recomputation
         as long as their geometry (RX/TX position) hasn't changed.
 
-        A node whose config carries no receiver position is registered but takes
-        no part in overlap — see _has_receiver_position.  A pair whose two nodes
-        are in known and different worlds gets no zone either — see
-        node_world_provider and _worlds_compatible.
+        A node whose config lacks either end of the bistatic pair is
+        registered but takes no part in overlap: see has_full_geometry.  A
+        pair whose two nodes are in known and different worlds gets no zone
+        either: see node_world_provider and _worlds_compatible.
         """
-        positioned = _has_receiver_position(config)
+        positioned = has_full_geometry(config)
         rx_alt_km = (config.get("rx_alt_ft") or 0) * 0.3048 / 1000.0
         tx_alt_km = (config.get("tx_alt_ft") or 0) * 0.3048 / 1000.0
 
@@ -1435,7 +1447,10 @@ class InterNodeAssociator:
             # Recorded before the unchanged-geometry early return: the equality
             # check below covers geometry only, so a reconnect that changed fc_hz
             # would otherwise leave the fit using the old carrier.
-            self.node_configs[node_id] = config
+            # Copied: the caller keeps its dict and may reuse or mutate it,
+            # and every read below (and _is_positioned's, rounds later) must
+            # see the config as it was at registration.
+            self.node_configs[node_id] = dict(config)
             existing = self.node_geometries.get(node_id)
             if existing is not None and (
                 abs(existing.rx_lat - geo.rx_lat) < 1e-6
@@ -1466,7 +1481,10 @@ class InterNodeAssociator:
             # nodes register concurrently from a thread-pool executor).
             my_world = self._node_world(node_id)
             for existing_id, existing_geo in list(self.node_geometries.items()):
-                if not self._is_positioned(existing_id):
+                # node_configs[node_id] already holds the new config (rewritten
+                # above), so _is_positioned(node_id) cannot be used to skip this
+                # node's own stale entry here.
+                if existing_id == node_id or not self._is_positioned(existing_id):
                     continue
                 pair_key = tuple(sorted([node_id, existing_id]))
                 if not _worlds_compatible(my_world, self._node_world(existing_id)):
@@ -1481,6 +1499,7 @@ class InterNodeAssociator:
                     geo if pair_key[0] == node_id else existing_geo,
                     existing_geo if pair_key[0] == node_id else geo,
                     grid_step_km=self.grid_step_km,
+                    altitudes_km=self.altitudes_km,
                     delay_gate_us=self.delay_gate_us,
                     doppler_gate_hz=self.doppler_gate_hz,
                 )
@@ -1489,6 +1508,12 @@ class InterNodeAssociator:
                 if zone.delay_pairs:  # only real overlaps, not geographic misses
                     self._neighbors.setdefault(node_id, set()).add(existing_id)
                     self._neighbors.setdefault(existing_id, set()).add(node_id)
+                else:
+                    # A relocated node may no longer overlap a former
+                    # neighbour; leaving the adjacency in place would occupy a
+                    # slot in the capped neighbour rotation forever.
+                    self._neighbors.get(node_id, set()).discard(existing_id)
+                    self._neighbors.get(existing_id, set()).discard(node_id)
 
             self.node_geometries[node_id] = geo
 
@@ -1529,8 +1554,8 @@ class InterNodeAssociator:
                 setattr(self, name, 0)
 
     def _is_positioned(self, node_id: str) -> bool:
-        """Whether a registered node has a receiver position to pair against."""
-        return _has_receiver_position(self.node_configs.get(node_id, {}))
+        """Whether a registered node has both ends of its geometry to pair against."""
+        return has_full_geometry(self.node_configs.get(node_id, {}))
 
     def _node_world(self, node_id: str):
         """This node's world, or None when nothing can say.
@@ -1630,6 +1655,7 @@ class InterNodeAssociator:
                     a,
                     b,
                     grid_step_km=self.grid_step_km,
+                    altitudes_km=self.altitudes_km,
                     delay_gate_us=self.delay_gate_us,
                     doppler_gate_hz=self.doppler_gate_hz,
                 )
@@ -2539,6 +2565,10 @@ class InterNodeAssociator:
         unchanged.  Two differences that matter downstream: the initial guess is
         a fitted trajectory rather than a 3 km grid point, and each input
         carries the fit quality so publication can be gated on it.
+
+        Each input also carries the node POOL it was clustered out of — see
+        _shared_track_pools for what that is and why it is the denominator we
+        want.
         """
         if not pairs:
             return []
@@ -2577,13 +2607,105 @@ class InterNodeAssociator:
         for i, p in enumerate(pairs):
             groups[_find(i)].append(p)
 
+        pool_by_pair, pool_meas_by_pair = self._shared_track_pools(pairs)
+
         solver_inputs = []
         for merged in groups.values():
             subs = self._partition_cluster(merged)
             if len(subs) > 1:
                 self.cluster_splits += 1
-            solver_inputs.extend(self._solver_input(g) for g in subs)
+            for g in subs:
+                pool: set[str] = set()
+                # node_id → track_id → measurement, so a node the component saw
+                # on two different tracks keeps both candidates until
+                # _solver_input picks between them (highest SNR) and counts the
+                # ambiguity.  Merging by track id also makes this idempotent
+                # across the pairings of one component, which all map to the
+                # same per-component dict.
+                pool_meas: dict[str, dict[str, dict]] = defaultdict(dict)
+                for p in g:
+                    pool |= pool_by_pair[id(p)]
+                    for nid, by_track in pool_meas_by_pair[id(p)].items():
+                        pool_meas[nid].update(by_track)
+                solver_inputs.append(self._solver_input(g, pool, pool_meas))
         return solver_inputs
+
+    def _shared_track_pools(
+        self, pairs: list[TrackPairCandidate]
+    ) -> tuple[dict[int, set[str]], dict[int, dict[str, dict[str, dict]]]]:
+        """Map each pairing to the node set of its shared-track component.
+
+        A second union-find over the same round's pairings, joined not by
+        position but by identity: two pairings are connected when they name the
+        same (node_id, track_id).  A node's tracker gives one track per
+        aircraft, so pairings sharing a track are talking about one aircraft by
+        construction — no distance threshold, no velocity test, nothing that
+        can be tuned wrong.  That makes the component's node set the widest
+        solve the round could possibly have produced for that aircraft, which
+        is the denominator we lack: "could this round have solved this aircraft
+        wider than it did?"
+
+        The position clustering above answers a different question and answers
+        it conservatively — merge_dist_km, velocity consistency and the
+        sub-cluster diameter bound can all leave a genuine third node in its
+        own input.  Comparing the emitted n_nodes against this pool separates
+        "the third node never paired" (pool is 2 as well) from "it paired and
+        the clustering did not take it" (pool is 3, n_nodes is 2), which is the
+        thing no existing counter can tell apart.
+
+        Returns (node_ids_by_pair, measurements_by_pair).  The second map
+        carries the component's actual measurements — node_id → track_id →
+        {node_id, track_id, delay_us, doppler_hz, snr, t_s} — because knowing
+        that a third node was available is only half of what the solver needs:
+        to widen a narrow solve it has to be handed what that node measured,
+        and the pairing that carried it is the only place those numbers exist
+        once the clustering has declined to merge it.  Both maps are per
+        component, so every pairing in a component shares the same dict object.
+
+        Keyed by id() rather than by index because _partition_cluster hands
+        back the candidate objects, not their positions in `pairs`; the objects
+        live for the whole call, so the ids are stable here.
+
+        O(n α(n)) over the round's pairings, on top of the O(n²) position
+        matrix already built above.
+        """
+        n = len(pairs)
+        parent = list(range(n))
+
+        def _find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        first_seen: dict[tuple[str, str], int] = {}
+        for i, p in enumerate(pairs):
+            for key in ((p.node_a_id, p.track_a_id), (p.node_b_id, p.track_b_id)):
+                j = first_seen.setdefault(key, i)
+                if j != i:
+                    parent[_find(i)] = _find(j)
+
+        nodes: dict[int, set[str]] = defaultdict(set)
+        meas: dict[int, dict[str, dict[str, dict]]] = defaultdict(lambda: defaultdict(dict))
+        for i, p in enumerate(pairs):
+            root = _find(i)
+            nodes[root].update((p.node_a_id, p.node_b_id))
+            for nid, tid, d, f, s, t in (
+                (p.node_a_id, p.track_a_id, p.delay_a, p.doppler_a, p.snr_a, p.t_s_a),
+                (p.node_b_id, p.track_b_id, p.delay_b, p.doppler_b, p.snr_b, p.t_s_b),
+            ):
+                # Same first-writer-wins reasoning as _solver_input: a track's
+                # measurement is its own history[-1], so repeats of the same
+                # (node, track) across the component's pairings are the same
+                # numbers, not rivals.
+                meas[root][nid].setdefault(
+                    tid,
+                    {"node_id": nid, "track_id": tid, "delay_us": d, "doppler_hz": f, "snr": s, "t_s": t},
+                )
+        return (
+            {id(p): nodes[_find(i)] for i, p in enumerate(pairs)},
+            {id(p): meas[_find(i)] for i, p in enumerate(pairs)},
+        )
 
     def _velocity_conflict_matrix(self, pairs: list[TrackPairCandidate]) -> np.ndarray:
         """(n, n) mask: True where two pairings' implied velocities disagree.
@@ -2672,8 +2794,27 @@ class InterNodeAssociator:
                 sub_nodes.append(dict(own))
         return subs
 
-    def _solver_input(self, group: list[TrackPairCandidate]) -> dict:
-        """One node-consistent cluster, in the shape the solver worker takes."""
+    def _solver_input(
+        self,
+        group: list[TrackPairCandidate],
+        pool_node_ids: set[str] | None = None,
+        pool_measurements: dict[str, dict[str, dict]] | None = None,
+    ) -> dict:
+        """One node-consistent cluster, in the shape the solver worker takes.
+
+        pool_node_ids is the shared-track node pool this cluster came out of
+        (see _shared_track_pools); None only for callers that have no round to
+        take it from, in which case the input says "not measured" rather than
+        claiming the pool equals what was used.
+
+        pool_measurements is that pool's raw measurements, node_id → track_id →
+        measurement.  What lands on the input is only the part the cluster does
+        NOT already carry: one measurement per pool node absent from
+        `measurements`, which is exactly the material the solver worker needs to
+        try widening a solve the clustering left narrow.  Nothing here decides
+        whether widening is right — that judgement needs a solved position, and
+        this stage has none.
+        """
         by_node: dict[str, dict] = {}
         for p in group:
             for nid, d, f, s, t in (
@@ -2706,6 +2847,31 @@ class InterNodeAssociator:
         # worker, so this field says "not scored yet" rather than "scored 0".
         worst_chi2 = max((p.chi2_per_dof for p in group if p.chi2_per_dof is not None), default=None)
 
+        # The pool's spare measurements: pool nodes with nothing in this
+        # cluster.  A node the component saw on two tracks is genuinely
+        # ambiguous here — one of them belongs to another aircraft — so take
+        # the strongest and report how many nodes needed that tiebreak, which
+        # is the rate at which a consumer's adoption gate is being handed a
+        # coin flip.  None (not []) when there was no round to take a pool
+        # from, matching pool_n_nodes' "not measured".
+        spare: list[dict] | None = None
+        pool_conflicts: int | None = None
+        if pool_node_ids is not None:
+            spare = []
+            pool_conflicts = 0
+            for nid in sorted(pool_measurements or {}):
+                if nid in by_node:
+                    continue
+                by_track = pool_measurements[nid]
+                if len(by_track) > 1:
+                    pool_conflicts += 1
+                spare.append(
+                    max(
+                        by_track.values(),
+                        key=lambda m: (m["snr"] if m["snr"] is not None else float("-inf"), m["track_id"]),
+                    )
+                )
+
         return {
             "initial_guess": {
                 "lat": sum(p.lat for p in group) / len(group),
@@ -2730,6 +2896,13 @@ class InterNodeAssociator:
             "track_pair_ids": sorted({(p.track_a_id, p.track_b_id) for p in group})[:1],
             "track_ids": sorted({p.track_a_id for p in group} | {p.track_b_id for p in group}),
             "track_ids_by_node": {nid: sorted(ids) for nid, ids in track_ids_by_node.items()},
+            # The pool this input was clustered out of, so a published solve can
+            # be compared against the nodes the round actually had for the same
+            # aircraft instead of against the fleet size.
+            "pool_n_nodes": len(pool_node_ids) if pool_node_ids is not None else None,
+            "pool_node_ids": sorted(pool_node_ids) if pool_node_ids is not None else None,
+            "pool_measurements": spare,
+            "pool_conflicts": pool_conflicts,
         }
 
     def get_overlap_summary(self) -> list[dict]:

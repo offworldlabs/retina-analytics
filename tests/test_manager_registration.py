@@ -2,8 +2,11 @@
 
 import os
 
+import pytest
+
 from retina_analytics.constants import KM_PER_DEG_LAT, bearing_deg
 from retina_analytics.manager import NodeAnalyticsManager
+from retina_analytics.trust import AdsReportEntry
 
 _RX_LAT, _RX_LON = 32.90, -97.00
 _TX_LAT, _TX_LON = 32.78, -96.80
@@ -213,3 +216,280 @@ def test_schema_survives_a_save_load_round_trip(tmp_path):
     with open(path, "w") as f:
         json.dump(d, f)
     assert EmpiricalCoverageState.load_from_file(path).schema == 1
+
+
+# ── Registration without geometry ────────────────────────────────────────────
+
+_POSITIONED = {
+    "rx_lat": 34.85,
+    "rx_lon": -82.39,
+    "rx_alt_ft": 900.0,
+    "tx_lat": 34.90,
+    "tx_lon": -82.45,
+    "tx_alt_ft": 1200.0,
+    "fc_hz": 195e6,
+    "beam_width_deg": None,
+    "beam_azimuth_deg": None,
+}
+
+
+def _cfg(**overrides):
+    return {**_POSITIONED, **overrides}
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"rx_lat": None, "rx_lon": None},
+        {"tx_lat": None, "tx_lon": None},
+        {"rx_lat": None, "rx_lon": None, "tx_lat": None, "tx_lon": None},
+    ],
+    ids=["no-rx", "no-tx", "neither"],
+)
+def test_registration_without_geometry_does_not_raise(overrides):
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg(**overrides))
+    assert "n1" in m.metrics
+    assert "n1" in m.trust_scores
+    assert "n1" in m.reputations
+    assert "n1" not in m.detection_areas
+    assert "n1" not in m.empirical_coverages
+
+
+def test_positionless_summary_omits_detection_area():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))
+    summary = m.get_node_summary("n1")
+    assert "detection_area" not in summary
+    assert "metrics" in summary
+
+
+def test_null_altitude_still_positions_the_node():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg(rx_alt_ft=None, tx_alt_ft=None))
+    assert "n1" in m.detection_areas
+
+
+def test_frames_are_counted_for_a_positionless_node():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))
+    assert m.record_detection_frame("n1", {"timestamp": 1.0, "detections": []}) is True
+    assert m.metrics["n1"].total_frames == 1
+
+
+def test_losing_geometry_drops_a_stale_detection_area():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg())
+    assert "n1" in m.detection_areas
+    m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))
+    assert "n1" not in m.detection_areas
+    assert "n1" in m.empirical_coverages  # retained, not popped: see the guard's comment
+
+
+def test_losing_geometry_stops_publishing_empirical_coverage():
+    """The empirical_coverages entry survives the loss of geometry (see
+    above), but with no detection area there is no beam or range left to
+    constrain its polygon, so the summary must not publish one."""
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg())
+    m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))
+    assert "n1" in m.empirical_coverages
+    summary = m.get_node_summary("n1")
+    assert "empirical_coverage" not in summary
+
+
+def test_reregistration_that_loses_geometry_invalidates_the_summary_cache():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg())
+    assert "detection_area" in m.get_all_summaries()["n1"]
+
+    m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))
+
+    assert "detection_area" not in m.get_all_summaries()["n1"]
+
+
+def test_reregistration_that_gains_geometry_invalidates_the_summary_cache():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))
+    assert "detection_area" not in m.get_all_summaries()["n1"]
+
+    m.register_node("n1", _cfg())
+
+    assert "detection_area" in m.get_all_summaries()["n1"]
+
+
+# ── Cache invalidation must track actual content changes ─────────────────────
+#
+# get_all_summaries/get_cross_node_analysis are memoised for _ANALYSIS_CACHE_TTL
+# seconds. The server calls register_node on every TCP reconnect regardless of
+# whether the config changed, so invalidating unconditionally defeats the cache;
+# never invalidating a node's first-ever appearance leaves it missing from
+# summaries for up to a minute.
+
+
+def test_byte_identical_resend_does_not_invalidate_the_summary_cache():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg())
+    first = m.get_all_summaries()
+
+    m.register_node("n1", _cfg())  # same object contents, e.g. a TCP reconnect
+
+    assert m.get_all_summaries() is first
+
+
+def test_byte_identical_resend_does_not_invalidate_the_cross_node_cache():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg())
+    m.register_node("n2", _cfg(rx_lat=_RX_LAT + 0.05, rx_lon=_RX_LON + 0.05))
+    first = m.get_cross_node_analysis()
+
+    m.register_node("n1", _cfg())
+
+    assert m.get_cross_node_analysis() is first
+
+
+def test_first_positionless_registration_invalidates_the_summary_cache():
+    """The node just joined trust_scores/metrics/reputations/coverage_maps, so
+    it belongs in get_all_summaries immediately, not after the TTL expires."""
+    m = NodeAnalyticsManager()
+    m.register_node("n0", _cfg())
+    first = m.get_all_summaries()
+    assert "n1" not in first
+
+    m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))  # first-ever, no geometry
+
+    summaries = m.get_all_summaries()
+    assert summaries is not first
+    assert "n1" in summaries
+
+
+def test_repeat_positionless_resend_does_not_invalidate_the_summary_cache():
+    """Unlike the first registration above, a node already known to the
+    manager that reconnects still positionless changes nothing a summary
+    holds."""
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))
+    first = m.get_all_summaries()
+
+    m.register_node("n1", _cfg(rx_lat=None, rx_lon=None))
+
+    assert m.get_all_summaries() is first
+
+
+def test_relocation_invalidates_the_summary_cache():
+    """A genuine geometry change, distinct from gaining or losing geometry
+    entirely, must still invalidate the cache."""
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg())
+    first = m.get_all_summaries()
+
+    m.register_node("n1", _cfg(rx_lat=_RX_LAT + 0.01))  # ~1.1 km move
+
+    assert m.get_all_summaries() is not first
+
+
+# ── DetectionAreaState is preserved across an unchanged reconnect ────────────
+#
+# A rebuild is skipped when nothing DetectionAreaState is built from has
+# changed, the same way the metrics store above is preserved rather than
+# replaced: a rebuild resets n_detections and the delay/doppler bounds back to
+# defaults, which a reconnect that changed nothing has no reason to do.
+
+
+def test_byte_identical_resend_preserves_detection_area_state():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg())
+    da = m.detection_areas["n1"]
+    da.update(delay=12.3, doppler=45.6)
+    assert da.n_detections == 1
+
+    m.register_node("n1", _cfg())  # same object contents, e.g. a TCP reconnect
+
+    assert m.detection_areas["n1"] is da  # not rebuilt
+    assert m.detection_areas["n1"].n_detections == 1  # accumulated state kept
+
+
+def test_relocation_replaces_detection_area_state():
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg())
+    da = m.detection_areas["n1"]
+    da.update(delay=12.3, doppler=45.6)
+
+    m.register_node("n1", _cfg(rx_lat=_RX_LAT + 0.01))  # ~1.1 km move
+
+    assert m.detection_areas["n1"] is not da
+    assert m.detection_areas["n1"].n_detections == 0
+
+
+def test_beam_width_only_change_still_rebuilds_detection_area_state():
+    """Unchanged means unchanged in every field DetectionAreaState is built
+    from, not just position: a node retuning only its beam width must still
+    get a rebuild that reflects the new width."""
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg(beam_width_deg=41.0))
+    da = m.detection_areas["n1"]
+    da.update(delay=12.3, doppler=45.6)
+
+    m.register_node("n1", _cfg(beam_width_deg=30.0))
+
+    assert m.detection_areas["n1"] is not da
+    assert m.detection_areas["n1"].beam_width_deg == 30.0
+    assert m.detection_areas["n1"].n_detections == 0
+
+
+def test_a_huge_int_coordinate_registers_unpositioned_rather_than_half_registering():
+    """An int too large to convert to a float is not a usable coordinate.
+
+    has_full_geometry must say so rather than call it real and leave
+    _register_node_locked to raise OverflowError building the detection area,
+    which would abort after the identity stores were written and leave the
+    node in the manager but absent from the associator.
+    """
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg(rx_lat=10**400))
+
+    assert "n1" in m.trust_scores
+    assert "n1" in m.metrics
+    assert "n1" not in m.detection_areas
+
+
+def test_a_null_max_range_survives_a_reconnect():
+    """max_range_km is read with a .get default, which an explicit null
+    defeats, and the unchanged-geometry comparison subtracts it: a node that
+    declares a null must not register once and then fail on every reconnect.
+    """
+    m = NodeAnalyticsManager()
+    m.register_node("n1", _cfg(max_range_km=None))
+
+    m.register_node("n1", _cfg(max_range_km=None))
+
+    assert "n1" in m.detection_areas
+
+
+def test_a_trust_entry_from_an_adsb_report_does_not_suppress_invalidation():
+    """record_adsb_correlation creates a trust_scores entry for a node that
+    never registered, so trust_scores membership is not the same question as
+    "would a summary already hold this node's metrics and reputation".  The
+    first real registration must still invalidate.
+    """
+    m = NodeAnalyticsManager()
+    m.record_adsb_correlation(
+        "ghost",
+        AdsReportEntry(
+            timestamp_ms=1000,
+            predicted_delay=15.0,
+            predicted_doppler=50.0,
+            measured_delay=15.2,
+            measured_doppler=50.5,
+            adsb_hex="abc123",
+            adsb_lat=34.0,
+            adsb_lon=-84.5,
+        ),
+    )
+    first = m.get_all_summaries()
+    assert "ghost" in first
+
+    m.register_node("ghost", _cfg(rx_lat=None, rx_lon=None))
+
+    assert m.get_all_summaries() is not first
+    assert m.get_all_summaries()["ghost"].get("metrics") is not None
