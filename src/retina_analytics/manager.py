@@ -72,6 +72,14 @@ class NodeAnalyticsManager:
         self.reputations: dict[str, NodeReputation] = {}
         self.coverage_maps: dict[str, HistoricalCoverageMap] = {}
         self.empirical_coverages: dict[str, EmpiricalCoverageState] = {}
+        # Nodes whose DECLARED geometry is ground truth rather than a config
+        # guess — synthetic/simulator nodes, whose detection cone is what the
+        # simulator enforces.  Set per registration by the backend (see
+        # register_node's declared_geometry_is_truth); read only by
+        # get_node_summary, to publish the declared wedge instead of the
+        # evidence.  Membership is not persisted: it is a property of who
+        # registered the node, re-asserted on every registration.
+        self._declared_truth: set[str] = set()
         self._storage_dir = storage_dir
         self._last_save_time = 0.0
         self._save_interval_s = 300.0
@@ -100,18 +108,41 @@ class NodeAnalyticsManager:
                 self.empirical_coverages,
             ):
                 store.clear()
+            self._declared_truth.clear()
             self._cross_node_cache = None
             self._cross_node_cache_ts = 0.0
             self._summaries_cache = None
             self._summaries_cache_ts = 0.0
             self._last_save_time = 0.0
 
-    def register_node(self, node_id: str, config: dict):
+    def register_node(self, node_id: str, config: dict, *, declared_geometry_is_truth: bool = False):
+        """Register or re-register a node.
+
+        declared_geometry_is_truth marks a node whose declared cone IS its
+        detection area — a simulator node, where the cone is what the
+        simulator enforces — so get_node_summary publishes
+        EmpiricalCoverageState.declared_wedge_polygon rather than the
+        evidence-only shape.  Default False: a real receiver's declared aim is
+        unsurveyed configuration.  Asserted per registration, so a node
+        re-registered without the flag loses it.
+        """
         # Locked: save_coverage_maps / _load_coverage_maps iterate these dicts
         # from other threads, and an unlocked insert mid-iteration raises
         # "dictionary changed size during iteration".
         with self._save_lock:
+            was_declared = node_id in self._declared_truth
+            if declared_geometry_is_truth:
+                self._declared_truth.add(node_id)
+            else:
+                self._declared_truth.discard(node_id)
             self._register_node_locked(node_id, config)
+            # A flag change swaps the published polygon just as a rebuilt
+            # detection area does, so it has to drop the 60 s summaries cache
+            # the same way.  Compared against the FINAL membership, not the
+            # requested one: _register_node_locked drops the flag again for a
+            # node it cannot place.
+            if (node_id in self._declared_truth) != was_declared:
+                self._invalidate_analysis_caches()
 
     def _register_node_locked(self, node_id: str, config: dict):
         # Whether this call adds anything a summary reads, which is what the
@@ -162,6 +193,11 @@ class NodeAnalyticsManager:
             # dropped here, or one of trust/metrics/reputation/coverage_map
             # was just populated above.
             had_area = self.detection_areas.pop(node_id, None) is not None
+            # A node we cannot place has no declared wedge to publish either:
+            # declared_wedge_polygon is anchored on the RX this registration
+            # did not supply.  register_node's own comparison covers the cache
+            # when this drops a flag it had just set.
+            self._declared_truth.discard(node_id)
             if added_to_summary or had_area:
                 self._invalidate_analysis_caches()
             return
@@ -387,6 +423,7 @@ class NodeAnalyticsManager:
                 self.empirical_coverages,
             ):
                 store.pop(node_id, None)
+            self._declared_truth.discard(node_id)
 
         files = []
         if self._storage_dir:
@@ -517,7 +554,7 @@ class NodeAnalyticsManager:
         # polygon anchored on the node's stale receiver.
         if ec is not None and da is not None:
             fov_mode_active = self.fov_mode != "off"
-            # FOV off publishes what the node has been SEEN to detect, with no
+            # A REAL node publishes what it has been SEEN to detect, with no
             # theoretical clip.  It used to pass the detection area's
             # beam_azimuth_deg / beam_width_deg / max_range_km, which are
             # declared configuration — most nodes never had their aim surveyed
@@ -528,13 +565,28 @@ class NodeAnalyticsManager:
             # publishes the learned wedge instead, which is itself derived
             # from evidence.  The detection area is still required (above) —
             # it is the geometry check, not the clip.
+            #
+            # A DECLARED-TRUTH node (synthetic: see register_node) inverts
+            # that.  The simulator only ever emits a detection inside the
+            # node's declared cone, so the cone is its detection area by
+            # definition and the accumulated bins are the unreliable half —
+            # about a third of the ADS-B binds feeding them are to the wrong
+            # aircraft (synth-GVL-SCAT-0032, 2026-09-13: 47 % of 3,037 points
+            # outside a 42° beam, 71 of 72 bearings published).  So it
+            # publishes the declared wedge, independent of evidence — which is
+            # also why the min_points gate and the FOV diagnostics below,
+            # both evidence-derived, do not apply to it.  n_points /
+            # n_filled_bins stay in the payload: the evidence is still
+            # accumulated and still worth reporting, it just is not drawn.
+            declared = node_id in self._declared_truth
             poly_kwargs = {"use_learned_wedge": True} if fov_mode_active else {"evidence_only": True}
             result["empirical_coverage"] = {
                 "n_points": ec.n_points,
                 "n_filled_bins": ec.n_filled_bins,
-                "polygon": ec.to_polygon(**poly_kwargs),
+                "polygon": (ec.declared_wedge_polygon() if declared else ec.to_polygon(**poly_kwargs)),
+                "polygon_source": ("declared" if declared else ("learned" if fov_mode_active else "evidence")),
             }
-            if fov_mode_active:
+            if fov_mode_active and not declared:
                 # Flows through /api/radar/analytics automatically — no new
                 # dashboard endpoint needed for shadow verification.
                 n_neg_events = sum(len(evs) for evs in ec._neg_events)
