@@ -30,6 +30,14 @@ a bin is drawn only on its OWN accumulated evidence, the theoretical wedge
 neither opens a bin nor clips one, and unobserved bearings collapse to the RX
 apex instead of being interpolated across.
 
+Declared publication (declared_wedge_polygon)
+---------------------------------------------
+The exception, and only for SYNTHETIC nodes: the simulator emits a detection
+only inside the node's declared cone, so for those nodes the cone is the
+detection area by definition and the bins are the unreliable half (about a
+third of the ADS-B binds that feed them are to the wrong aircraft).  Real
+nodes never take this path.  See declared_wedge_polygon.
+
 Learned FOV (FOV_MODE, schema 3)
 ---------------------------------
 The methods above (observed_limit_km / constraint_digest / to_polygon without
@@ -902,6 +910,75 @@ class EmpiricalCoverageState:
 
         if len(polygon) < 4:
             return None
+        return polygon
+
+    def declared_wedge_polygon(self, step_deg: float = 2.5) -> list[list[float]] | None:
+        """The declared cone, drawn as-is — for nodes whose geometry IS truth.
+
+        Only ever published for SYNTHETIC (simulator-fleet) nodes; the caller
+        decides, and for a real node this method is never called.  A real
+        node's beam_azimuth_deg / beam_width_deg are unsurveyed configuration,
+        so drawing them would claim coverage nobody measured — that is what
+        _evidence_only_polygon exists to avoid, and it stays the published
+        shape for real hardware.
+
+        A simulated node is the other way round.  The simulator emits a
+        detection only for an aircraft inside the node's declared cone
+        (retina_simulation/world.py::_aircraft_in_detection_cone: bearing
+        within azimuth ± width/2, range within the declared differential limit
+        when there is one, else within max_range_km on the RX distance), so
+        the cone is the node's detection area *by definition* and any evidence
+        outside it is an error in the evidence.  It is: the calibration points
+        come from ADS-B hexes bound to tracks and roughly a third of those
+        binds are to the wrong aircraft.  Measured on test 2026-09-13,
+        synth-GVL-SCAT-0032 (42° beam) held 3,037 points of which 47 % lay
+        outside its wedge (34 % ignoring the two edge bins), 55 out-of-wedge
+        bins had opened, and the published polygon covered 71 of 72 bearings —
+        a node with a 42° beam drawn as a disc.
+
+        So this method reads no bins at all.  Radius on each bearing is
+        _reach_at — already the bistatic ellipse when the TX and a
+        differential limit are known, else the monostatic circle, which is
+        exactly the simulator's own range rule — with no range_clamp_mult,
+        because there is no mis-attributed far detection to defend against.
+
+        Vertices: for a directional prior, the RX apex, then both wedge edges
+        exactly plus every *step_deg* between them, then the apex again to
+        close.  For an omni prior (prior_azimuth_deg None) a full ring every
+        *step_deg*, closed on its first vertex and with no apex — an omni node
+        has no direction to exclude.  None only when the reach is not positive.
+        """
+        half = (self.prior_width_deg if self.prior_width_deg is not None else YAGI_BEAM_WIDTH_DEG) / 2.0
+        az = self.prior_azimuth_deg
+
+        if az is None:
+            n_steps = max(3, int(round(360.0 / step_deg)))
+            bearings = [i * (360.0 / n_steps) for i in range(n_steps)]
+        else:
+            start, end = az - half, az + half
+            bearings = [start]
+            b = start + step_deg
+            while b < end - 1e-9:
+                bearings.append(b)
+                b += step_deg
+            bearings.append(end)
+
+        if not any(self._reach_at(b) > 0.0 for b in bearings):
+            return None
+
+        apex = [round(self.rx_lat, 5), round(self.rx_lon, 5)]
+        polygon: list[list[float]] = [] if az is None else [apex]
+        for bearing in bearings:
+            r_km = max(0.0, self._reach_at(bearing))
+            bearing_rad = math.radians(bearing)
+            lat, lon = offset_latlon(
+                self.rx_lat,
+                self.rx_lon,
+                east_km=r_km * math.sin(bearing_rad),
+                north_km=r_km * math.cos(bearing_rad),
+            )
+            polygon.append([round(lat, 5), round(lon, 5)])
+        polygon.append(apex if az is not None else polygon[0])
         return polygon
 
     # ── Shrink-only prior ────────────────────────────────────────────────────
