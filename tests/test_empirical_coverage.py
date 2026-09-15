@@ -4,8 +4,12 @@ import math
 
 import pytest
 
+from retina_analytics.constants import bearing_deg, offset_latlon
 from retina_analytics.empirical_coverage import (
+    _DEG_PER_BIN,
+    FOV_OPEN_MIN_POINTS,
     MIN_POINTS,
+    N_BINS,
     EmpiricalCoverageState,
     _bearing_and_range,
     _bin_for_bearing,
@@ -233,3 +237,128 @@ class TestCoverageSerialization:
         p1 = cov.to_polygon()
         p2 = loaded.to_polygon()
         assert p1 == p2
+
+
+# ── Evidence-only publication ────────────────────────────────────────────────
+
+
+class TestEvidenceOnlyPolygon:
+    """to_polygon(evidence_only=True) — the shape the public map is served.
+
+    The legacy path clips to a declared beam sector, which zeroed measured
+    bins outside a wedge nobody surveyed; this mode draws a bin if and only if
+    that bin's own evidence says so.  See
+    EmpiricalCoverageState._evidence_only_polygon.
+    """
+
+    RANGE_KM = 20.0
+
+    def _fill(self, cov, bins, n_points=6, range_km=RANGE_KM):
+        """Put n_points at the CENTRE bearing of each of *bins*."""
+        for b in bins:
+            rad = math.radians((b + 0.5) * _DEG_PER_BIN)
+            for i in range(n_points):
+                lat, lon = offset_latlon(
+                    cov.rx_lat,
+                    cov.rx_lon,
+                    east_km=(range_km + i * 0.01) * math.sin(rad),
+                    north_km=(range_km + i * 0.01) * math.cos(rad),
+                )
+                cov.add_point(lat, lon)
+
+    def _is_apex(self, cov, vertex):
+        return vertex == [round(cov.rx_lat, 5), round(cov.rx_lon, 5)]
+
+    def test_full_coverage_is_a_ring_with_no_apex(self):
+        cov = EmpiricalCoverageState(RX_LAT, RX_LON)
+        self._fill(cov, range(N_BINS), n_points=FOV_OPEN_MIN_POINTS)
+        poly = cov.to_polygon(evidence_only=True)
+        assert len(poly) == N_BINS + 1  # every bin drawn, plus the closing repeat
+        assert poly[0] == poly[-1]
+        assert not any(self._is_apex(cov, v) for v in poly)
+
+    def test_each_vertex_sits_at_its_own_bin_centre(self):
+        """A point filed in bin i must land inside the vertex drawn for it."""
+        cov = EmpiricalCoverageState(RX_LAT, RX_LON)
+        self._fill(cov, range(N_BINS), n_points=FOV_OPEN_MIN_POINTS)
+        poly = cov.to_polygon(evidence_only=True)
+        for i, (lat, lon) in enumerate(poly[:-1]):
+            centre = (i + 0.5) * _DEG_PER_BIN
+            actual = bearing_deg(RX_LAT, RX_LON, lat, lon)
+            diff = abs((actual - centre + 180.0) % 360.0 - 180.0)
+            assert diff <= _DEG_PER_BIN / 2.0, f"bin {i}: vertex at {actual:.2f}°, centre {centre:.2f}°"
+
+    def test_a_thin_bin_stays_closed(self):
+        """One lobe plus a lone under-evidenced bin 90° away: only the lobe."""
+        cov = EmpiricalCoverageState(RX_LAT, RX_LON)
+        self._fill(cov, [10, 11, 12, 13])
+        self._fill(cov, [28], n_points=FOV_OPEN_MIN_POINTS - 1)  # 90° away, too thin
+        poly = cov.to_polygon(evidence_only=True)
+        drawn = [
+            _bin_for_bearing(bearing_deg(RX_LAT, RX_LON, lat, lon))
+            for lat, lon in poly[:-1]
+            if not self._is_apex(cov, [lat, lon])
+        ]
+        assert sorted(drawn) == [10, 11, 12, 13]
+
+    def test_a_two_bin_hole_inside_a_lobe_is_bridged(self):
+        cov = EmpiricalCoverageState(RX_LAT, RX_LON)
+        self._fill(cov, [10, 11, 12, 15, 16, 17])  # 13, 14 empty
+        poly = cov.to_polygon(evidence_only=True)
+        drawn = sorted(
+            _bin_for_bearing(bearing_deg(RX_LAT, RX_LON, lat, lon))
+            for lat, lon in poly[:-1]
+            if not self._is_apex(cov, [lat, lon])
+        )
+        assert drawn == [10, 11, 12, 13, 14, 15, 16, 17]
+
+    def test_a_three_bin_hole_splits_the_lobe(self):
+        """Past EVIDENCE_GAP_MAX_BINS the gap is a null, not sampling noise."""
+        cov = EmpiricalCoverageState(RX_LAT, RX_LON)
+        self._fill(cov, [10, 11, 12, 16, 17, 18])  # 13, 14, 15 empty
+        poly = cov.to_polygon(evidence_only=True)
+        drawn = sorted(
+            _bin_for_bearing(bearing_deg(RX_LAT, RX_LON, lat, lon))
+            for lat, lon in poly[:-1]
+            if not self._is_apex(cov, [lat, lon])
+        )
+        assert drawn == [10, 11, 12, 16, 17, 18]
+        # Two separate lobes, so the ring returns to the RX between them and
+        # once more outside them: two apex vertices in the open ring.
+        assert sum(1 for v in poly[:-1] if self._is_apex(cov, v)) == 2
+
+    def test_a_lobe_straddling_north_stays_simple(self):
+        cov = EmpiricalCoverageState(RX_LAT, RX_LON)
+        self._fill(cov, [70, 71, 0, 1])
+        poly = cov.to_polygon(evidence_only=True)
+        # One apex run: the whole closed side of the compass collapses to a
+        # single vertex, and it is not split across the index wrap.
+        assert sum(1 for v in poly[:-1] if self._is_apex(cov, v)) == 1
+        bearings = [
+            bearing_deg(RX_LAT, RX_LON, lat, lon) for lat, lon in poly[:-1] if not self._is_apex(cov, [lat, lon])
+        ]
+        # Bin-index order is already angular order — no bow-tie to sort out.
+        assert bearings == sorted(bearings)
+
+    def test_beam_arguments_are_ignored(self):
+        cov = EmpiricalCoverageState(RX_LAT, RX_LON)
+        self._fill(cov, [10, 11, 12, 13])
+        plain = cov.to_polygon(evidence_only=True)
+        assert plain is not None
+        for az, width in ((0.0, 42.0), (180.0, 10.0), (55.0, 360.0)):
+            clipped = cov.to_polygon(evidence_only=True, beam_azimuth_deg=az, beam_width_deg=width, max_range_km=1.0)
+            assert clipped == plain
+
+    def test_no_polygon_without_an_open_bin(self):
+        """Enough points overall, none of them enough in any single bin."""
+        cov = EmpiricalCoverageState(RX_LAT, RX_LON)
+        self._fill(cov, range(0, N_BINS, 2), n_points=FOV_OPEN_MIN_POINTS - 1)
+        assert cov.n_points >= MIN_POINTS
+        assert cov.to_polygon(evidence_only=True) is None
+
+    def test_evidence_reaches_past_the_theoretical_wedge(self):
+        """The bug this mode exists for: a beam clip zeroed measured bins."""
+        cov = EmpiricalCoverageState(RX_LAT, RX_LON)
+        self._fill(cov, range(N_BINS), n_points=FOV_OPEN_MIN_POINTS)
+        clipped = cov.to_polygon(beam_azimuth_deg=0.0, beam_width_deg=42.0)
+        assert len(clipped) < len(cov.to_polygon(evidence_only=True))

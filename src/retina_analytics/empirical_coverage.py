@@ -18,7 +18,17 @@ Algorithm
 5. Polygon vertices are computed at each bin centre and returned as [[lat, lon]].
 
 The polygon is only returned once at least MIN_POINTS calibration points have
-been recorded; below that the frontend falls back to the theoretical Yagi sector.
+been recorded; below that there is no published detection area at all.  The map
+draws nothing rather than a theoretical Yagi sector: a sector drawn from a
+declared azimuth and width is a config guess, and drawing it as if it were a
+detection area claims coverage nobody has measured.
+
+Evidence-only publication (to_polygon(evidence_only=True))
+----------------------------------------------------------
+What the public map is served under FOV_MODE=off.  See _evidence_only_polygon:
+a bin is drawn only on its OWN accumulated evidence, the theoretical wedge
+neither opens a bin nor clips one, and unobserved bearings collapse to the RX
+apex instead of being interpolated across.
 
 Learned FOV (FOV_MODE, schema 3)
 ---------------------------------
@@ -61,6 +71,16 @@ N_BINS = 72  # 5 ° per bin  (360 / 5 = 72)
 _DEG_PER_BIN = 360.0 / N_BINS
 _MAX_PER_BIN = 200  # cap per-bin history to prevent unbounded RAM growth
 MIN_POINTS = 20  # minimum calibration points before emitting a polygon
+
+# Longest run of consecutive un-evidenced bins the evidence-only polygon will
+# bridge (2 bins = a 10 deg hole).  A hole that small inside a lobe is sampling
+# noise — cooperative traffic simply did not fly that bearing during the window
+# — and leaving it in would cut a spurious notch to the RX apex through a
+# measured lobe.  Anything wider is left open: past ~10 deg we cannot tell a
+# gap in traffic from a genuine null (a mast, a ridge, a pattern lobe edge),
+# and inventing coverage there is exactly the theoretical-beam mistake this
+# mode exists to undo.
+EVIDENCE_GAP_MAX_BINS = 2
 
 # Calibration points a bin needs before its P85 is allowed to *constrain*
 # association rather than merely be drawn.  Below this the bin is one or two
@@ -605,6 +625,7 @@ class EmpiricalCoverageState:
         beam_width_deg: float | None = None,
         max_range_km: float | None = None,
         use_learned_wedge: bool = False,
+        evidence_only: bool = False,
     ) -> list[list[float]] | None:
         """Return a closed polygon [[lat, lon], …] or None if insufficient data.
 
@@ -620,9 +641,20 @@ class EmpiricalCoverageState:
         already encodes which bins are admitted and how far each reaches, so a
         separate theoretical constraint would only reintroduce the shrink-only
         prior this mode replaces.
+
+        evidence_only=True is the publication shape (see
+        _evidence_only_polygon): measured bins only, no theoretical wedge
+        opening or clipping anything.  It likewise ignores
+        beam_azimuth_deg/beam_width_deg/max_range_km, and takes precedence
+        over use_learned_wedge if both are somehow passed — the two answer
+        different questions (what has been SEEN vs what association is
+        allowed to admit) and only the first belongs on a public map.
         """
         if self.n_points < min_points:
             return None
+
+        if evidence_only:
+            return self._evidence_only_polygon()
 
         # --- Determine which bins fall inside the beam sector -----------------
         if use_learned_wedge:
@@ -747,6 +779,126 @@ class EmpiricalCoverageState:
 
         # Close back to RX
         polygon.append([round(self.rx_lat, 5), round(self.rx_lon, 5)])
+
+        if len(polygon) < 4:
+            return None
+        return polygon
+
+    def _evidence_only_polygon(self) -> list[list[float]] | None:
+        """The published detection area: measured bins, nothing else.
+
+        The legacy path above clips the polygon to the theoretical wedge
+        (beam_azimuth_deg/beam_width_deg), which zeroes every bin outside a
+        declared azimuth and width.  Those two numbers are configuration, not
+        measurement — most nodes never had their aim surveyed — so the clip
+        was throwing away real, accumulated evidence and drawing a pie slice
+        in its place.  radar3 (2026-09-06) had 200 calibration points in every
+        one of the 72 bins, reaching 17-65 km all round, and published a 120
+        deg slice.  This method publishes what the bins actually say:
+
+        1. A bin is OPEN on its own count alone (>= FOV_OPEN_MIN_POINTS — the
+           same floor the learned FOV opens an out-of-wedge bin on; below it a
+           bin is one aircraft passing through).  Its range is the P85 of its
+           own observations, clamped the way step 1 of to_polygon clamps, so a
+           single mis-attributed far detection still cannot fling a vertex.
+        2. A closed bin is interpolated only inside a hole: a run of at most
+           EVIDENCE_GAP_MAX_BINS closed bins with open bins on BOTH sides.
+           Everything else stays at zero.  This is the one place the legacy
+           path is actively wrong in the other direction: its interpolation
+           bridges any gap between two filled bins, so a node with two lobes
+           180 deg apart gets a filled disc.
+        3. Smoothing (window 3) averages only among non-zero bins, so a lobe
+           edge is not dragged toward the apex by the closed bin beside it.
+        4. Vertices are emitted in bin-INDEX order at the bin CENTRE bearing.
+           Index order is safe here — unlike the legacy sector, which had to
+           sort around the beam azimuth to avoid a bow-tie when the wedge
+           straddled north — because a closed bin contributes the RX apex
+           rather than being skipped.  The result is a star-shaped polygon
+           around the RX whose vertices are already in angular order, so
+           wrap-around and multiple disjoint lobes need no special handling.
+           The centre, not the left edge the legacy path uses, is the bearing
+           a bin's points are actually spread around (_bin_for_bearing files
+           bearing b in bin int(b / 5), i.e. bin i spans [5i, 5i + 5)), so a
+           point filed in bin i lands inside the vertex drawn for it — the
+           same convention limit_km already samples the ellipse at.
+
+        Returns None when no bin is open, or when the ring degenerates to
+        fewer than 4 vertices (a single open bin is a line, not an area).
+        """
+        # Step 1: open bins only, at their own clamped P85.
+        ranges: list[float] = []
+        for i, b in enumerate(self._bins):
+            if len(b) < FOV_OPEN_MIN_POINTS:
+                ranges.append(0.0)
+                continue
+            bearing_i = (i + 0.5) * _DEG_PER_BIN
+            ranges.append(min(_p85(b), self._reach_at(bearing_i) * self.range_clamp_mult))
+
+        if not any(r > 0.0 for r in ranges):
+            return None
+
+        # Step 2: bridge holes of at most EVIDENCE_GAP_MAX_BINS closed bins.
+        # Each closed run is found by walking forward from a closed bin that
+        # follows an open one, so a run is enumerated once and (given at least
+        # one open bin above) is always bounded by open bins on both sides.
+        for i in range(N_BINS):
+            if ranges[i] > 0.0 or ranges[(i - 1) % N_BINS] <= 0.0:
+                continue  # not the start of a closed run
+            run = []
+            j = i
+            while ranges[j % N_BINS] <= 0.0 and len(run) <= EVIDENCE_GAP_MAX_BINS:
+                run.append(j % N_BINS)
+                j += 1
+            if len(run) > EVIDENCE_GAP_MAX_BINS:
+                continue  # a genuine null, not a sampling hole — leave it open
+            left_val = ranges[(i - 1) % N_BINS]
+            right_val = ranges[j % N_BINS]
+            for k, bin_idx in enumerate(run):
+                left_dist = k + 1
+                right_dist = len(run) - k
+                total = left_dist + right_dist
+                est = (left_val * right_dist + right_val * left_dist) / total
+                # Same conservative discount the legacy interpolation applies:
+                # this is estimated coverage, not observed coverage.
+                gap = max(left_dist, right_dist)
+                ranges[bin_idx] = est * max(0.70, 1.0 - 0.10 * gap)
+
+        # Step 3: rolling smooth (window = 3) among non-zero bins only.
+        smoothed = list(ranges)
+        for i in range(N_BINS):
+            if ranges[i] <= 0.0:
+                continue
+            vals = [ranges[i]]
+            for off in (-1, 1):
+                nv = ranges[(i + off) % N_BINS]
+                if nv > 0.0:
+                    vals.append(nv)
+            smoothed[i] = sum(vals) / len(vals)
+
+        # Step 4: one vertex per bin in index order; a closed bin is the apex.
+        polygon: list[list[float]] = []
+        apex = [round(self.rx_lat, 5), round(self.rx_lon, 5)]
+        for i in range(N_BINS):
+            r_km = smoothed[i]
+            if r_km <= 0.0:
+                if not polygon or polygon[-1] != apex:
+                    polygon.append(apex)
+                continue
+            bearing_rad = math.radians((i + 0.5) * _DEG_PER_BIN)
+            lat, lon = offset_latlon(
+                self.rx_lat,
+                self.rx_lon,
+                east_km=r_km * math.sin(bearing_rad),
+                north_km=r_km * math.cos(bearing_rad),
+            )
+            polygon.append([round(lat, 5), round(lon, 5)])
+
+        # A closed run that straddles north emits an apex at both ends of the
+        # index order; they are the same vertex, so collapse across the wrap
+        # too before closing the ring.
+        if len(polygon) > 1 and polygon[0] == apex and polygon[-1] == apex:
+            polygon.pop()
+        polygon.append(polygon[0])
 
         if len(polygon) < 4:
             return None

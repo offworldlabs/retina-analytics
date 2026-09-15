@@ -517,13 +517,18 @@ class NodeAnalyticsManager:
         # polygon anchored on the node's stale receiver.
         if ec is not None and da is not None:
             fov_mode_active = self.fov_mode != "off"
-            poly_kwargs = {}
-            if fov_mode_active:
-                poly_kwargs["use_learned_wedge"] = True
-            else:
-                poly_kwargs["beam_azimuth_deg"] = da.beam_azimuth_deg
-                poly_kwargs["beam_width_deg"] = da.beam_width_deg
-                poly_kwargs["max_range_km"] = da.max_range_km
+            # FOV off publishes what the node has been SEEN to detect, with no
+            # theoretical clip.  It used to pass the detection area's
+            # beam_azimuth_deg / beam_width_deg / max_range_km, which are
+            # declared configuration — most nodes never had their aim surveyed
+            # — and clipping to them zeroed every measured bin outside the
+            # declared wedge (radar3, 2026-09-06: evidence in all 72 bins,
+            # published as a 120 deg pie slice).  See
+            # EmpiricalCoverageState._evidence_only_polygon.  FOV active
+            # publishes the learned wedge instead, which is itself derived
+            # from evidence.  The detection area is still required (above) —
+            # it is the geometry check, not the clip.
+            poly_kwargs = {"use_learned_wedge": True} if fov_mode_active else {"evidence_only": True}
             result["empirical_coverage"] = {
                 "n_points": ec.n_points,
                 "n_filled_bins": ec.n_filled_bins,
