@@ -1,5 +1,6 @@
 """Tests for analytics subsystem — trust, reputation, coverage, manager, suggestions."""
 
+import dataclasses
 import time
 
 import pytest
@@ -16,6 +17,7 @@ from retina_analytics import (
     TrustScoreState,
 )
 from retina_analytics.cross_node import coverage_suggestion
+from retina_analytics.reputation import set_penalty_scale
 
 # ── Trust Score & Reputation ─────────────────────────────────────────────────
 
@@ -142,6 +144,7 @@ class TestNodeReputation:
 
     def test_bad_actor_gets_blocked(self):
         rep = NodeReputation(node_id="bad-node")
+        rep.penalty_scale = 1.0  # explicit: escalation only happens with downrating on
         for _ in range(15):
             rep.evaluate_trust(0.05)
         assert rep.blocked
@@ -149,6 +152,7 @@ class TestNodeReputation:
 
     def test_unblock(self):
         rep = NodeReputation(node_id="bad-node")
+        rep.penalty_scale = 1.0
         for _ in range(15):
             rep.evaluate_trust(0.05)
         rep.unblock()
@@ -164,6 +168,61 @@ class TestNodeReputation:
         rep = NodeReputation(node_id="high-rate")
         rep.evaluate_detection_rate(100.0)
         assert rep.reputation < 1.0
+
+
+class TestPenaltyScale:
+    """The one switch every downrating source routes through."""
+
+    def test_zero_scale_never_downrates_from_any_source(self):
+        # A real node (ndebvzgeoij5t2l) was blocked permanently off a single
+        # out-of-threshold sample; with the scale at 0 no source may move a
+        # reputation, however hard it is pushed.
+        set_penalty_scale(0.0)
+        rep = NodeReputation(node_id="pummelled")
+        for _ in range(50):
+            rep.evaluate_trust(0.0)
+        rep.evaluate_heartbeat(time.time() - 600)
+        rep.evaluate_detection_rate(100.0)
+        rep.evaluate_neighbour_consistency(0.0, 0.9, "neighbour")
+        rep.apply_penalty(0.1, "adsb cross-validation")  # the backend's direct call
+        assert rep.reputation == 1.0
+        assert rep.penalties == []
+        assert not rep.blocked
+        assert rep.summary()["n_penalties"] == 0
+
+    def test_zero_scale_still_rewards(self):
+        set_penalty_scale(0.0)
+        rep = NodeReputation(node_id="recovering", reputation=0.5)
+        rep.evaluate_trust(0.9)
+        assert rep.reputation > 0.5
+
+    def test_half_scale_halves_the_recorded_amount(self):
+        set_penalty_scale(0.5)
+        rep = NodeReputation(node_id="half")
+        rep.apply_penalty(0.2, "test")
+        assert abs(rep.reputation - 0.9) < 1e-9
+        assert len(rep.penalties) == 1
+        assert abs(rep.penalties[0]["amount"] - 0.1) < 1e-9
+        assert rep.penalties[0]["base_amount"] == 0.2
+
+    def test_set_penalty_scale_rejects_negative_and_nan(self):
+        for bad in (-0.1, float("nan"), float("inf"), "x"):
+            with pytest.raises(ValueError):
+                set_penalty_scale(bad)
+        assert NodeReputation.penalty_scale == 1.0  # unchanged by the rejections
+
+    def test_summary_reports_the_scale(self):
+        set_penalty_scale(0.0)
+        assert NodeReputation(node_id="n").summary()["penalty_scale"] == 0.0
+
+    def test_scale_is_not_a_dataclass_field(self):
+        # The backend snapshots reputations with asdict() and restores them
+        # with NodeReputation(**saved): a field would freeze the stance into
+        # saved state and break older snapshots on load.
+        set_penalty_scale(0.0)
+        saved = dataclasses.asdict(NodeReputation(node_id="n"))
+        assert "penalty_scale" not in saved
+        assert NodeReputation(**saved).node_id == "n"
 
 
 # ── Historical Coverage Map ──────────────────────────────────────────────────
