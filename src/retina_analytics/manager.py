@@ -24,9 +24,28 @@ from retina_analytics.empirical_coverage import (
 )
 from retina_analytics.metrics import NodeMetrics
 from retina_analytics.reputation import NodeReputation
-from retina_analytics.trust import AdsReportEntry, TrustScoreState
+from retina_analytics.trust import TRUST_MIN_SAMPLES, AdsReportEntry, TrustScoreState
 
 _RX_RELOCATE_THRESHOLD_KM = 0.05  # 50 m — above real GPS/reporting jitter
+
+# What a node's trust is worth before it has enough samples to be worth
+# anything: the same neutral prior the backend's node_bias.get_node_trust
+# applies below TRUST_MIN_SAMPLES.
+_NEUTRAL_TRUST_PRIOR = 0.5
+
+
+def _trust_for_reputation(ts: TrustScoreState | None) -> float | None:
+    """Trust score to act on, or None while the node is below the sample bar.
+
+    TrustScoreState.score is a good/total ratio, so with one sample it is
+    either 0.0 or 1.0 — a single out-of-threshold residual is a 0.0 that
+    evaluate_trust reads as "critically low" and penalises every pass until
+    the node is blocked (ndebvzgeoij5t2l, test droplet).  None means "no
+    opinion": the caller either skips, or falls back to the neutral prior.
+    """
+    if ts is None or len(ts.samples) < TRUST_MIN_SAMPLES:
+        return None
+    return ts.score
 
 
 def _resolve_fov_prior(
@@ -499,9 +518,14 @@ class NodeAnalyticsManager:
 
     def evaluate_reputations(self):
         for node_id, rep in self.reputations.items():
-            ts = self.trust_scores.get(node_id)
-            if ts and ts.samples:
-                rep.evaluate_trust(ts.score)
+            # Below TRUST_MIN_SAMPLES there is no score to act on: the neutral
+            # 0.5 prior the backend substitutes there sits between the warn
+            # threshold and the reward threshold, so it would neither penalise
+            # nor reward — skipping is equivalent, and it keeps one claim
+            # residual from starting a block.
+            trust = _trust_for_reputation(self.trust_scores.get(node_id))
+            if trust is not None:
+                rep.evaluate_trust(trust)
 
             metrics = self.metrics.get(node_id)
             if metrics:
@@ -520,15 +544,23 @@ class NodeAnalyticsManager:
                     if dist > area_a.footprint_radius_km() + area_b.footprint_radius_km():
                         continue
                     overlap = compute_delay_bin_overlap(area_a, area_b)
-                    ts_a = self.trust_scores.get(a_id)
-                    ts_b = self.trust_scores.get(b_id)
-                    if ts_a and ts_b:
-                        self.reputations[a_id].evaluate_neighbour_consistency(
-                            overlap["overlap_ratio"], ts_b.score, neighbour_id=b_id
-                        )
-                        self.reputations[b_id].evaluate_neighbour_consistency(
-                            overlap["overlap_ratio"], ts_a.score, neighbour_id=a_id
-                        )
+                    # "Disagrees with a TRUSTED neighbour" is only evidence if
+                    # the neighbour is actually established: below the sample
+                    # bar it gets the neutral prior, which is under the 0.7
+                    # trusted threshold, so a one-sample neighbour can no
+                    # longer condemn anyone.
+                    trust_a = _trust_for_reputation(self.trust_scores.get(a_id))
+                    trust_b = _trust_for_reputation(self.trust_scores.get(b_id))
+                    self.reputations[a_id].evaluate_neighbour_consistency(
+                        overlap["overlap_ratio"],
+                        _NEUTRAL_TRUST_PRIOR if trust_b is None else trust_b,
+                        neighbour_id=b_id,
+                    )
+                    self.reputations[b_id].evaluate_neighbour_consistency(
+                        overlap["overlap_ratio"],
+                        _NEUTRAL_TRUST_PRIOR if trust_a is None else trust_a,
+                        neighbour_id=a_id,
+                    )
 
     def unblock_node(self, node_id: str):
         rep = self.reputations.get(node_id)

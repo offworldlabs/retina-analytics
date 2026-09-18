@@ -13,7 +13,7 @@ from retina_analytics.cross_node import compute_delay_bin_overlap, coverage_sugg
 from retina_analytics.detection_area import DetectionAreaState
 from retina_analytics.manager import NodeAnalyticsManager
 from retina_analytics.metrics import NodeMetrics
-from retina_analytics.reputation import NodeReputation
+from retina_analytics.reputation import NodeReputation, set_penalty_scale
 from retina_analytics.trust import AdsReportEntry, TrustScoreState
 
 __all__ = [
@@ -23,6 +23,7 @@ __all__ = [
     "DetectionAreaState",
     "NodeMetrics",
     "NodeReputation",
+    "set_penalty_scale",
     "HistoricalCoverageMap",
     "CoverageMapEntry",
     "InterNodeAssociator",
