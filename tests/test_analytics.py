@@ -336,6 +336,39 @@ class TestNodeAnalyticsManager:
         assert "reputation" in s
         assert "coverage_map" in s
 
+    def _bad_sample(self, ts_ms):
+        # predicted 0 vs measured 10 µs — way outside delay_threshold_us.
+        return AdsReportEntry(
+            timestamp_ms=ts_ms,
+            predicted_delay=0.0,
+            predicted_doppler=0.0,
+            measured_delay=10.0,
+            measured_doppler=0.0,
+            adsb_hex="abc123",
+            adsb_lat=34.0,
+            adsb_lon=-84.5,
+        )
+
+    def test_one_bad_sample_never_penalises(self, mgr):
+        # The ndebvzgeoij5t2l regression: one residual makes score 0.0, and
+        # before TRUST_MIN_SAMPLES that ran the node into a block in six
+        # minutes of 60 s passes.  Penalties are on (fixture pins scale 1.0).
+        mgr.record_adsb_correlation("node-A", self._bad_sample(1000))
+        for _ in range(20):
+            mgr.evaluate_reputations()
+        rep = mgr.reputations["node-A"]
+        assert rep.reputation == 1.0
+        assert rep.penalties == []
+        assert not rep.blocked
+
+    def test_three_bad_samples_do_penalise(self, mgr):
+        for i in range(3):
+            mgr.record_adsb_correlation("node-A", self._bad_sample(1000 + i))
+        mgr.evaluate_reputations()
+        rep = mgr.reputations["node-A"]
+        assert rep.reputation < 1.0
+        assert rep.penalties
+
     def test_evaluate_reputations(self, mgr):
         mgr.evaluate_reputations()
         # More than "does not raise": every registered node must still hold a

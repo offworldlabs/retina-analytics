@@ -3,6 +3,15 @@
 import math
 from dataclasses import dataclass, field
 
+# Minimum samples before TrustScoreState.score means anything.  Below it the
+# score quantizes to {0, 1/2, 1} — one unlucky residual reads as a flat 0.0,
+# which is indistinguishable from a node that is lying about every aircraft.
+# The retina-server backend's node_bias.get_node_trust already substitutes a
+# neutral 0.5 prior below this bar for solver weighting, and imports this
+# constant rather than keeping its own copy, so the two consumers of the same
+# score cannot drift apart again.
+TRUST_MIN_SAMPLES = 3
+
 
 @dataclass
 class AdsReportEntry:
