@@ -375,6 +375,25 @@ class TestNodeAnalyticsManager:
         # live reputation object after a pass.
         assert all(nid in mgr.reputations for nid in mgr.trust_scores)
 
+    def test_trust_is_scanned_once_per_node_per_pass_and_refreshed_next_pass(self, mgr, monkeypatch):
+        calls = []
+        score = TrustScoreState.score.fget
+
+        def counted_score(state):
+            calls.append(state.node_id)
+            return score(state)
+
+        monkeypatch.setattr(TrustScoreState, "score", property(counted_score))
+        for nid in ("node-A", "node-B"):
+            mgr.record_detection_frame(nid, {"delay": [50], "doppler": [20], "snr": [15]})
+            for i in range(3):
+                mgr.record_adsb_correlation(nid, self._bad_sample(i))
+        mgr.evaluate_reputations()
+        assert sorted(calls) == ["node-A", "node-B"]
+        calls.clear()
+        mgr.evaluate_reputations()
+        assert sorted(calls) == ["node-A", "node-B"]
+
     def test_cross_node_analysis(self, mgr):
         cross = mgr.get_cross_node_analysis()
         assert "blocked_nodes" in cross
