@@ -621,6 +621,7 @@ class NodeAnalyticsManager:
             result["empirical_coverage"] = {
                 "n_points": ec.n_points,
                 "n_filled_bins": ec.n_filled_bins,
+                "last_detection_ts": ec.last_detection_ts,
                 "polygon": (ec.declared_wedge_polygon() if declared else ec.to_polygon(**poly_kwargs)),
                 "polygon_source": ("declared" if declared else ("learned" if fov_mode_active else "evidence")),
             }

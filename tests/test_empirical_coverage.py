@@ -269,6 +269,15 @@ class TestEvidenceOnlyPolygon:
     def _is_apex(self, cov, vertex):
         return vertex == [round(cov.rx_lat, 5), round(cov.rx_lon, 5)]
 
+    def test_display_keeps_evidence_admitted_beyond_twice_the_configured_radius(self):
+        cov = EmpiricalCoverageState(RX_LAT, RX_LON, max_range_km=10.0)
+        self._fill(cov, range(N_BINS), range_km=30.0)
+        poly = cov.to_polygon(evidence_only=True)
+        assert poly is not None
+        for lat, lon in poly[:-1]:
+            _, distance = _bearing_and_range(RX_LAT, RX_LON, lat, lon)
+            assert 29.5 < distance < 30.5  # was silently clipped to 20 km
+
     def test_full_coverage_is_a_ring_with_no_apex(self):
         cov = EmpiricalCoverageState(RX_LAT, RX_LON)
         self._fill(cov, range(N_BINS), n_points=FOV_OPEN_MIN_POINTS)

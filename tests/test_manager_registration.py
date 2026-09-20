@@ -23,6 +23,25 @@ def test_manager_honors_explicit_aim():
     assert m.detection_areas["N"].beam_azimuth_deg == 123.0
 
 
+def test_coverage_freshness_advances_when_retained_point_count_is_full():
+    from retina_analytics.empirical_coverage import EmpiricalCoverageState
+
+    m = NodeAnalyticsManager()
+    m.register_node("N", dict(_CFG))
+    assert m.get_node_summary("N")["empirical_coverage"]["last_detection_ts"] is None
+    for ts in range(1, 202):
+        m.record_calibration_point("N", _RX_LAT + 0.1, _RX_LON, ts=float(ts))
+    summary = m.get_node_summary("N")["empirical_coverage"]
+    assert summary["n_points"] == 200
+    assert summary["last_detection_ts"] == 201.0
+    ec = m.empirical_coverages["N"]
+    restored = EmpiricalCoverageState.from_dict(ec.to_dict())
+    assert restored.last_detection_ts == 201.0
+    # An implausibly distant sample cannot make a stalled recorder look fresh.
+    restored.add_point(_RX_LAT + 10, _RX_LON, ts=202.0)
+    assert restored.last_detection_ts == 201.0
+
+
 def test_manager_defaults_to_broadside_when_unaimed():
     m = NodeAnalyticsManager()
     m.register_node("N", dict(_CFG))
