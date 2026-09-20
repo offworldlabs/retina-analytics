@@ -464,7 +464,7 @@ class NodeAnalyticsManager:
         rep = self.reputations.get(node_id)
         return rep.blocked if rep else False
 
-    def record_calibration_point(self, node_id: str, lat: float, lon: float, ts: float | None = None) -> None:
+    def record_calibration_point(self, node_id: str, lat: float, lon: float, ts: float | None = None) -> bool:
         """Record a detection at an independently-known target position.
 
         ADS-B only.  Callers used to pass solver output here, which made the
@@ -480,7 +480,8 @@ class NodeAnalyticsManager:
         """
         ec = self.empirical_coverages.get(node_id)
         if ec is not None:
-            ec.add_point(lat, lon, ts=ts)
+            return ec.add_point(lat, lon, ts=ts)
+        return False
 
     def record_detection_frame(self, node_id: str, frame: dict):
         if self.is_node_blocked(node_id):
@@ -517,13 +518,19 @@ class NodeAnalyticsManager:
             m.record_tracks(confirmed_ids, geolocated_ids)
 
     def evaluate_reputations(self):
-        for node_id, rep in self.reputations.items():
+        reputations = dict(self.reputations)
+        # A trust score scans up to 500 residuals. Recomputing it for every
+        # overlapping neighbour turns one pass into O(nodes² * samples).
+        # Use one per-node snapshot throughout this pass; the next pass sees
+        # new samples and threshold changes without a persistent cache.
+        trust_by_node = {node_id: _trust_for_reputation(self.trust_scores.get(node_id)) for node_id in reputations}
+        for node_id, rep in reputations.items():
             # Below TRUST_MIN_SAMPLES there is no score to act on: the neutral
             # 0.5 prior the backend substitutes there sits between the warn
             # threshold and the reward threshold, so it would neither penalise
             # nor reward — skipping is equivalent, and it keeps one claim
             # residual from starting a block.
-            trust = _trust_for_reputation(self.trust_scores.get(node_id))
+            trust = trust_by_node[node_id]
             if trust is not None:
                 rep.evaluate_trust(trust)
 
@@ -532,7 +539,7 @@ class NodeAnalyticsManager:
                 rep.evaluate_heartbeat(metrics.last_heartbeat)
                 rep.evaluate_detection_rate(metrics.avg_detections_per_frame)
 
-        node_ids = sorted(self.reputations.keys())
+        node_ids = sorted(reputations)
         for i, a_id in enumerate(node_ids):
             for b_id in node_ids[i + 1 :]:
                 area_a = self.detection_areas.get(a_id)
@@ -549,14 +556,14 @@ class NodeAnalyticsManager:
                     # bar it gets the neutral prior, which is under the 0.7
                     # trusted threshold, so a one-sample neighbour can no
                     # longer condemn anyone.
-                    trust_a = _trust_for_reputation(self.trust_scores.get(a_id))
-                    trust_b = _trust_for_reputation(self.trust_scores.get(b_id))
-                    self.reputations[a_id].evaluate_neighbour_consistency(
+                    trust_a = trust_by_node[a_id]
+                    trust_b = trust_by_node[b_id]
+                    reputations[a_id].evaluate_neighbour_consistency(
                         overlap["overlap_ratio"],
                         _NEUTRAL_TRUST_PRIOR if trust_b is None else trust_b,
                         neighbour_id=b_id,
                     )
-                    self.reputations[b_id].evaluate_neighbour_consistency(
+                    reputations[b_id].evaluate_neighbour_consistency(
                         overlap["overlap_ratio"],
                         _NEUTRAL_TRUST_PRIOR if trust_a is None else trust_a,
                         neighbour_id=a_id,
@@ -615,6 +622,7 @@ class NodeAnalyticsManager:
             result["empirical_coverage"] = {
                 "n_points": ec.n_points,
                 "n_filled_bins": ec.n_filled_bins,
+                "last_detection_ts": ec.last_detection_ts,
                 "polygon": (ec.declared_wedge_polygon() if declared else ec.to_polygon(**poly_kwargs)),
                 "polygon_source": ("declared" if declared else ("learned" if fov_mode_active else "evidence")),
             }

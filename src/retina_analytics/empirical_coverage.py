@@ -1,7 +1,7 @@
 """Empirical detection-area characterisation built from known-position calibration points.
 
 Instead of assuming a fixed Yagi-like antenna lobe, this module accumulates
-ground-truth target positions (from ADS-B or multinode-solver solutions) that a
+independent target positions (from detection-backed ADS-B references) that a
 node has positively detected, then derives a smoothed coverage polygon that
 reflects the node's *actual* detection area as observed over time.
 
@@ -16,6 +16,11 @@ Algorithm
    (30 %) applied for estimated coverage that we haven't actually seen yet.
 4. A circular rolling average (window = 3 bins) smooths the resulting vector.
 5. Polygon vertices are computed at each bin centre and returned as [[lat, lon]].
+
+This is a typical observed footprint, not the outer envelope of every accepted
+detection and not a hard limit on detectability. Per-bin histories retain only
+200 points, so a flat n_points does not imply that recording has stopped;
+last_detection_ts reports the newest accepted evidence independently.
 
 The polygon is only returned once at least MIN_POINTS calibration points have
 been recorded; below that there is no published detection area at all.  The map
@@ -362,7 +367,7 @@ class EmpiricalCoverageState:
         """
         return self.range_clamp_mult if self.max_bistatic_range_km else FOV_CLAMP_MULT_MONOSTATIC
 
-    def add_point(self, lat: float, lon: float, ts: float | None = None) -> None:
+    def add_point(self, lat: float, lon: float, ts: float | None = None) -> bool:
         """Record one calibration point (known target position).
 
         ts defaults to wall-clock time; the learned-FOV shrink logic
@@ -375,9 +380,9 @@ class EmpiricalCoverageState:
         """
         bearing, range_km = _bearing_and_range(self.rx_lat, self.rx_lon, lat, lon)
         if range_km < 0.5:
-            return  # too close — not informative
+            return False  # too close — not informative
         if range_km > self._reach_at(bearing) * self._admit_mult():
-            return  # implausibly far — mis-attributed detection
+            return False  # implausibly far — mis-attributed detection
         i = _bin_for_bearing(bearing)
         t = ts if ts is not None else time.time()
         b = self._bins[i]
@@ -393,6 +398,7 @@ class EmpiricalCoverageState:
         # observed_limit_km's neighbour widening); clearing all N is simpler
         # and costs nothing measurable against the _p85 it saves.
         self._observed_limit_cache = [_UNSET] * N_BINS
+        return True
 
     def record_disappearance(self, lat: float, lon: float, ts: float | None = None) -> bool:
         """Record one negative-evidence event: a target predicted detectable at
@@ -425,6 +431,11 @@ class EmpiricalCoverageState:
     @property
     def n_points(self) -> int:
         return sum(len(b) for b in self._bins)
+
+    @property
+    def last_detection_ts(self) -> float | None:
+        """Newest accepted evidence time, even when the bounded counts are full."""
+        return max((ts for ts in self._bin_last_pos_ts if math.isfinite(ts) and ts > 0), default=None)
 
     @property
     def n_filled_bins(self) -> int:
@@ -840,7 +851,10 @@ class EmpiricalCoverageState:
                 ranges.append(0.0)
                 continue
             bearing_i = (i + 0.5) * _DEG_PER_BIN
-            ranges.append(min(_p85(b), self._reach_at(bearing_i) * self.range_clamp_mult))
+            # Match the recorder's admissible range. A configured monostatic
+            # radius is only a guess: add_point admits evidence up to 4x it,
+            # so a separate 2x display clamp silently hides accepted evidence.
+            ranges.append(min(_p85(b), self._reach_at(bearing_i) * self._admit_mult()))
 
         if not any(r > 0.0 for r in ranges):
             return None
