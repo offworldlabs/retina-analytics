@@ -464,7 +464,7 @@ class NodeAnalyticsManager:
         rep = self.reputations.get(node_id)
         return rep.blocked if rep else False
 
-    def record_calibration_point(self, node_id: str, lat: float, lon: float, ts: float | None = None) -> None:
+    def record_calibration_point(self, node_id: str, lat: float, lon: float, ts: float | None = None) -> bool:
         """Record a detection at an independently-known target position.
 
         ADS-B only.  Callers used to pass solver output here, which made the
@@ -480,7 +480,8 @@ class NodeAnalyticsManager:
         """
         ec = self.empirical_coverages.get(node_id)
         if ec is not None:
-            ec.add_point(lat, lon, ts=ts)
+            return ec.add_point(lat, lon, ts=ts)
+        return False
 
     def record_detection_frame(self, node_id: str, frame: dict):
         if self.is_node_blocked(node_id):

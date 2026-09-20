@@ -367,7 +367,7 @@ class EmpiricalCoverageState:
         """
         return self.range_clamp_mult if self.max_bistatic_range_km else FOV_CLAMP_MULT_MONOSTATIC
 
-    def add_point(self, lat: float, lon: float, ts: float | None = None) -> None:
+    def add_point(self, lat: float, lon: float, ts: float | None = None) -> bool:
         """Record one calibration point (known target position).
 
         ts defaults to wall-clock time; the learned-FOV shrink logic
@@ -380,9 +380,9 @@ class EmpiricalCoverageState:
         """
         bearing, range_km = _bearing_and_range(self.rx_lat, self.rx_lon, lat, lon)
         if range_km < 0.5:
-            return  # too close — not informative
+            return False  # too close — not informative
         if range_km > self._reach_at(bearing) * self._admit_mult():
-            return  # implausibly far — mis-attributed detection
+            return False  # implausibly far — mis-attributed detection
         i = _bin_for_bearing(bearing)
         t = ts if ts is not None else time.time()
         b = self._bins[i]
@@ -398,6 +398,7 @@ class EmpiricalCoverageState:
         # observed_limit_km's neighbour widening); clearing all N is simpler
         # and costs nothing measurable against the _p85 it saves.
         self._observed_limit_cache = [_UNSET] * N_BINS
+        return True
 
     def record_disappearance(self, lat: float, lon: float, ts: float | None = None) -> bool:
         """Record one negative-evidence event: a target predicted detectable at
