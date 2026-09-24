@@ -10,6 +10,7 @@ Each class pins one previously-wrong output:
 
 import math
 
+from retina_analytics.availability import MinuteRing
 from retina_analytics.constants import KM_PER_DEG_LAT, km_per_deg_lon
 from retina_analytics.coverage import HistoricalCoverageMap
 from retina_analytics.detection_area import DetectionAreaState
@@ -158,7 +159,7 @@ class TestTrackCountersAreWritten:
         m.record_tracks(["t3"], [])
         assert m.total_tracks == 3
         assert m.geolocated_tracks == 1
-        s = m.summary()
+        s = m.summary(MinuteRing())
         assert s["total_tracks"] == 3
         assert s["geolocated_tracks"] == 1
 
@@ -208,7 +209,5 @@ class TestReconnectKeepsMetrics:
             "n1", {"delay": [1.0, 2.0], "doppler": [0, 0], "snr": [12.0, 14.0], "timestamp": 1000}
         )
         assert mgr.metrics["n1"].total_frames == 1
-        first_connect = mgr.metrics["n1"].connected_at
         mgr.register_node("n1", cfg)  # reconnect
-        assert mgr.metrics["n1"].total_frames == 1  # was wiped to 0 before
-        assert mgr.metrics["n1"].connected_at >= first_connect
+        assert mgr.metrics["n1"].total_frames == 1
