@@ -5,6 +5,7 @@ import os
 import threading
 import time
 
+from retina_analytics.availability import MinuteRing, minute_of
 from retina_analytics.constants import (
     YAGI_BEAM_WIDTH_DEG,
     YAGI_MAX_RANGE_KM,
@@ -91,6 +92,9 @@ class NodeAnalyticsManager:
         self.reputations: dict[str, NodeReputation] = {}
         self.coverage_maps: dict[str, HistoricalCoverageMap] = {}
         self.empirical_coverages: dict[str, EmpiricalCoverageState] = {}
+        # The minutes this server was up to receive frames: the denominator of
+        # every node's availability.  Marked by the caller (mark_server_up).
+        self.server_minutes = MinuteRing()
         # Nodes whose DECLARED geometry is ground truth rather than a config
         # guess — synthetic/simulator nodes, whose detection cone is what the
         # simulator enforces.  Set per registration by the backend (see
@@ -128,6 +132,7 @@ class NodeAnalyticsManager:
             ):
                 store.clear()
             self._declared_truth.clear()
+            self.server_minutes = MinuteRing()
             self._cross_node_cache = None
             self._cross_node_cache_ts = 0.0
             self._summaries_cache = None
@@ -176,19 +181,12 @@ class NodeAnalyticsManager:
             self.trust_scores[node_id] = TrustScoreState(node_id=node_id)
             added_to_summary = True
 
-        # Preserve accumulated metrics across reconnects.  Every other
-        # per-node store here is conditional, but this one was replaced
-        # unconditionally — a reconnect wiped total_frames / SNR / gap
-        # history and then fed reputation a fresh 0.0 detection rate.
-        existing_metrics = self.metrics.get(node_id)
-        if existing_metrics is None:
-            self.metrics[node_id] = NodeMetrics(
-                node_id=node_id,
-                connected_at=time.time(),
-            )
+        # Kept across reconnects like every store here: replacing it would
+        # restart the node's availability and counts, and feed reputation a
+        # fresh 0.0 detection rate.
+        if node_id not in self.metrics:
+            self.metrics[node_id] = NodeMetrics(node_id=node_id)
             added_to_summary = True
-        else:
-            existing_metrics.connected_at = time.time()
 
         if node_id not in self.reputations:
             self.reputations[node_id] = NodeReputation(node_id=node_id)
@@ -484,6 +482,10 @@ class NodeAnalyticsManager:
 
     def record_detection_frame(self, node_id: str, frame: dict):
         if self.is_node_blocked(node_id):
+            # Availability is whether the node delivers; whether it is
+            # believed is reputation's to say, so the frame still counts there.
+            if node_id in self.metrics:
+                self.metrics[node_id].record_delivery()
             return False
         if node_id in self.detection_areas:
             self.detection_areas[node_id].update_from_frame(frame)
@@ -505,6 +507,10 @@ class NodeAnalyticsManager:
                 snr=0.0,
                 delay_error=delay_err,
             )
+
+    def mark_server_up(self, now: float | None = None) -> None:
+        """Count this minute as one in which nodes could deliver frames."""
+        self.server_minutes.mark(minute_of(time.time() if now is None else now))
 
     def record_heartbeat(self, node_id: str):
         if node_id in self.metrics:
@@ -574,7 +580,7 @@ class NodeAnalyticsManager:
         if node_id in self.detection_areas:
             result["detection_area"] = self.detection_areas[node_id].summary()
         if node_id in self.metrics:
-            result["metrics"] = self.metrics[node_id].summary()
+            result["metrics"] = self.metrics[node_id].summary(self.server_minutes)
         if node_id in self.reputations:
             result["reputation"] = self.reputations[node_id].summary()
         if node_id in self.coverage_maps:

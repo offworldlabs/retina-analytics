@@ -16,6 +16,7 @@ from retina_analytics import (
     NodeReputation,
     TrustScoreState,
 )
+from retina_analytics.availability import MinuteRing
 from retina_analytics.cross_node import coverage_suggestion
 from retina_analytics.reputation import set_penalty_scale
 
@@ -420,7 +421,7 @@ class TestTrackQuality:
         metrics = NodeMetrics(node_id="gap-test")
         for t in [1000, 2000, 3000]:
             metrics.record_frame({"delay": [1.0], "doppler": [1.0], "snr": [5.0], "timestamp": t})
-        s = metrics.summary()
+        s = metrics.summary(MinuteRing())
         assert "track_quality" in s
         assert "gap_count" in s["track_quality"]
 

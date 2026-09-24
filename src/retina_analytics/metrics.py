@@ -1,15 +1,31 @@
-"""Per-node uptime, SNR, and track quality metrics."""
+"""Per-node availability, SNR, and track quality metrics."""
 
+import math
 import time
 from dataclasses import dataclass, field
+
+from retina_analytics.availability import DAY_MINUTES, MinuteRing, minute_of, share
+
+# What a restart carries over (see to_state).  The last heartbeat is not among
+# them: restored, it would read as stale until the node next beat.
+_PERSISTED_COUNTS = (
+    "total_frames",
+    "total_detections",
+    "total_tracks",
+    "geolocated_tracks",
+    "_snr_sum",
+    "_snr_count",
+    "_snr_max",
+)
 
 
 @dataclass
 class NodeMetrics:
-    """Uptime / SNR / track quality metrics for one node."""
+    """Availability / SNR / track quality metrics for one node."""
 
     node_id: str
-    connected_at: float = 0.0
+    # Where its availability is measured from.  Kept across re-registration.
+    first_seen: float = field(default_factory=lambda: time.time())
     last_heartbeat: float = 0.0
     total_frames: int = 0
     total_detections: int = 0
@@ -29,6 +45,8 @@ class NodeMetrics:
     _seen_track_ids: set = field(default_factory=set)
     _seen_geo_ids: set = field(default_factory=set)
     _MAX_SEEN_IDS: int = 4096
+    # The minutes of the trailing week in which it delivered a frame.
+    _minutes: MinuteRing = field(default_factory=MinuteRing)
 
     def record_tracks(self, confirmed_ids, geolocated_ids=()):
         """Count distinct confirmed / geolocated track ids.
@@ -50,7 +68,12 @@ class NodeMetrics:
         if len(self._seen_geo_ids) > self._MAX_SEEN_IDS:
             self._seen_geo_ids.clear()
 
-    def record_frame(self, frame: dict):
+    def record_delivery(self, now: float | None = None):
+        """Count the minute as one in which the node delivered."""
+        self._minutes.mark(minute_of(time.time() if now is None else now))
+
+    def record_frame(self, frame: dict, now: float | None = None):
+        self.record_delivery(now)
         self.total_frames += 1
         delays = frame.get("delay", [])
         self.total_detections += len(delays)
@@ -67,12 +90,6 @@ class NodeMetrics:
 
     def record_heartbeat(self):
         self.last_heartbeat = time.time()
-
-    @property
-    def uptime_s(self) -> float:
-        if self.connected_at == 0:
-            return 0.0
-        return time.time() - self.connected_at
 
     @property
     def avg_snr(self) -> float:
@@ -104,10 +121,45 @@ class NodeMetrics:
             "continuity_ratio": round(good_intervals / total_intervals, 4) if total_intervals else 1.0,
         }
 
-    def summary(self) -> dict:
+    def availability(self, up: MinuteRing, now: float | None = None) -> dict:
+        """The share of the minutes the server was `up` in which this node
+        delivered a frame, over the trailing week and the trailing day.
+
+        Counted from the first whole minute after first_seen to the last whole
+        minute before now, so neither a partial first minute nor the minute
+        in progress counts against it.  None until one such minute has passed.
+        """
+        start = math.ceil(self.first_seen / 60)
+        last = minute_of(time.time() if now is None else now) - 1
+        seen_week, up_week = share(self._minutes, up, start, last)
+        seen_day, up_day = share(self._minutes, up, max(start, last - DAY_MINUTES + 1), last)
+        return {
+            "availability_7d": round(seen_week / up_week, 4) if up_week else None,
+            "availability_24h": round(seen_day / up_day, 4) if up_day else None,
+            "availability_measured_s": up_week * 60,
+        }
+
+    def to_state(self) -> dict:
         return {
             "node_id": self.node_id,
-            "uptime_s": round(self.uptime_s, 1),
+            "first_seen": self.first_seen,
+            **{name: getattr(self, name) for name in _PERSISTED_COUNTS},
+            "minutes": self._minutes.to_state(),
+        }
+
+    @classmethod
+    def from_state(cls, state: dict) -> "NodeMetrics":
+        metrics = cls(node_id=state["node_id"], first_seen=state["first_seen"])
+        # A count saved before it was persisted starts from zero.
+        for name in _PERSISTED_COUNTS:
+            setattr(metrics, name, state.get(name, getattr(metrics, name)))
+        metrics._minutes = MinuteRing.from_state(state["minutes"])
+        return metrics
+
+    def summary(self, up: MinuteRing, now: float | None = None) -> dict:
+        return {
+            "node_id": self.node_id,
+            **self.availability(up, now),
             "total_frames": self.total_frames,
             "total_detections": self.total_detections,
             "avg_detections_per_frame": round(self.avg_detections_per_frame, 2),
