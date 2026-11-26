@@ -277,8 +277,8 @@ class TestNodeAnalyticsManager:
         m.register_node(
             "node-A",
             {
-                "rx_lat": 33.939,
-                "rx_lon": -84.651,
+                "rx_lat": 33.9,
+                "rx_lon": -84.6,
                 "tx_lat": 33.756,
                 "tx_lon": -84.331,
                 "fc_hz": 195e6,
@@ -434,7 +434,7 @@ class TestCoverageSuggestion:
     def areas(self):
         return [
             DetectionAreaState(
-                node_id="cs-A", rx_lat=33.939, rx_lon=-84.651, beam_azimuth_deg=135, beam_width_deg=41, max_range_km=50
+                node_id="cs-A", rx_lat=33.9, rx_lon=-84.6, beam_azimuth_deg=135, beam_width_deg=41, max_range_km=50
             ),
             DetectionAreaState(
                 node_id="cs-B", rx_lat=34.05, rx_lon=-84.4, beam_azimuth_deg=210, beam_width_deg=41, max_range_km=50

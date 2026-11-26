@@ -23,8 +23,8 @@ class TestOverlapZone:
     def test_overlap_zone_ids(self):
         geo_a = NodeGeometry(
             node_id="assoc-A",
-            rx_lat=33.939,
-            rx_lon=-84.651,
+            rx_lat=33.9,
+            rx_lon=-84.6,
             rx_alt_km=0.29,
             tx_lat=33.756,
             tx_lon=-84.331,
@@ -67,8 +67,8 @@ class TestInterNodeAssociator:
         assoc.register_node(
             "assoc-A",
             {
-                "rx_lat": 33.939,
-                "rx_lon": -84.651,
+                "rx_lat": 33.9,
+                "rx_lon": -84.6,
                 "rx_alt_ft": 950,
                 "tx_lat": 33.756,
                 "tx_lon": -84.331,
@@ -114,8 +114,8 @@ class TestInterNodeAssociator:
         does not skip it on that basis alone."""
         assoc = self._make_assoc()
         moved = {
-            "rx_lat": 33.939 + 0.09,  # ~10 km north: fails the unchanged-geometry shortcut
-            "rx_lon": -84.651,
+            "rx_lat": 33.9 + 0.09,  # ~10 km north: fails the unchanged-geometry shortcut
+            "rx_lon": -84.6,
             "rx_alt_ft": 950,
             "tx_lat": 33.756,
             "tx_lon": -84.331,
@@ -160,8 +160,8 @@ class TestInterNodeAssociator:
 
 
 _SCALING_CFG = {
-    "rx_lat": 33.939,
-    "rx_lon": -84.651,
+    "rx_lat": 33.9,
+    "rx_lon": -84.6,
     "rx_alt_ft": 950,
     "tx_lat": 33.756,
     "tx_lon": -84.331,
@@ -353,8 +353,8 @@ class TestOverlapGridCost:
     def _pair(self):
         geo_a = NodeGeometry(
             node_id="cost-A",
-            rx_lat=33.939,
-            rx_lon=-84.651,
+            rx_lat=33.9,
+            rx_lon=-84.6,
             rx_alt_km=0.29,
             tx_lat=33.756,
             tx_lon=-84.331,
@@ -474,8 +474,8 @@ class TestOverlapGridCost:
 def _hot_path_geo(**over) -> NodeGeometry:
     base = dict(
         node_id="memo-A",
-        rx_lat=33.939,
-        rx_lon=-84.651,
+        rx_lat=33.9,
+        rx_lon=-84.6,
         rx_alt_km=0.29,
         tx_lat=33.756,
         tx_lon=-84.331,
